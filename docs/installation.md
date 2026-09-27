@@ -2,23 +2,150 @@
 
 [Back to README](../README.md) · [Configuration](configuration.md)
 
-Install FreeCAD and [uv / uvx](https://docs.astral.sh/uv/guides/tools/) before
-setting up the addon and MCP client. The MCP server requires Python 3.12 or later.
+FreeCAD MCP has two parts:
 
-The two components use separate Python environments. The addon runs inside
-FreeCAD with its bundled Python (which can be Python 3.11); the external MCP
-server runs with Python 3.12 or later, supplied by `uv` or a separate installation.
-Do not install the `freecad-mcp` package into FreeCAD's bundled Python.
+- the **MCP server**, a single self-contained `freecad-mcp` binary that your AI
+  client starts. It has no runtime dependencies: no Python, uv or pip.
+- the **FreeCAD addon**, which runs inside FreeCAD on FreeCAD's own bundled
+  Python and serves the XML-RPC API the server calls. The binary embeds the
+  addon and installs it, so the two always match.
 
-## Install the addon
+## One-line install
 
-```bash
-git clone https://github.com/neka-nat/freecad-mcp.git
-cd freecad-mcp
+Install [FreeCAD](https://www.freecad.org/downloads.php) first, then run:
+
+Windows (PowerShell):
+
+```powershell
+irm https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.ps1 | iex
 ```
 
-Copy the `addon/FreeCADMCP` directory into the addon directory for your FreeCAD
-installation. The resulting directory should be `Mod/FreeCADMCP`.
+macOS / Linux:
+
+```sh
+curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.sh | sh
+```
+
+The script downloads the binary for your platform, verifies it against the
+release's `SHA256SUMS.txt`, installs it into `%LOCALAPPDATA%\freecad-mcp\bin`
+(Windows) or `~/.freecad-mcp/bin` (macOS / Linux), adds that directory to your
+`PATH` and runs `freecad-mcp configure`, the setup wizard:
+
+1. **AI clients**: pick the clients to register with. Every client found on the
+   machine is listed, with the ones already configured marked.
+2. **FreeCAD RPC auth token**: skip this unless you set a token with
+   **Set Auth Token** in FreeCAD (see [configuration](configuration.md#3-require-an-auth-token)).
+3. **FreeCAD addon**: the wizard asks FreeCAD for its user data directory
+   (`FreeCAD.getUserAppDataDir()`) and installs the addon into its `Mod`
+   directory. The option to start the RPC server together with FreeCAD is on
+   by default; turn it off with space to start the server by hand instead.
+4. **Registration**: the `freecad` server is added to each selected client's
+   configuration, and the wizard tells you which clients need a restart.
+
+Restart FreeCAD and your AI client when the wizard finishes.
+
+### Unattended install
+
+`freecad-mcp install --yes` does the same without prompts: it installs the
+addon (with auto-start on) and registers every detected client that is not
+configured yet. Add `--all` to re-register configured clients, `--clients
+claude-desktop,cursor` to pick clients, `--token <token>` to store the RPC auth
+token, and `--dry-run` to see the plan without writing anything. To pass these
+through the install script:
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.ps1))) -ConfigureArgs "--yes"
+```
+
+```sh
+curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.sh | CONFIGURE_ARGS="--yes" sh
+```
+
+### Commands
+
+| Command | Purpose |
+| --- | --- |
+| `freecad-mcp` | In a terminal: an interactive menu (doctor, addon install, connection check). Started by an AI client: the MCP server. |
+| `freecad-mcp mcp` | Run the MCP server over stdio. |
+| `freecad-mcp install` / `configure` | The setup wizard (`--yes` for unattended). |
+| `freecad-mcp add` | Register the server in the current project's client configs instead of the global ones. |
+| `freecad-mcp uninstall` | Remove the server from the AI clients. |
+| `freecad-mcp install-addon` | Install or update the FreeCAD addon (`--user-data-dir <dir>`, `--no-autostart`, `--dry-run`). |
+| `freecad-mcp uninstall-addon` | Remove the addon from FreeCAD. |
+| `freecad-mcp check-connection` | Check that FreeCAD's RPC server answers and that the addon matches. |
+| `freecad-mcp login --token <token>` | Store the FreeCAD RPC auth token. |
+| `freecad-mcp doctor` | Check the binary, PATH, AI clients, FreeCAD, the addon and the RPC server. |
+| `freecad-mcp update` | Update the binary from GitHub releases, then the addon it ships. |
+
+## Start the RPC server
+
+With auto-start on, the RPC server starts when FreeCAD finishes loading. To
+start it by hand, select **MCP Addon** from the workbench list:
+
+![MCP Addon in the workbench list](../assets/workbench_list.png)
+
+and click **Start RPC Server** in the **FreeCAD MCP** toolbar:
+
+![Start RPC Server toolbar button](../assets/start_rpc_server.png)
+
+The command displays its result in the status bar and Report View. A successful
+start includes the listening address, port, and FreeCAD process ID; by default
+the address is `127.0.0.1:9875`. Startup errors include the exception, such as an
+address already in use. A failed start releases its listener so you can retry
+after correcting the cause.
+
+Examples from a Linux smoke test: [successful startup](../assets/rpc-startup-success.png)
+and [reported startup failure](../assets/rpc-startup-error.png).
+
+See [auto-start configuration](configuration.md#auto-start-rpc-server) to change
+the setting later.
+
+### Keep the addon and server in sync
+
+The binary embeds the addon, and `install`, `install-addon` and `update` install
+the matching copy, so the two normally match. If they do not, for example after
+copying an addon by hand, the next tool reply starts with a warning that says
+which side to update, `get_rpc_status` reports it under `version_check`, and
+`freecad-mcp doctor` fails its addon check. Run `freecad-mcp install-addon` and
+restart FreeCAD.
+
+## Verify the installation
+
+```sh
+freecad-mcp doctor
+```
+
+checks the binary and `PATH`, which AI clients have the server registered, the
+FreeCAD installation, the installed addon version and its auto-start setting,
+and whether the RPC server answers. With FreeCAD running,
+
+```sh
+freecad-mcp check-connection
+```
+
+pings the RPC server and compares the addon's version with the server's. If the
+port is closed, start the RPC server and check FreeCAD's Report View. If it is
+open but the check fails, check for another process using port 9875. For remote
+installations, also check the [allowed IP configuration](configuration.md#remote-connections).
+
+To inspect the listener from FreeCAD's Python console:
+
+```python
+from rpc_server import rpc_server as bridge
+print(bridge.rpc_server_instance.server_address if bridge.rpc_server_instance else "RPC server stopped")
+```
+
+After connecting, ask the client to create a new document with a small
+`Part::Box`. Confirm that the box appears in FreeCAD and that `list_documents`
+and `get_objects` return it. The addon provides CAD tools; an MCP client is
+still responsible for the conversation and the model's tool-calling loop.
+
+## Install the addon by hand
+
+The installer normally does this. To install the addon yourself, copy the
+`addon/FreeCADMCP` directory of this repository into FreeCAD's user addon
+directory, so that the result is `Mod/FreeCADMCP`, and restart FreeCAD. Do not
+install anything into FreeCAD's bundled Python.
 
 ### Addon directory
 
@@ -35,7 +162,7 @@ installation. The resulting directory should be `Mod/FreeCADMCP`.
 | Linux, Flatpak | `~/.var/app/org.freecad.FreeCAD/data/FreeCAD/v1-1/Mod/` |
 
 Paths depend on the FreeCAD version and packaging. To find the user addon
-directory for the running installation, open **View → Panels → Python console**
+directory of the running installation, open **View → Panels → Python console**
 in FreeCAD and run:
 
 ```python
@@ -43,169 +170,54 @@ import os
 print(os.path.join(FreeCAD.getUserAppDataDir(), "Mod"))
 ```
 
-On Windows, the directory must contain `FreeCADMCP\InitGui.py` directly, for
-example `%APPDATA%\FreeCAD\v1-1\Mod\FreeCADMCP\InitGui.py`. Do not copy the
-whole repository into `Mod` or add a second `FreeCADMCP` directory level. If the
-workbench is missing after restarting FreeCAD, open **View → Panels → Report view**
-and inspect addon import errors.
+`freecad-mcp install-addon --user-data-dir <dir>` installs into a directory you
+name, where `<dir>` is what `FreeCAD.getUserAppDataDir()` prints (without
+`Mod`). On Windows, the directory must contain `FreeCADMCP\InitGui.py` directly,
+for example `%APPDATA%\FreeCAD\v1-1\Mod\FreeCADMCP\InitGui.py`. If the workbench
+is missing after restarting FreeCAD, open **View → Panels → Report view** and
+inspect addon import errors.
 
-### Copy commands
+## Connect an MCP client by hand
 
-Run the commands for your installation from the cloned repository.
-
-Ubuntu:
-
-```bash
-mkdir -p ~/.FreeCAD/Mod/
-cp -r addon/FreeCADMCP ~/.FreeCAD/Mod/
-```
-
-Debian:
-
-```bash
-mkdir -p ~/.local/share/FreeCAD/Mod/
-cp -r addon/FreeCADMCP ~/.local/share/FreeCAD/Mod/
-```
-
-Arch / CachyOS, FreeCAD 1.1 from `extra/freecad`:
-
-```bash
-mkdir -p ~/.local/share/FreeCAD/v1-1/Mod/
-cp -r addon/FreeCADMCP ~/.local/share/FreeCAD/v1-1/Mod/
-```
-
-Flatpak:
-
-```bash
-mkdir -p ~/.var/app/org.freecad.FreeCAD/data/FreeCAD/v1-1/Mod/
-cp -r addon/FreeCADMCP ~/.var/app/org.freecad.FreeCAD/data/FreeCAD/v1-1/Mod/
-```
-
-macOS, FreeCAD 1.1:
-
-```bash
-mkdir -p ~/Library/Application\ Support/FreeCAD/v1-1/Mod/
-cp -r addon/FreeCADMCP ~/Library/Application\ Support/FreeCAD/v1-1/Mod/
-```
-
-## Start the RPC server
-
-Restart FreeCAD after installing the addon, then select **MCP Addon** from the
-workbench list.
-
-![MCP Addon in the workbench list](../assets/workbench_list.png)
-
-Click **Start RPC Server** in the **FreeCAD MCP** toolbar.
-
-![Start RPC Server toolbar button](../assets/start_rpc_server.png)
-
-The command displays its result in the status bar and Report View. A successful
-start includes the listening address, port, and FreeCAD process ID; by default
-the address is `127.0.0.1:9875`. Startup errors include the exception, such as an
-address already in use. A failed start releases its listener so you can retry
-after correcting the cause.
-
-Examples from a Linux smoke test: [successful startup](../assets/rpc-startup-success.png)
-and [reported startup failure](../assets/rpc-startup-error.png).
-
-The server starts manually by default. See [auto-start configuration](configuration.md#auto-start-rpc-server)
-to enable it on subsequent launches.
-
-### Keep the addon and server in sync
-
-The addon and the `freecad-mcp` package are updated separately. On first
-connection the MCP server compares its protocol version with the addon's. If the
-addon is older, newer, or predates version reporting, the next tool reply starts
-with a warning that says which side to update, and `get_rpc_status` reports it
-under `version_check`. After updating the addon, restart FreeCAD.
-
-### Verify the connection on Windows
-
-Check the listening port in PowerShell:
-
-```powershell
-Test-NetConnection -ComputerName 127.0.0.1 -Port 9875
-```
-
-A successful TCP check only shows that something is listening. To verify that
-it is the FreeCAD XML-RPC server, run this from an external Python 3.12
-installation in PowerShell or Command Prompt:
-
-```powershell
-py -3.12 -c "import socket, xmlrpc.client; socket.setdefaulttimeout(5); s = xmlrpc.client.ServerProxy('http://127.0.0.1:9875'); print(s.ping()); print(s.get_rpc_status())"
-```
-
-`ping()` should print `True`; the status result includes GUI-dispatch health.
-If the port is closed, start the addon server and check Report View. If the
-port is open but the RPC check fails, check for another process using port 9875.
-For remote installations, also check the [allowed IP configuration](configuration.md#remote-connections).
-
-To inspect the listener directly from FreeCAD's Python console:
-
-```python
-from rpc_server import rpc_server as bridge
-print(bridge.rpc_server_instance.server_address if bridge.rpc_server_instance else "RPC server stopped")
-```
-
-## Connect an MCP client
-
-Use the [Claude Desktop configuration in the quick start](../README.md#2-connect-claude-desktop)
-to run the published package with `uvx`. For remote FreeCAD installations, see
-[remote connections](configuration.md#remote-connections).
-
-### Windows client launch troubleshooting
-
-First confirm that the external server can start with `uvx freecad-mcp --help`.
-The MCP server communicates with its client over standard input/output. Port
-9875 is the addon's XML-RPC endpoint, so do not configure an HTTP/SSE MCP client
-to connect directly to that port.
-
-Some Windows clients report `EFTYPE` / `uv_spawn` when launching the Python
-entrypoint executable. A [reported workaround](https://github.com/neka-nat/freecad-mcp/issues/140)
-is to launch it through `cmd`:
-
-```json
-["cmd", "/c", "freecad-mcp"]
-```
-
-Use the absolute path to `freecad-mcp.exe` if it is not on the client's `PATH`,
-and adapt this command array to your client's configuration format. This is a
-client-specific workaround, not a requirement for all Windows clients.
-
-After connecting, ask the client to create a new document with a small
-`Part::Box`. Confirm that the box appears in FreeCAD and that `list_documents`
-and `get_objects` return it. The addon provides CAD tools; an external MCP client
-is still responsible for the conversation and model's tool-calling loop.
-
-### Run from source
-
-For development, install the pinned environment and check the CLI from the cloned
-repository:
-
-```bash
-uv sync
-uv run freecad-mcp --help
-```
-
-Configure Claude Desktop to use your checkout. Replace `/path/to/freecad-mcp/`
-with its absolute path:
+The wizard registers the server for you. For a client it does not know, add an
+entry that runs the binary with the `mcp` argument, using its absolute path if
+the client does not see your `PATH`:
 
 ```json
 {
   "mcpServers": {
     "freecad": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "/path/to/freecad-mcp/",
-        "run",
-        "freecad-mcp"
-      ]
+      "command": "freecad-mcp",
+      "args": ["mcp"]
     }
   }
 }
 ```
 
-Restart Claude Desktop after changing its configuration. When changing addon
-code, copy the updated `addon/FreeCADMCP` directory into FreeCAD's addon directory
-and restart FreeCAD as well.
+The MCP server talks to its client over standard input/output. Port 9875 is the
+addon's XML-RPC endpoint, so do not configure an HTTP/SSE MCP client to connect
+directly to that port. To serve MCP over Streamable HTTP instead, set
+`TRANSPORT=http` and `ADDR=host:port`.
+
+## Run from source
+
+Development needs [Go](https://go.dev/dl/) (see `go.mod` for the version). From
+the cloned repository:
+
+```sh
+go vet ./... && go test ./...
+go run . doctor
+go build -o freecad-mcp .     # freecad-mcp.exe on Windows
+```
+
+`go build` embeds the addon from `addon/FreeCADMCP`, so `./freecad-mcp
+install-addon` installs your working copy. Register the development build with
+your clients with `./freecad-mcp install`, which records the binary's absolute
+path. The addon's own tests are Python:
+
+```sh
+python -m pip install pytest
+python -m pytest tests
+```
+
+Releases are built by GoReleaser when a `v*` tag is pushed.

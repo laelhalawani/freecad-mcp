@@ -29,10 +29,10 @@ Demo:
 | Example | Description |
 | --- | --- |
 | [Cantilever FEM analysis](../examples/cantilever_fem.py) | Build a cantilever, run CalculiX, and compare the results with an analytical solution. |
-| [Google ADK agent](../examples/adk/agent.py) | Connect an ADK agent to the MCP server using a local checkout. |
+| [Google ADK agent](../examples/adk/agent.py) | Connect an ADK agent to the installed `freecad-mcp` binary. |
 | [LangChain / LangGraph agent](../examples/langchain/react.py) | Run an interactive CAD agent using MCP tools and a Groq model. |
 
 The agent examples use optional third-party dependencies and provider
-configuration. Adjust the repository path and model settings in each example
-before running it; the LangChain example also expects `GROQ_API_KEY` in the
-environment.
+configuration. Install `freecad-mcp` first (see the [README](../README.md#quick-start))
+and adjust the model settings in each example before running it; the LangChain
+example also expects `GROQ_API_KEY` in the environment.

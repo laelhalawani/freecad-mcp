@@ -61,18 +61,23 @@ shape export). After saving an `.FCStd` file that is open in the GUI, use
 `reload_document(doc_name)` to refresh the GUI copy. Get the document name with
 `list_documents`.
 
-The executable runs on the machine hosting the MCP server; `--host` only selects
-the GUI RPC host. Use file paths accessible on the MCP server machine. The
+The executable runs on the machine hosting the MCP server; `FREECAD_MCP_HOST`
+only selects the GUI RPC host. Use file paths accessible on the MCP server machine. The
 timeout must be positive and finite (default: 600 seconds). A timeout returns
 partial stdout/stderr, and temporary scripts are removed on success, failure,
 and timeout.
 
-The executable is auto-detected (`freecadcmd` or Snap's `freecad.cmd` on PATH,
-then the `org.freecad.FreeCAD` Flatpak). Override it with:
+The executable is auto-detected: `freecadcmd` or Snap's `freecad.cmd` on PATH,
+then the standard installations (on Windows the FreeCAD installer's registry
+entries and `Program Files`, on macOS `FreeCAD.app`), then the
+`org.freecad.FreeCAD` Flatpak. `freecad-mcp doctor` shows what it found.
+Override it with `FREECAD_MCP_FREECADCMD` in the client entry's `env` block,
+for example `flatpak run --command=freecadcmd org.freecad.FreeCAD`. Words are
+split like a shell does; quote a path with spaces. On Windows, backslashes are
+path separators, not escapes.
 
-```bash
-freecad-mcp --freecadcmd "flatpak run --command=freecadcmd org.freecad.FreeCAD"
-```
+On Windows a native crash ends the process with an exception code rather than a
+signal; the tool reports it by name, for example `EXCEPTION_ACCESS_VIOLATION`.
 
 ## GUI dispatch timeouts
 
@@ -83,7 +88,7 @@ budget. The queue budget defaults to the execution budget. If it expires before
 a call starts, the call is cancelled and will not run later; this does not mark
 dispatch as stuck.
 
-| Operation | Queue budget | Execution budget | Bundled client socket timeout |
+| Operation | Queue budget | Execution budget | MCP server's reply timeout |
 | --- | --- | --- | --- |
 | `execute_code` | 90 seconds (or capped `timeout`) | 90 seconds (or capped `timeout`) | At least `2 * timeout + 30` seconds; 210 seconds by default |
 | `run_fem_analysis` | Requested `timeout` | Requested `timeout` | At least `2 * timeout + 30` seconds |
@@ -92,14 +97,14 @@ A GUI task cannot be cancelled once it has started, so a slower `execute_code`
 call reports a timeout while the task keeps running, and its result is discarded
 even though the work completes. Pass `timeout` (positive finite seconds, capped at 1800) for
 work that genuinely has to run on the GUI thread and takes longer, such as
-importing or exporting a large STEP assembly; the client widens its socket
+importing or exporting a large STEP assembly; the MCP server widens its reply
 timeout to match the capped budget. Invalid values are rejected before execution.
 Omitting `timeout` preserves the 90-second default and compatibility with older
 addons; an explicit timeout requires an updated addon. For heavy pure-geometry work that touches neither the document
 nor the GUI, prefer `execute_code_async`.
 
-The client timeout covers both budgets plus a 30-second margin. Other clients
-and MCP hosts must allow these response times in their own timeout settings.
+The MCP server's timeout covers both budgets plus a 30-second margin. MCP hosts
+must allow these response times in their own timeout settings.
 Concurrent `execute_code` calls can be queued, but they still execute
 sequentially, so total wall time includes each individual run.
 

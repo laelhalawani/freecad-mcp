@@ -38,11 +38,11 @@ The following tools return optional screenshots: `create_object`, `edit_object`,
 | `include_screenshot` | `true` | Set to `false` for text-only feedback, such as analytical scripts or intermediate steps. |
 | `view_name` | `"Isometric"` | Orient the returned screenshot, for example `"Front"`, `"Top"`, or `"Right"`. |
 
-The [`--only-text-feedback` flag](configuration.md#text-feedback-and-screenshots)
+The [`FREECAD_MCP_ONLY_TEXT_FEEDBACK` setting](configuration.md#text-feedback-and-screenshots)
 suppresses these optional screenshots regardless of `include_screenshot`.
 
 Use `get_view` to request a screenshot explicitly; it is available even with
-`--only-text-feedback`. It takes `view_name` and optional `width`, `height`, and
+`FREECAD_MCP_ONLY_TEXT_FEEDBACK` on. It takes `view_name` and optional `width`, `height`, and
 `focus_object` parameters. Supported views are `Isometric`, `Front`, `Top`,
 `Right`, `Back`, `Left`, `Bottom`, `Dimetric`, and `Trimetric`.
 

@@ -11,7 +11,6 @@ import xmlrpc.client
 
 import pytest
 
-from freecad_mcp.freecad_client import FreeCADConnection
 from test_rpc_concurrency import filtered_server_class
 
 
@@ -124,48 +123,8 @@ def test_empty_token_disables_authentication() -> None:
     assert interface.calls == ["ping"]
 
 
-def test_client_sends_the_token_without_exposing_it() -> None:
-    with token_server(TOKEN) as (interface, port):
-        right = FreeCADConnection("127.0.0.1", port, timeout=5, token=TOKEN)
-        wrong = FreeCADConnection("127.0.0.1", port, timeout=5, token="wrong-token")
-        try:
-            assert right.ping() is True
-            with pytest.raises(xmlrpc.client.ProtocolError) as rejected:
-                wrong.ping()
-        finally:
-            right.disconnect()
-            wrong.disconnect()
-    assert interface.calls == ["ping"]
-    assert rejected.value.errcode == 401
-    # Tools return error text to the model, so it must not carry the token.
-    assert "wrong-token" not in str(rejected.value)
-    assert "wrong-token" not in repr(wrong.server)
-
-
-@pytest.mark.parametrize("client_token", [None, "wrong-token"])
-def test_rejected_token_is_explained(
-    client_token: str | None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from freecad_mcp import server
-    from freecad_mcp.server_state import ServerState
-
-    with token_server(TOKEN) as (_interface, port):
-        monkeypatch.setattr(server, "state", ServerState(auth_token=client_token))
-        # get_freecad_connection always asks for port 9875; aim it at this server.
-        monkeypatch.setattr(
-            server,
-            "FreeCADConnection",
-            lambda **kwargs: FreeCADConnection(
-                kwargs["host"], port, timeout=5, token=kwargs.get("token")
-            ),
-        )
-        with pytest.raises(Exception) as failure:
-            server.get_freecad_connection()
-    message = str(failure.value)
-    assert "auth token" in message
-    assert "FREECAD_MCP_TOKEN" in message
-    assert "Make sure the FreeCAD addon is running" not in message
-    assert server.state.freecad_connection is None
+# The MCP server's side (sending the token, explaining a rejection) is tested
+# in Go: internal/xmlrpc/client_test.go and internal/mcpserver/server_test.go.
 
 
 def test_browser_requests_stay_refused_with_a_token_set() -> None:

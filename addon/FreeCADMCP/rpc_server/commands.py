@@ -163,8 +163,9 @@ class SetAuthTokenCommand:
             None,
             "Auth Token",
             "Enter the auth token clients must present (leave blank to disable\n"
-            "authentication). The MCP server passes it via --auth-token or the\n"
-            "FREECAD_MCP_TOKEN environment variable.",
+            "authentication). Give the MCP server the same token with\n"
+            "`freecad-mcp login --token <token>` or the FREECAD_MCP_TOKEN\n"
+            "environment variable.",
             QtWidgets.QLineEdit.Normal,
             current,
         )

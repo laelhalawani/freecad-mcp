@@ -2,39 +2,65 @@
 
 [Back to README](../README.md) · [Installation](installation.md) · [Tools](tools.md)
 
-## Auto-start RPC server
+## Environment variables
 
-By default, the RPC server must be started manually each time FreeCAD opens. To
-start it automatically:
+The MCP server reads its settings from environment variables, which you set in
+the `env` block of the `freecad` entry in your AI client's configuration:
 
-1. Switch to the **MCP Addon** workbench and open the **FreeCAD MCP** menu.
-2. Check **Auto-Start Server**.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FREECAD_MCP_HOST` | `localhost` | Host of the FreeCAD RPC server; an IPv4/IPv6 address or host name. |
+| `FREECAD_MCP_PORT` | `9875` | Port of the FreeCAD RPC server. |
+| `FREECAD_MCP_TOKEN` | the token stored with `freecad-mcp login` | Auth token the RPC server requires, when one is set in FreeCAD. |
+| `FREECAD_MCP_ONLY_TEXT_FEEDBACK` | `false` | `true` omits the optional screenshots from tool replies. |
+| `FREECAD_MCP_FREECADCMD` | auto-detected | Command that starts headless FreeCAD for `execute_code_headless`. |
+| `TRANSPORT` | `stdio` | `http` serves MCP over Streamable HTTP instead. |
+| `ADDR` | `127.0.0.1:8080` | Listen address when `TRANSPORT=http`. |
 
-The setting is saved to `freecad_mcp_settings.json` and persists across sessions.
-On the next FreeCAD launch, the RPC server starts automatically once the
-application finishes loading. Uncheck **Auto-Start Server** in the same menu to
-disable it.
-
-## Text feedback and screenshots
-
-Pass `--only-text-feedback` to omit optional screenshots from tool feedback and
-reduce token use:
+An invalid value stops the server at startup with a message naming the
+variable. For example, a client entry for FreeCAD on another machine without
+screenshots:
 
 ```json
 {
   "mcpServers": {
     "freecad": {
-      "command": "uvx",
-      "args": ["freecad-mcp", "--only-text-feedback"]
+      "command": "freecad-mcp",
+      "args": ["mcp"],
+      "env": {
+        "TRANSPORT": "stdio",
+        "FREECAD_MCP_HOST": "192.168.1.100",
+        "FREECAD_MCP_ONLY_TEXT_FEEDBACK": "true"
+      }
     }
   }
 }
 ```
 
+Restart your AI client after changing its configuration.
+
+## Auto-start RPC server
+
+The installer turns on starting the RPC server together with FreeCAD unless you
+switch that off in the wizard (or pass `--no-autostart` to
+`freecad-mcp install-addon`). To change it later in FreeCAD:
+
+1. Switch to the **MCP Addon** workbench and open the **FreeCAD MCP** menu.
+2. Check or uncheck **Auto-Start Server**.
+
+The setting is saved to `freecad_mcp_settings.json` in FreeCAD's user data
+directory and persists across sessions. With it on, the RPC server starts once
+FreeCAD finishes loading.
+
+## Text feedback and screenshots
+
+Set `FREECAD_MCP_ONLY_TEXT_FEEDBACK` to `true` to omit optional screenshots from
+tool feedback and reduce token use.
+
 You can also control optional screenshots per call with `include_screenshot`
-and `view_name`. The global flag takes precedence over `include_screenshot`.
-See [screenshot options](tools.md#screenshot-options) for the applicable tools
-and the explicit `get_view` tool.
+and `view_name`. The environment variable takes precedence over
+`include_screenshot`. See [screenshot options](tools.md#screenshot-options) for
+the applicable tools and the explicit `get_view` tool.
 
 ## Remote connections
 
@@ -70,52 +96,31 @@ In the **FreeCAD MCP** toolbar:
 
 ### 2. Point the MCP server at the remote host
 
-Pass `--host` with the IP address or hostname of the machine running FreeCAD:
+Set `FREECAD_MCP_HOST` to the IP address or host name of the machine running
+FreeCAD, as in the [example above](#environment-variables). The value is
+validated on startup.
 
-```json
-{
-  "mcpServers": {
-    "freecad": {
-      "command": "uvx",
-      "args": ["freecad-mcp", "--host", "192.168.1.100"]
-    }
-  }
-}
-```
-
-The `--host` value is validated on startup and must be a valid IPv4/IPv6 address
-or hostname. Restart your MCP client after updating its configuration.
-
-`--host` selects the GUI RPC host. [Headless execution](execution.md#headless-execution)
+`FREECAD_MCP_HOST` selects the GUI RPC host. [Headless execution](execution.md#headless-execution)
 runs on the machine hosting the MCP server, so its file paths must be accessible
 there.
 
 ### 3. Require an auth token
 
 In the **FreeCAD MCP** toolbar, click **Set Auth Token** and enter a long random
-value, such as the output of
-`python -c "import secrets; print(secrets.token_urlsafe(32))"`. Restart the RPC
-server. From then on, it answers only requests that carry the token. Clear the
-field to turn authentication off again.
+value. Restart the RPC server. From then on, it answers only requests that carry
+the token. Clear the field to turn authentication off again.
 
-Give the MCP server the same token in the `FREECAD_MCP_TOKEN` environment
-variable:
+Give the MCP server the same token in one of two ways:
 
-```json
-{
-  "mcpServers": {
-    "freecad": {
-      "command": "uvx",
-      "args": ["freecad-mcp", "--host", "192.168.1.100"],
-      "env": { "FREECAD_MCP_TOKEN": "<the token set in FreeCAD>" }
-    }
-  }
-}
-```
+- `freecad-mcp login --token <the token set in FreeCAD>` stores it in
+  `~/.freecad-mcp/credentials.json` (readable only by you), so it never appears
+  in any AI client's configuration file. The setup wizard offers the same step.
+- `FREECAD_MCP_TOKEN` in the client entry's `env` block, which takes precedence
+  over the stored token.
 
-`--auth-token <token>` works too, but other users of the machine can read
-command-line arguments in the process list. The token travels unencrypted, so
-on a network you do not control, use the SSH tunnel below instead.
+`freecad-mcp doctor` and `freecad-mcp check-connection` report a rejected
+token. The token travels unencrypted, so on a network you do not control, use
+the SSH tunnel below instead.
 
 ### Alternative: SSH tunnel
 
@@ -127,6 +132,6 @@ that runs the MCP server:
 ssh -N -L 9875:localhost:9875 user@freecad-host
 ```
 
-Keep the MCP server on its default `--host localhost`. With remote connections
+Keep `FREECAD_MCP_HOST` at its default, `localhost`. With remote connections
 off, the RPC server only answers requests addressed to `localhost` or a
 loopback address such as `127.0.0.1`.
