@@ -11,9 +11,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sairaph/mcp-wizard/flow"
+	"github.com/sairaph/mcp-wizard/harness"
 	"github.com/sairaph/mcp-wizard/secret"
 
 	"github.com/laelhalawani/freecad-mcp/internal/domain"
@@ -23,18 +25,92 @@ import (
 // written. install.ps1 and install.sh rely on it to undo their own changes.
 const exitCancelled = 3
 
-// harnessSelection works around mcp-wizard v0.1.1's client list, which
-// renders every key of HarnessState.Selected as checked, including clients
-// the user switched off (their value is false). Dropping false entries after
-// each update makes the list show what will actually be registered.
+// harnessSelection adapts mcp-wizard v0.1.1's client list:
+//
+//   - It renders every key of HarnessState.Selected as checked, including
+//     clients the user switched off (their value is false). Dropping false
+//     entries after each update makes the list show what will be registered.
+//   - Its enter does nothing while no client is selected. Here the addon is
+//     worth installing on its own (no AI client yet, or one registered by
+//     hand), so enter moves on and registration reports that nothing was
+//     configured.
+//   - It pre-selects clients whose entry was edited by hand or runs another
+//     program (see clients.go), and registering replaces that entry. Those
+//     start unticked here, with a note saying why, so what is there is only
+//     replaced on request.
+//   - Revisiting the step detects the clients again, but the library keeps
+//     taking keys meanwhile, which would act on the previous list. Keys other
+//     than cancel wait until the new list is shown.
 type harnessSelection struct {
 	flow.Step[AppState]
+	// name is the server's name in the client configs.
+	name string
+	// findUnticked returns the detected clients that start unticked.
+	findUnticked func([]harness.Harness) map[harness.ID]bool
+}
+
+func (h harnessSelection) Init(state *AppState) tea.Cmd {
+	// The library fills Selected when detection finishes. Keys are held
+	// back until then, so Selected turning non-nil marks the detection.
+	state.Harness.Selected = nil
+	state.harnessDetecting = true
+	state.UntickedClients = nil
+	return h.Step.Init(state)
 }
 
 func (h harnessSelection) Update(msg tea.Msg, state *AppState) (flow.Directive, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok {
+		switch key := k.String(); {
+		case state.harnessDetecting && key != "q" && key != "ctrl+c":
+			return flow.Continue, nil
+		case !state.harnessDetecting && key == "enter" && !anySelected(state.Harness.Selected):
+			return flow.Next, nil
+		}
+	}
 	d, cmd := h.Step.Update(msg, state)
+	if state.harnessDetecting && state.Harness.Selected != nil {
+		state.harnessDetecting = false
+		if h.findUnticked != nil {
+			unticked := h.findUnticked(state.Harness.Detections)
+			for _, c := range state.Harness.Detections {
+				if unticked[c.ID] && c.Selectable() {
+					delete(state.Harness.Selected, c.ID)
+					state.UntickedClients = append(state.UntickedClients, c.Name)
+				}
+			}
+		}
+	}
 	pruneUnselected(&state.Harness.Selected)
 	return d, cmd
+}
+
+func (h harnessSelection) View(state *AppState) string {
+	view := h.Step.View(state)
+	if len(state.UntickedClients) == 0 || state.harnessDetecting {
+		return view
+	}
+	note := fmt.Sprintf("  %s already has a %q entry that setup did not write (edited by hand,\n"+
+		"  or another program's). It starts unticked so the entry is kept; ticking it replaces it.\n",
+		state.UntickedClients[0], h.name)
+	if len(state.UntickedClients) > 1 {
+		note = fmt.Sprintf("  %s already have a %q entry that setup did not write (edited by hand,\n"+
+			"  or another program's). They start unticked so the entries are kept; ticking one replaces it.\n",
+			strings.Join(state.UntickedClients, ", "), h.name)
+	}
+	// Above the footer, which is the last line.
+	if i := strings.LastIndex(view, "\n"); i >= 0 {
+		return view[:i] + "\n" + note + view[i:]
+	}
+	return view + "\n" + note
+}
+
+func anySelected[K comparable](selected map[K]bool) bool {
+	for _, on := range selected {
+		if on {
+			return true
+		}
+	}
+	return false
 }
 
 func pruneUnselected[K comparable](selected *map[K]bool) {
@@ -68,6 +144,11 @@ func (s *deferredStore) Path() string { return s.inner.Path() }
 // loginFresh makes each visit of the login step start clean: going back to
 // it drops a token typed on an earlier visit and the library's Skipped flag,
 // which it only resets in one branch, so both reflect the last visit.
+//
+// With a token already stored the library step skips itself, and a skip
+// always moves forward: going back from the next step would land on that
+// step again, so the client list could never be reached. A skip while going
+// back therefore keeps going back.
 type loginFresh struct {
 	flow.Step[AppState]
 	store *deferredStore
@@ -78,7 +159,16 @@ func (l loginFresh) Init(state *AppState) tea.Cmd {
 		l.store.pending = nil
 	}
 	state.Login.Skipped = false
+	state.loginEnteredBack, state.Retreating = state.Retreating, false
 	return l.Step.Init(state)
+}
+
+func (l loginFresh) Update(msg tea.Msg, state *AppState) (flow.Directive, tea.Cmd) {
+	d, cmd := l.Step.Update(msg, state)
+	if d == flow.Skip && state.loginEnteredBack {
+		return flow.Back, cmd
+	}
+	return d, cmd
 }
 
 // flush writes the token entered in the wizard, if any.

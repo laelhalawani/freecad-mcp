@@ -17,8 +17,15 @@ func removeFromUserPath(dir string) (bool, error) {
 	}
 	removedAny := false
 	var errs []error
-	for _, name := range []string{".zshrc", ".bashrc", ".profile", ".bash_profile"} {
-		path := filepath.Join(home, name)
+	paths := []string{filepath.Join(home, ".zshrc")}
+	// zsh reads .zshrc from ZDOTDIR when that is set, and install.sh wrote there.
+	if zdot := os.Getenv("ZDOTDIR"); zdot != "" && !samePath(zdot, home) {
+		paths = append(paths, filepath.Join(zdot, ".zshrc"))
+	}
+	for _, name := range []string{".bashrc", ".profile", ".bash_profile"} {
+		paths = append(paths, filepath.Join(home, name))
+	}
+	for _, path := range paths {
 		info, err := os.Stat(path)
 		if err != nil {
 			continue

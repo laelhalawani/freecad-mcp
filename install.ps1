@@ -59,10 +59,20 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
     return $a.Trim().TrimEnd("\") -ieq $b.Trim().TrimEnd("\")
   }
 
-  switch ($env:PROCESSOR_ARCHITECTURE) {
+  # A 32-bit PowerShell on 64-bit Windows sees x86 here and the machine's
+  # own architecture in PROCESSOR_ARCHITEW6432.
+  $machineArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+  switch ($machineArch) {
     { $_ -in 'AMD64', 'x64' } { $arch = 'amd64' }
     'ARM64'                   { $arch = 'arm64' }
-    default { Write-Host "  Unsupported architecture: $($env:PROCESSOR_ARCHITECTURE)" -ForegroundColor Red; return }
+    default { Write-Host "  Unsupported architecture: $machineArch" -ForegroundColor Red; return }
+  }
+
+  # "--yes --clients cursor" given as one string is split into its flags.
+  # The array form ("--yes", "--token", "a b") is passed as it is, so a
+  # value containing spaces survives.
+  if ($ConfigureArgs.Count -eq 1) {
+    $ConfigureArgs = @($ConfigureArgs[0] -split '\s+' | Where-Object { $_ })
   }
 
   $asset = "$Bin-windows-$arch.exe"
@@ -102,33 +112,42 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
     return
   }
 
-  # Verify the SHA256 checksum.
-  $verified = $false
+  # Verify the SHA256 checksum; install nothing that cannot be verified.
+  $checksumUrl = "$base/SHA256SUMS.txt"
+  $checksums = $null
   try {
-    $checksums = (Invoke-WebRequest -Uri "$base/SHA256SUMS.txt" -UseBasicParsing).Content
+    $checksums = (Invoke-WebRequest -Uri $checksumUrl -UseBasicParsing).Content
     # GitHub serves release assets as application/octet-stream, for which
     # Windows PowerShell returns the content as bytes rather than text.
     if ($checksums -is [byte[]]) { $checksums = [System.Text.Encoding]::UTF8.GetString($checksums) }
+  } catch { }
+  $problem = $null
+  if (-not $checksums) {
+    $problem = "Could not fetch $checksumUrl to verify the download; nothing was installed.`n  Please check your connection and try again."
+  } else {
     $pattern = ' \*?' + [regex]::Escape($asset) + '\s*$'
     $line = $checksums -split "`n" | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_ -match $pattern } | Select-Object -First 1
-    if ($line) {
+    if (-not $line) {
+      $problem = "$checksumUrl lists no checksum for $asset; nothing was installed."
+    } else {
       $expectedHash = ($line -split '\s+')[0].ToLower()
       $actualHash = (Get-FileHash -Path "$target.new" -Algorithm SHA256).Hash.ToLower()
-      if ($expectedHash -ne $actualHash) {
-        Write-Host "  SHA256 mismatch; nothing was installed." -ForegroundColor Red
-        Remove-Item "$target.new" -Force -ErrorAction SilentlyContinue
-        Undo-Directories
-        return
-      }
-      $verified = $true
+      if ($expectedHash -ne $actualHash) { $problem = "SHA256 mismatch; nothing was installed." }
     }
-  } catch { }
-  if (-not $verified) {
-    Write-Host "  Warning: could not verify SHA256SUMS.txt; the download was not verified." -ForegroundColor Yellow
+  }
+  if ($problem) {
+    Write-Host "  $problem" -ForegroundColor Red
+    Remove-Item "$target.new" -Force -ErrorAction SilentlyContinue
+    Undo-Directories
+    return
   }
 
   # Keep a previous version until setup finishes. Its name must not match
   # "<bin>.exe.old-*": the program deletes those files when it starts.
+  # A backup is deleted after setup, which fails while an AI client still
+  # runs it; drop those left by earlier runs now.
+  Get-ChildItem -LiteralPath $installDir -Filter "$Bin.exe.bak-*" -Force -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
   $backup = $null
   if (Test-Path $target) {
     $backup = "$target.bak-$([System.Guid]::NewGuid().ToString('N').Substring(0, 8))"
@@ -176,7 +195,11 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
   # and `configure` would register every detected client unasked.
   $interactive = $false
   try { $interactive = -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected } catch { }
-  $unattended = $ConfigureArgs -contains "--yes"
+  # The spellings Go's flag package reads as --yes; it is case-sensitive.
+  $yesValues = foreach ($dash in "--", "-") {
+    foreach ($suffix in "", "=1", "=t", "=T", "=true", "=TRUE", "=True") { "${dash}yes$suffix" }
+  }
+  $unattended = [bool]($ConfigureArgs | Where-Object { $_ -cin $yesValues })
   if (-not $interactive -and -not $unattended) {
     if ($backup) { Remove-Item $backup -Force -ErrorAction SilentlyContinue }
     Write-Host "  Installed $Bin to $target."

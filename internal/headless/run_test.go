@@ -52,6 +52,45 @@ func assertEmpty(t *testing.T, dir string) {
 	}
 }
 
+func TestSnapName(t *testing.T) {
+	for command, want := range map[string]string{
+		"/snap/bin/freecad.cmd":                    "freecad",
+		"/snap/bin/freecad":                        "freecad",
+		"/snap/bin/freecad-dev.cmd":                "freecad-dev",
+		"freecad.cmd":                              "freecad",
+		"/snap/freecad/current/usr/bin/freecadcmd": "",
+		"/usr/bin/freecadcmd":                      "",
+		"/opt/freecad/bin/freecadcmd":              "",
+		`C:\FreeCAD\bin\freecadcmd.exe`:            "",
+	} {
+		if got := SnapName(command); got != want {
+			t.Errorf("SnapName(%q) = %q, want %q", command, got, want)
+		}
+	}
+}
+
+func TestSnapScriptsGoWhereTheSnapCanRead(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	plain := scripts(t)
+
+	dir, err := scriptDirFor("/snap/bin/freecad.cmd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, "snap", "freecad", "common", "freecad-mcp", "headless")
+	if dir != want {
+		t.Fatalf("snap script dir = %s, want %s (the snap cannot read hidden directories)", dir, want)
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Fatalf("snap script dir not created: %v", err)
+	}
+	if dir, _ := scriptDirFor("/usr/bin/freecadcmd"); dir != plain {
+		t.Fatalf("a non-snap command uses %s, want ScriptDir %s", dir, plain)
+	}
+}
+
 func TestSuccessReturnsOutput(t *testing.T) {
 	py := python(t)
 	dir := scripts(t)

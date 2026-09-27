@@ -128,6 +128,15 @@ type AppState struct {
 	Login   installer.LoginState
 	Addon   addonState
 	Results installer.ResultsState
+	// UntickedClients names the clients left unticked because their entry
+	// was edited or runs another program; harnessDetecting is set while the
+	// client list is being detected (see harnessSelection).
+	UntickedClients  []string
+	harnessDetecting bool
+	// Retreating is set by a step that goes back, and loginEnteredBack
+	// records it when the login step starts (see loginFresh).
+	Retreating       bool
+	loginEnteredBack bool
 }
 
 func harnessState(s *AppState) *installer.HarnessState { return &s.Harness }
@@ -154,10 +163,13 @@ func newDetector(name string) (*harness.Detector, error) {
 	})
 }
 
-// selectIDs picks the harnesses to act on. --clients wins, then --all, and by
-// default every selectable client that is not configured yet. The returned
-// reason explains an empty selection.
-func selectIDs(harnesses []harness.Harness, cmd cli.Command) (ids []harness.ID, reason string) {
+// selectIDs picks the harnesses to register. --clients wins, then --all, and
+// by default every selectable client that is not configured yet. Replacing
+// an entry that was edited, or that runs another program (see clients.go),
+// would drop what is there, so those are returned in kept instead; --all
+// replaces edited entries too, and only --clients replaces another
+// program's. The returned reason explains an empty selection.
+func selectIDs(harnesses []harness.Harness, entries map[harness.ID]clientEntry, cmd cli.Command) (ids []harness.ID, kept []harness.Harness, reason string) {
 	if len(cmd.Clients) > 0 {
 		var unknown []string
 		for _, want := range cmd.Clients {
@@ -173,9 +185,9 @@ func selectIDs(harnesses []harness.Harness, cmd cli.Command) (ids []harness.ID, 
 			}
 		}
 		if len(unknown) > 0 {
-			return nil, "no detected client matches --clients " + strings.Join(unknown, ",")
+			return nil, nil, "no detected client matches --clients " + strings.Join(unknown, ",")
 		}
-		return ids, ""
+		return ids, nil, ""
 	}
 	// Default: installed clients that are not configured yet. --all: every
 	// installed or configured client (in project scope that means every
@@ -186,14 +198,18 @@ func selectIDs(harnesses []harness.Harness, cmd cli.Command) (ids []harness.ID, 
 			continue
 		}
 		candidates++
-		if cmd.All || !h.Configured {
+		e := entries[h.ID]
+		switch {
+		case e.kind == entryForeign, !cmd.All && e.kind == entryEdited:
+			kept = append(kept, h)
+		case cmd.All, !h.Configured:
 			ids = append(ids, h.ID)
 		}
 	}
-	if len(ids) == 0 && candidates > 0 {
-		return nil, "every detected client is already configured (use --all to re-register)"
+	if len(ids) == 0 && len(kept) == 0 && candidates > 0 {
+		return nil, nil, "every detected client is already configured (use --all to re-register)"
 	}
-	return ids, ""
+	return ids, kept, ""
 }
 
 func exitCodeFor(results []harness.Result) int {
@@ -346,7 +362,13 @@ func runWizard(ctx context.Context, detector *harness.Detector, scope harness.Sc
 	}
 	state := &AppState{}
 	steps := []flow.Step[AppState]{
-		harnessSelection{installer.HarnessStep(ctx, detector, harnessState, installer.HarnessStepOptions{AllDetected: true, Scope: scope})},
+		harnessSelection{
+			Step: installer.HarnessStep(ctx, detector, harnessState, installer.HarnessStepOptions{AllDetected: true, Scope: scope}),
+			name: serverName(cmd),
+			findUnticked: func(hs []harness.Harness) map[harness.ID]bool {
+				return untickedClients(clientEntries(ctx, detector, scope, hs))
+			},
+		},
 		loginFresh{installer.LoginStep(ctx, login, loginState), store},
 		newAddonStep(ctx),
 		applyGuard{installer.ApplyStep(ctx, detector, harnessState, resultsState, installer.ApplyStepOptions{Scope: scope, DryRun: cmd.DryRun}), cmd.DryRun},
@@ -399,13 +421,13 @@ func runUnattended(ctx context.Context, detector *harness.Detector, scope harnes
 }
 
 func registerUnattended(ctx context.Context, detector *harness.Detector, scope harness.Scope, credStore secret.Store, cmd cli.Command, desired harness.DesiredState) int {
-	enabling := desired == harness.Present
 	harnesses := detector.DetectIn(ctx, scope)
 
-	var ids []harness.ID
-	if enabling {
-		var reason string
-		ids, reason = selectIDs(harnesses, cmd)
+	entries := clientEntries(ctx, detector, scope, harnesses)
+	name := serverName(cmd)
+
+	if desired == harness.Present {
+		ids, kept, reason := selectIDs(harnesses, entries, cmd)
 		if reason != "" {
 			fmt.Fprintf(os.Stderr, "  %s\n", reason)
 			if len(cmd.Clients) > 0 {
@@ -413,13 +435,46 @@ func registerUnattended(ctx context.Context, detector *harness.Detector, scope h
 			}
 			return 0
 		}
-	} else {
-		for _, h := range harnesses {
-			if h.Configured {
+		printKept(os.Stdout, kept, entries, scope, name, cmd.DryRun)
+		if len(ids) == 0 && len(kept) > 0 {
+			return 0
+		}
+		return registerIDs(ctx, detector, scope, harnesses, ids, cmd.DryRun, desired)
+	}
+	// Removal targets every entry that runs freecad-mcp, edited ones too;
+	// another program's entry under the same name only when named.
+	wanted, unknown := matchClients(harnesses, cmd.Clients)
+	if len(unknown) > 0 {
+		fmt.Fprintf(os.Stderr, "  no known client matches --clients %s\n", strings.Join(unknown, ","))
+		return 2
+	}
+	var ids []harness.ID
+	var foreign []harness.Harness
+	for _, h := range harnesses {
+		e, found := entries[h.ID]
+		switch {
+		case !found:
+		case len(cmd.Clients) > 0:
+			if wanted[h.ID] {
 				ids = append(ids, h.ID)
 			}
+		case e.ours():
+			ids = append(ids, h.ID)
+		default:
+			foreign = append(foreign, h)
 		}
 	}
+	printSkippedForeign(os.Stdout, foreign, entries, scope, name)
+	if len(ids) == 0 && len(foreign) > 0 {
+		return 0
+	}
+	return registerIDs(ctx, detector, scope, harnesses, ids, cmd.DryRun, desired)
+}
+
+// registerIDs adds or removes the server in the given harnesses, replacing a
+// differing same-name entry: callers only pass harnesses meant to change.
+func registerIDs(ctx context.Context, detector *harness.Detector, scope harness.Scope, harnesses []harness.Harness, ids []harness.ID, dryRun bool, desired harness.DesiredState) int {
+	enabling := desired == harness.Present
 	if len(ids) == 0 {
 		if enabling {
 			installer.PrintNoClients(os.Stdout, domain.BinaryName, false)
@@ -428,26 +483,18 @@ func registerUnattended(ctx context.Context, detector *harness.Detector, scope h
 		}
 		return 0
 	}
-	if cmd.DryRun {
+	if dryRun {
 		return printPlan(ctx, detector, scope, ids, desired)
 	}
 
-	policy := harness.ConflictReplace
-	if !enabling {
-		policy = harness.ConflictError
-	}
-	results := detector.ApplyIn(ctx, scope, ids, desired, policy)
+	results := detector.ApplyIn(ctx, scope, ids, desired, harness.ConflictReplace)
 	installer.PrintResultsWithScope(os.Stdout, results, scope, enabling, false)
 	installer.PrintReloadHints(os.Stdout, results, byID(harnesses))
 	return exitCodeFor(results)
 }
 
 func printPlan(ctx context.Context, detector *harness.Detector, scope harness.Scope, ids []harness.ID, desired harness.DesiredState) int {
-	policy := harness.ConflictReplace
-	if desired == harness.Absent {
-		policy = harness.ConflictError
-	}
-	changes, err := detector.PlanResultsIn(ctx, scope, ids, desired, policy)
+	changes, err := detector.PlanResultsIn(ctx, scope, ids, desired, harness.ConflictReplace)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -473,7 +520,13 @@ func runUninstall(ctx context.Context, cmd cli.Command) int {
 		}
 		scope = harness.ProjectScopeDir(dir)
 	} else if cmd.All {
-		// --all removes everything, not only the client registrations.
+		// --all removes everything, not only the client registrations, so
+		// it cannot leave some clients registered to the deleted program.
+		if len(cmd.Clients) > 0 {
+			fmt.Fprintln(os.Stderr, "  --all removes the program itself, so it cannot be combined with --clients.\n"+
+				"  Run `"+domain.BinaryName+" uninstall --clients ...` to remove only some registrations.")
+			return 2
+		}
 		return runUninstallAll(ctx, detector, cmd)
 	}
 	return runUnattended(ctx, detector, scope, nil, cmd, harness.Absent)
@@ -626,7 +679,8 @@ func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// clientsCheck lists the AI clients that have this server registered.
+// clientsCheck lists the AI clients that have this server registered,
+// including entries the user has edited (see clients.go).
 type clientsCheck struct{}
 
 func (clientsCheck) Name() string { return "AI clients" }
@@ -636,14 +690,26 @@ func (clientsCheck) Run(ctx context.Context) doctor.Result {
 	if err != nil {
 		return doctor.Result{Name: "AI clients", Status: doctor.Fail, Detail: err.Error()}
 	}
+	harnesses := detector.Detect(ctx)
+	entries := clientEntries(ctx, detector, harness.Scope{}, harnesses)
 	var configured []string
-	for _, h := range detector.Detect(ctx) {
-		if h.Configured {
+	outdated := false
+	for _, h := range harnesses {
+		switch e := entries[h.ID]; e.kind {
+		case entryConfigured:
 			configured = append(configured, h.Name)
+		case entryEdited:
+			configured = append(configured, h.Name+" (entry edited)")
+		case entryOutdated:
+			configured = append(configured, h.Name+" (runs "+e.command+")")
+			outdated = true
 		}
 	}
 	if len(configured) == 0 {
 		return doctor.Result{Name: "AI clients", Status: doctor.Warn, Detail: "no client is configured; run `freecad-mcp install`"}
+	}
+	if outdated {
+		return doctor.Result{Name: "AI clients", Status: doctor.Warn, Detail: strings.Join(configured, ", ") + "; run `freecad-mcp install --yes` to register this copy instead"}
 	}
 	return doctor.Result{Name: "AI clients", Status: doctor.OK, Detail: strings.Join(configured, ", ")}
 }
@@ -653,8 +719,8 @@ func (clientsCheck) Run(ctx context.Context) doctor.Result {
 func runUpdate(ctx context.Context, cmd cli.Command) int {
 	opts := updateOptions()
 
-	// `update --from <file>` is used by the install script, which has already
-	// downloaded and verified the new binary.
+	// `update --from <file>` swaps in a binary that was already downloaded
+	// and verified by other means.
 	if len(cmd.Args) >= 2 && cmd.Args[0] == "--from" {
 		if err := update.SwapFrom(ctx, cmd.Args[1], opts); err != nil {
 			fmt.Fprintln(os.Stderr, err)

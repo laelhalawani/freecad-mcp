@@ -481,6 +481,7 @@ func (s *addonStep) Update(msg tea.Msg, state *AppState) (flow.Directive, tea.Cm
 				a.AutoStart = !a.AutoStart
 			}
 		case "esc":
+			state.Retreating = true
 			return flow.Back, nil
 		case "enter":
 			return flow.Next, nil
@@ -502,7 +503,7 @@ func (s *addonStep) View(state *AppState) string {
 		fmt.Fprintf(&b, "  %s Asking FreeCAD where its addons live...\n", tui.SpinFrame(state.Spinner.Frame))
 	case addonChoosing:
 		version, _, _ := addoninstall.EmbeddedVersion()
-		fmt.Fprintf(&b, "  The MCP server talks to FreeCAD through an addon (version %s).\n  After the AI clients are registered, it is installed into:\n\n", version)
+		fmt.Fprintf(&b, "  The MCP server talks to FreeCAD through an addon (version %s).\n  When setup finishes, it is installed into:\n\n", version)
 		for _, t := range a.Targets {
 			line := "    " + t.AddonDir()
 			if v, err := addoninstall.InstalledVersion(t); err == nil {

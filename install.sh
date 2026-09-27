@@ -35,6 +35,13 @@ rc_append() { # rc_append <profile> <line>
   cat "$RC_STATE/$key.added" >> "$rc"
 }
 
+rc_create() { # rc_create <profile>: creates it, and rc_undo deletes it again
+  rc="$1"
+  : > "$rc"
+  key=$(printf '%s' "$rc" | cksum | awk '{print $1}')
+  : > "$RC_STATE/$key.created"
+}
+
 rc_undo() { # restores every profile rc_append changed in this run
   for pathfile in "$RC_STATE"/*.path; do
     [ -f "$pathfile" ] || continue
@@ -42,8 +49,13 @@ rc_undo() { # restores every profile rc_append changed in this run
     rc=$(cat "$pathfile")
     cat "$RC_STATE/$key.orig" "$RC_STATE/$key.added" > "$RC_STATE/$key.expected"
     if cmp -s "$rc" "$RC_STATE/$key.expected"; then
-      # Unchanged since: put the original back byte for byte.
-      cat "$RC_STATE/$key.orig" > "$rc"
+      # Unchanged since: put the original back byte for byte, or remove
+      # the file if this run created it.
+      if [ -f "$RC_STATE/$key.created" ]; then
+        rm -f "$rc"
+      else
+        cat "$RC_STATE/$key.orig" > "$rc"
+      fi
     else
       # Edited meanwhile: remove only the two lines this run added.
       awk -v marker="$MARKER" -v line="$(tail -n 1 "$RC_STATE/$key.added")" '
@@ -138,25 +150,38 @@ fi
 
 if [ -n "$SHA256_CMD" ]; then
   CHECKSUM_URL="${BASE}/SHA256SUMS.txt"
-  EXPECTED=""
+  SUMS=""
   if command -v curl >/dev/null 2>&1; then
-    EXPECTED=$(curl -fsSL "$CHECKSUM_URL" 2>/dev/null | grep " $ASSET\$" | awk '{print $1}')
+    SUMS=$(curl -fsSL "$CHECKSUM_URL" 2>/dev/null) || SUMS=""
   elif command -v wget >/dev/null 2>&1; then
-    EXPECTED=$(wget -q -O - "$CHECKSUM_URL" 2>/dev/null | grep " $ASSET\$" | awk '{print $1}')
+    SUMS=$(wget -q -O - "$CHECKSUM_URL" 2>/dev/null) || SUMS=""
   fi
-  if [ -n "$EXPECTED" ]; then
-    ACTUAL=$($SHA256_CMD "$TEMP" | awk '{print $1}')
-    if [ "$EXPECTED" != "$ACTUAL" ]; then
-      printf '\n  SHA256 mismatch; nothing was installed.\n' >&2
-      rm -f "$TEMP"
-      undo_directories
-      exit 1
-    fi
-  else
-    printf '  Warning: could not fetch SHA256SUMS.txt; the download was not verified.\n' >&2
+  if [ -z "$SUMS" ]; then
+    printf '\n  Could not fetch %s to verify the download; nothing was installed.\n' "$CHECKSUM_URL" >&2
+    printf '  Please check your connection and try again.\n' >&2
+    rm -f "$TEMP"
+    undo_directories
+    exit 1
+  fi
+  EXPECTED=$(printf '%s\n' "$SUMS" | grep " \*\{0,1\}$ASSET\$" | awk '{print $1}')
+  if [ -z "$EXPECTED" ]; then
+    printf '\n  %s lists no checksum for %s; nothing was installed.\n' "$CHECKSUM_URL" "$ASSET" >&2
+    rm -f "$TEMP"
+    undo_directories
+    exit 1
+  fi
+  ACTUAL=$($SHA256_CMD "$TEMP" | awk '{print $1}')
+  if [ "$EXPECTED" != "$ACTUAL" ]; then
+    printf '\n  SHA256 mismatch; nothing was installed.\n' >&2
+    rm -f "$TEMP"
+    undo_directories
+    exit 1
   fi
 else
-  printf '  Warning: no sha256 tool found; the download was not verified.\n' >&2
+  printf '\n  Neither sha256sum nor shasum is available to verify the download;\n  nothing was installed.\n' >&2
+  rm -f "$TEMP"
+  undo_directories
+  exit 1
 fi
 
 if [ ! -s "$TEMP" ]; then
@@ -190,7 +215,13 @@ case ":$PATH:" in
   *) on_path=0 ;;
 esac
 if [ "$on_path" -eq 0 ]; then
-  for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile" "$HOME/.bash_profile"; do
+  # zsh, the default shell on macOS, reads none of the other files, so a zsh
+  # user without a .zshrc gets one, where zsh looks for it.
+  ZSHRC="${ZDOTDIR:-$HOME}/.zshrc"
+  case "${SHELL:-}" in
+    */zsh) [ -e "$ZSHRC" ] || [ ! -d "$(dirname "$ZSHRC")" ] || rc_create "$ZSHRC" ;;
+  esac
+  for rc in "$ZSHRC" "$HOME/.bashrc" "$HOME/.profile" "$HOME/.bash_profile"; do
     [ -f "$rc" ] || continue
     if ! grep -qF "$INSTALL_DIR" "$rc" 2>/dev/null; then
       rc_append "$rc" "export PATH=\"$INSTALL_DIR:\$PATH\""
@@ -203,17 +234,36 @@ PATH="$INSTALL_DIR:$PATH"
 export PATH
 
 # Run the setup wizard, in a terminal only: without one it cannot ask, and
-# `configure` would register every detected client unasked.
-if ( : </dev/tty ) 2>/dev/null; then
+# `configure` would register every detected client unasked. Its input and
+# output both go to the terminal, since the script's own may be a pipe
+# (curl ... | sh | tee log). With --yes, setup runs unattended anywhere.
+# CONFIGURE_ARGS is split into words below, never expanded as file names.
+set -f
+unattended=0
+for arg in $CONFIGURE_ARGS; do
+  case "$arg" in
+    # The spellings Go's flag package reads as --yes.
+    --yes|-yes|--yes=1|-yes=1|--yes=t|-yes=t|--yes=T|-yes=T|--yes=true|-yes=true|--yes=TRUE|-yes=TRUE|--yes=True|-yes=True)
+      unattended=1 ;;
+  esac
+done
+if [ "$unattended" -eq 1 ]; then
   set +e
   # shellcheck disable=SC2086
-  "$TARGET" configure $CONFIGURE_ARGS </dev/tty
+  "$TARGET" configure $CONFIGURE_ARGS </dev/null
+  code=$?
+  set -e
+elif ( : </dev/tty >/dev/tty ) 2>/dev/null; then
+  set +e
+  # shellcheck disable=SC2086
+  "$TARGET" configure $CONFIGURE_ARGS </dev/tty >/dev/tty
   code=$?
   set -e
 else
   printf '\n  Installed %s to %s.\n  Not running in a terminal. Finish setup in one with:\n    %s configure\n' "$BIN" "$TARGET" "$BIN"
   code=0
 fi
+set +f
 
 if [ "$code" -eq "$EXIT_CANCELLED" ]; then
   # Put everything back as it was.

@@ -2,7 +2,9 @@
 
 from email.message import Message
 import http.client
+import socket
 import sys
+import time
 import types
 import xmlrpc.client
 
@@ -64,6 +66,34 @@ def test_browser_style_requests_never_reach_the_handler(
     interface = Recorder()
     with running_server(interface) as (_host, port):
         assert post(port, request_headers) == status
+    assert interface.calls == []
+
+
+def test_a_slow_refused_body_cannot_hold_the_thread(monkeypatch) -> None:
+    monkeypatch.setattr(ip_filter(), "_DISCARD_TIMEOUT_S", 0.5)
+    interface = Recorder()
+    with running_server(interface) as (_host, port):
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            sock.sendall(
+                b"POST /RPC2 HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\n"
+                b"Content-Length: 1000\r\n\r\n"
+            )
+            started = time.monotonic()
+            sock.settimeout(0.1)
+            reply = b""
+            # One byte every 0.1 s would take 100 s to finish the body.
+            while b"\r\n" not in reply and time.monotonic() - started < 5:
+                try:
+                    sock.sendall(b"x")
+                except OSError:
+                    pass
+                try:
+                    reply += sock.recv(1024)
+                except socket.timeout:
+                    pass
+            elapsed = time.monotonic() - started
+    assert reply.startswith(b"HTTP/1.0 415") or reply.startswith(b"HTTP/1.1 415"), reply
+    assert elapsed < 3, f"the reply took {elapsed:.1f}s"
     assert interface.calls == []
 
 

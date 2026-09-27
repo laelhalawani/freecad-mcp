@@ -66,10 +66,16 @@ MOUSE_DEFER_MAX_S = 5.0
 _mouse_defer_since: "float | None" = None
 _stale_mouse_warned = False
 
-# Why and when the last tick declined to process, recorded on the GUI thread so
-# the RPC thread can report it on timeout without touching Qt off-thread. One
-# tuple assignment keeps reason and time consistent without a lock.
-_last_defer: "tuple[str, float] | None" = None
+# Orders guard deferrals against enqueues. A clock cannot: time.monotonic()
+# advances only every ~16 ms on Windows, so a guard seen just before a call
+# could share its timestamp and be blamed for holding it.
+_event_seq = itertools.count()
+
+# Why and when (in _event_seq order) the last tick declined to process,
+# recorded on the GUI thread so the RPC thread can report it on timeout
+# without touching Qt off-thread. One tuple assignment keeps reason and
+# sequence consistent without a lock.
+_last_defer: "tuple[str, int] | None" = None
 
 
 def _mouse_guard_should_defer(mouse_down: bool, now: float) -> bool:
@@ -179,15 +185,15 @@ def process_gui_tasks(reschedule: bool = True) -> None:
         now = time.monotonic()
         mouse_down = QtWidgets.QApplication.mouseButtons() != QtCore.Qt.NoButton
         if _mouse_guard_should_defer(mouse_down, now):
-            _last_defer = ("mouse buttons held (3D navigation drag)", now)
+            _last_defer = ("mouse buttons held (3D navigation drag)", next(_event_seq))
             return  # user is dragging; defer to next tick
         if mouse_down:
             _warn_stale_mouse_once()  # stale state: fall through and process anyway
         if QtWidgets.QApplication.activePopupWidget() is not None:
-            _last_defer = ("a popup or context menu is open in FreeCAD", now)
+            _last_defer = ("a popup or context menu is open in FreeCAD", next(_event_seq))
             return  # context menu or popup open; defer to next tick
         if QtWidgets.QApplication.activeModalWidget() is not None:
-            _last_defer = ("a modal dialog is open in FreeCAD", now)
+            _last_defer = ("a modal dialog is open in FreeCAD", next(_event_seq))
             return  # modal dialog open; defer to next tick
 
         _last_defer = None
@@ -310,6 +316,7 @@ def dispatch_to_gui(
                     response_queue.put_nowait(res)
 
     queued_at = time.monotonic()
+    queued_seq = next(_event_seq)
     _rpc_request_queue.put(_wrapped)
     if _waker is not None:
         _waker.wake()  # immediate wake via Qt signal (thread-safe)
@@ -330,7 +337,7 @@ def dispatch_to_gui(
                 " geometry consider execute_code_async, which must apply document"
                 " writes through its commit() helper)"
             )
-        elif last_defer is not None and last_defer[1] >= queued_at:
+        elif last_defer is not None and last_defer[1] > queued_seq:
             # Never silently time out on a guard: name it so the next wedge
             # diagnoses itself instead of looking like a dead server. A guard
             # that held only an earlier task says nothing about this one.

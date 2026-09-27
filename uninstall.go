@@ -46,6 +46,11 @@ func runUninstallAll(ctx context.Context, detector *harness.Detector, cmd cli.Co
 	if cache, err := headless.CacheDir(); err == nil {
 		paths = append(paths, cache)
 	}
+	// Headless scripts for a Snap FreeCAD, in whichever snap ran them.
+	if dir, err := headless.SnapDir("*"); err == nil {
+		matches, _ := filepath.Glob(dir)
+		paths = append(paths, matches...)
+	}
 	code = max(code, removePaths(w, paths, verb, cmd.DryRun))
 
 	fmt.Fprintln(w, "\n  Program")
