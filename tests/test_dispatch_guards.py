@@ -1,7 +1,5 @@
 """Tick guards may delay GUI tasks, but must not wedge dispatch or hide why."""
 
-import time
-
 from test_gui_dispatch import FakeApplication, ThreadedWaker, load_gui_dispatch
 
 
@@ -80,8 +78,9 @@ def test_queue_timeout_ignores_a_guard_that_only_held_an_earlier_call() -> None:
     with load_gui_dispatch() as gui_dispatch:
         gui_dispatch.QtWidgets.QApplication = PopupOpen
         gui_dispatch._rpc_request_queue.put(lambda: None)
+        # The popup was seen before the next call was queued, with no pause in
+        # between: ordering must not depend on the clock advancing.
         gui_dispatch.process_gui_tasks(reschedule=False)
-        time.sleep(0.01)  # the popup was seen strictly before the next call
 
         # No tick runs for this call (no waker), so nothing is known about
         # why it did not start; the earlier popup must not be blamed.

@@ -52,6 +52,28 @@ rc_undo
 printf 'first\n\nadded later\n' > "$work/want-edited"
 check_same "profile edited after the append" "$rc" "$work/want-edited"
 
+# A profile the installer created (zsh without a .zshrc) is removed again.
+RC_STATE=$(mktemp -d "$work/state.XXXXXX")
+rc="$work/created"
+rc_create "$rc"
+rc_append "$rc" "$LINE"
+rc_undo
+if [ -e "$rc" ]; then
+  printf 'FAIL created profile: still exists after undo\n'; failures=$((failures + 1))
+else
+  printf 'ok   created profile\n'
+fi
+
+# ...unless the user wrote to it meanwhile: then only our lines go.
+RC_STATE=$(mktemp -d "$work/state.XXXXXX")
+rc="$work/created-then-edited"
+rc_create "$rc"
+rc_append "$rc" "$LINE"
+printf 'alias g=git\n' >> "$rc"
+rc_undo
+printf '\nalias g=git\n' > "$work/want-created-edited"
+check_same "created profile edited after the append" "$rc" "$work/want-created-edited"
+
 if [ "$failures" -ne 0 ]; then
   printf '%s failure(s)\n' "$failures"
   exit 1

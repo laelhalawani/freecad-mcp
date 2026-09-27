@@ -26,7 +26,7 @@ func readyHarnessStep(t *testing.T) (flow.Step[AppState], *AppState) {
 		t.Fatal(err)
 	}
 	state := &AppState{}
-	step := harnessSelection{installer.HarnessStep(context.Background(), det, harnessState, installer.HarnessStepOptions{AllDetected: true})}
+	step := harnessSelection{Step: installer.HarnessStep(context.Background(), det, harnessState, installer.HarnessStepOptions{AllDetected: true})}
 	batch, ok := step.Init(state)().(tea.BatchMsg)
 	if !ok {
 		t.Fatal("Init did not return a batch")
@@ -97,13 +97,56 @@ func TestAllNoneTogglesTheWholeList(t *testing.T) {
 	}
 }
 
+func TestEnterWithNoClientSelectedMovesOn(t *testing.T) {
+	step, state := readyHarnessStep(t)
+	enter := tea.KeyMsg{Type: tea.KeyEnter}
+	step.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}, state) // none
+	if d, _ := step.Update(enter, state); d != flow.Next {
+		t.Fatalf("enter with no client selected: %v, want Next (the addon is still installed)", d)
+	}
+	step.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}, state)
+	if d, _ := step.Update(enter, state); d != flow.Next {
+		t.Fatalf("enter with a client selected: %v, want Next", d)
+	}
+}
+
+func TestEnterBeforeDetectionFinishesDoesNothing(t *testing.T) {
+	det, err := harness.New(harness.ServerSpec{Name: "freecad-mcp-test", Command: "freecad-mcp-test", Args: []string{"mcp"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &AppState{}
+	state.Harness.Selected = map[harness.ID]bool{} // left over from an earlier visit
+	step := harnessSelection{Step: installer.HarnessStep(context.Background(), det, harnessState, installer.HarnessStepOptions{AllDetected: true})}
+	step.Init(state) // detection has started but not finished
+	if d, _ := step.Update(tea.KeyMsg{Type: tea.KeyEnter}, state); d != flow.Continue {
+		t.Fatalf("enter while detecting: %v, want Continue", d)
+	}
+}
+
+func TestKeysWaitForTheListWhenTheStepIsRevisited(t *testing.T) {
+	step, state := readyHarnessStep(t)
+	step.Init(state) // back to the list: detection runs again
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyRunes, Runes: []rune{'a'}}, {Type: tea.KeySpace, Runes: []rune{' '}}, {Type: tea.KeyEnter}} {
+		if d, _ := step.Update(key, state); d != flow.Continue {
+			t.Fatalf("%q while detecting again: %v, want Continue", key.String(), d)
+		}
+	}
+	if state.Harness.Selected != nil {
+		t.Fatalf("a key acted on the previous list: %v", state.Harness.Selected)
+	}
+	if d, _ := step.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}}, state); d != flow.Quit {
+		t.Fatalf("q while detecting: %v, want Quit", d)
+	}
+}
+
 func TestApplyStepIsFoundByID(t *testing.T) {
 	det, err := harness.New(harness.ServerSpec{Name: "t", Command: "t"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	steps := []flow.Step[AppState]{
-		harnessSelection{installer.HarnessStep(context.Background(), det, harnessState, installer.HarnessStepOptions{})},
+		harnessSelection{Step: installer.HarnessStep(context.Background(), det, harnessState, installer.HarnessStepOptions{})},
 		newAddonStep(context.Background()),
 		applyGuard{installer.ApplyStep(context.Background(), det, harnessState, resultsState, installer.ApplyStepOptions{}), false},
 	}
@@ -209,6 +252,37 @@ func TestRevisitingTheLoginStepStartsClean(t *testing.T) {
 	step.Init(state)
 	if store.pending != nil || state.Login.Skipped {
 		t.Fatalf("second visit kept pending=%v skipped=%v", store.pending, state.Login.Skipped)
+	}
+}
+
+func TestGoingBackPassesALoginStepThatSkipsItself(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	sess := secret.NewSession()
+	sess.Set("token", "stored")
+	if err := secret.NewFileStore(path).Save(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	store := &deferredStore{inner: secret.NewFileStore(path)}
+	login := installer.LoginConfig{ID: "t", Store: store, Stages: []installer.LoginStage{{Field: installer.LoginField{Name: "token"}}}}
+	step := loginFresh{installer.LoginStep(context.Background(), login, loginState), store}
+
+	arrive := func(state *AppState) flow.Directive {
+		cmd := step.Init(state)
+		if cmd == nil {
+			t.Fatal("with a stored token the login step did not skip itself")
+		}
+		d, _ := step.Update(cmd(), state)
+		return d
+	}
+	if d := arrive(&AppState{}); d != flow.Skip {
+		t.Fatalf("moving forward: %v, want Skip", d)
+	}
+	state := &AppState{Retreating: true} // esc on the addon step
+	if d := arrive(state); d != flow.Back {
+		t.Fatalf("moving back: %v, want Back, or the client list cannot be reached", d)
+	}
+	if d := arrive(state); d != flow.Skip {
+		t.Fatalf("moving forward again: %v, want Skip", d)
 	}
 }
 

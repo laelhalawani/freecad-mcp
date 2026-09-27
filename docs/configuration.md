@@ -37,7 +37,10 @@ screenshots:
 }
 ```
 
-Restart your AI client after changing its configuration.
+Restart your AI client after changing its configuration. Running
+`freecad-mcp install` again leaves an entry you edited as it is (the wizard
+shows it deselected), unless you select that client, name it with `--clients`,
+or pass `--all`; `freecad-mcp uninstall` removes it like any other.
 
 ## Auto-start RPC server
 

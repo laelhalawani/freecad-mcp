@@ -55,6 +55,46 @@ func CacheDir() (string, error) {
 	return filepath.Join(home, ".cache", "freecad-mcp"), nil
 }
 
+// SnapName returns the name of the snap a command runs, or "" when it is
+// not one: the launcher /snap/bin/<snap>.<app> or /snap/bin/<snap>, or the
+// Snap FreeCAD's freecad.cmd named without a path.
+func SnapName(command string) string {
+	base := filepath.Base(command)
+	switch {
+	case strings.HasPrefix(filepath.ToSlash(command), "/snap/bin/"):
+		return strings.SplitN(base, ".", 2)[0]
+	case base == "freecad.cmd":
+		return "freecad"
+	}
+	return ""
+}
+
+// SnapDir is where freecad-mcp keeps files for the named snap (not created
+// here). A Snap-confined FreeCAD cannot read ~/.cache: the snap's home
+// interface leaves out hidden directories. It can read its own
+// ~/snap/<name>/common.
+func SnapDir(snap string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "snap", snap, "common", "freecad-mcp"), nil
+}
+
+// scriptDirFor returns the directory for scripts run by command.
+func scriptDirFor(command string) (string, error) {
+	snap := SnapName(command)
+	if snap == "" {
+		return ScriptDir()
+	}
+	dir, err := SnapDir(snap)
+	if err != nil {
+		return "", err
+	}
+	dir = filepath.Join(dir, "headless")
+	return dir, os.MkdirAll(dir, 0o755)
+}
+
 func clean(output []byte) string {
 	text := strings.ToValidUTF8(string(output), "�")
 	var lines []string
@@ -106,7 +146,7 @@ func Run(ctx context.Context, code string, timeout float64, command []string) Re
 	if len(command) == 0 {
 		return Result{Error: "freecadcmd not found: install FreeCAD, or set FREECAD_MCP_FREECADCMD to the command that starts it"}
 	}
-	dir, err := ScriptDir()
+	dir, err := scriptDirFor(command[0])
 	if err != nil {
 		return Result{Error: fmt.Sprintf("could not prepare the script directory: %v", err)}
 	}

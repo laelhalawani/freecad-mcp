@@ -27,13 +27,18 @@ curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/latest/download/
 ```
 
 The script downloads the binary for your platform, verifies it against the
-release's `SHA256SUMS.txt`, installs it into `%LOCALAPPDATA%\freecad-mcp\bin`
-(Windows) or `~/.freecad-mcp/bin` (macOS / Linux), adds that directory to your
-`PATH` and runs `freecad-mcp configure`, the setup wizard:
+release's `SHA256SUMS.txt` (and installs nothing if it cannot), installs it into
+`%LOCALAPPDATA%\freecad-mcp\bin` (Windows) or `~/.freecad-mcp/bin` (macOS /
+Linux), adds that directory to your `PATH` and runs `freecad-mcp configure`,
+the setup wizard:
 
 1. **AI clients**: pick the clients to register with. Every client found on the
    machine is listed and preselected; move with the arrow keys and press space
-   to deselect one.
+   to deselect one. A client whose `freecad` entry you edited by hand (for
+   example to add [settings](configuration.md#environment-variables)), or
+   whose `freecad` entry runs another program, starts deselected so that
+   entry is kept; selecting it replaces the entry. With no client selected,
+   setup continues and installs only the addon.
 2. **FreeCAD RPC auth token**: skip this unless you set a token with
    **Set Auth Token** in FreeCAD (see [configuration](configuration.md#3-require-an-auth-token)).
 3. **FreeCAD addon**: the wizard asks FreeCAD for its user data directory
@@ -44,11 +49,12 @@ release's `SHA256SUMS.txt`, installs it into `%LOCALAPPDATA%\freecad-mcp\bin`
    configuration, and the wizard tells you which clients need a restart. Then
    the token is saved and the addon installed.
 
-Nothing is written before step 4. Press `q` or `Ctrl+C` in steps 1 to 3 (or at
-the start of step 4) to cancel: the wizard changes nothing, and the install
-script removes the binary and the `PATH` entry it just added, or puts back the
-version you had installed before. Restart FreeCAD and your AI client when the
-wizard finishes.
+Nothing is written before step 4. Press `q` or `Ctrl+C` in steps 1 to 3 to
+cancel: the wizard changes nothing, and the install script removes the binary
+and the `PATH` entry it just added, or puts back the version you had installed
+before. Once step 4 starts writing the client configurations it runs to the
+end, and setup is complete. Restart FreeCAD and your AI client when the wizard
+finishes.
 
 To install a specific release instead of the latest, pass `-Version`
 (PowerShell) or set `VERSION` (sh):
@@ -64,19 +70,31 @@ curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/download/v0.2.1/
 ### Unattended install
 
 `freecad-mcp install --yes` does the same without prompts: it installs the
-addon (with auto-start on) and registers every detected client that is not
-configured yet. Add `--all` to re-register configured clients, `--clients
-claude-desktop,cursor` to pick clients, `--token <token>` to store the RPC auth
-token, and `--dry-run` to see the plan without writing anything. To pass these
-through the install script:
+addon (with auto-start on), registers every detected client that is not
+configured yet, and points entries that run another copy of `freecad-mcp` at
+this one. A client whose `freecad` entry was edited by hand, or runs another
+program, is left as it is, with a note on how to replace it.
+
+- `--all` re-registers every client, edited entries included (another
+  program's entry only when you name its client).
+- `--clients claude-desktop,cursor` registers exactly those clients, replacing
+  whatever entry they have.
+- `--token <token>` stores the RPC auth token.
+- `--dry-run` shows the plan without writing anything.
+
+To pass these through the install script, which with `--yes` also works
+without a terminal (in CI, Docker or a provisioning script):
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.ps1))) -ConfigureArgs "--yes"
+& ([scriptblock]::Create((irm https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.ps1))) -ConfigureArgs "--yes --clients cursor"
 ```
 
 ```sh
-curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.sh | CONFIGURE_ARGS="--yes" sh
+curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.sh | CONFIGURE_ARGS="--yes --clients cursor" sh
 ```
+
+The flags are split at spaces; for a value that contains one, give PowerShell
+an array instead: `-ConfigureArgs "--yes", "--token", "my token"`.
 
 ### Commands
 
@@ -86,8 +104,9 @@ curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/latest/download/
 | `freecad-mcp mcp` | Run the MCP server over stdio. |
 | `freecad-mcp install` / `configure` | The setup wizard (`--yes` for unattended). |
 | `freecad-mcp add` | Register the server in the current project's client configs instead of the global ones. |
-| `freecad-mcp uninstall` | Remove the server from the AI clients. |
-| `freecad-mcp uninstall --all` | Remove everything: the client registrations, the FreeCAD addon and its settings, the stored token, the cache, and the installed program with its `PATH` entry (`--dry-run` to preview). |
+| `freecad-mcp uninstall` | Remove the `freecad` entries that run `freecad-mcp` from the AI clients' global configurations, including entries edited by hand. An entry under that name that runs another program is left in place unless you name its client (`--clients cursor,zed` acts on only those; `--dry-run` previews). |
+| `freecad-mcp uninstall --all` | Remove everything `install` wrote: those client entries, the FreeCAD addon and its settings, the stored token, the cache, and the installed program with its `PATH` entry (`--dry-run` to preview). |
+| `freecad-mcp uninstall --scope project` | Remove the entries `add` wrote to the current project (`--dir <dir>` for another project). A token `add` stored stays in `<project>/.freecad-mcp/`; delete that directory to remove it. |
 | `freecad-mcp install-addon` | Install or update the FreeCAD addon (`--user-data-dir <dir>`, `--no-autostart`, `--dry-run`). |
 | `freecad-mcp uninstall-addon` | Remove the addon from FreeCAD. |
 | `freecad-mcp check-connection` | Check that FreeCAD's RPC server answers and that the addon matches. |

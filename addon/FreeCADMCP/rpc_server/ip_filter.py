@@ -9,6 +9,7 @@ import base64
 import hmac
 import ipaddress
 import re
+import time
 from email.message import Message
 from socketserver import ThreadingMixIn
 from xmlrpc.server import SimpleXMLRPCRequestHandler, SimpleXMLRPCServer
@@ -58,8 +59,47 @@ def browser_request_rejection(
     return None
 
 
+# A refused request's body is read and dropped, up to this size and for at
+# most this long in total, so an unauthenticated peer cannot use it to hold
+# a thread.
+_DISCARD_MAX_BYTES = 16 * 1024 * 1024
+_DISCARD_TIMEOUT_S = 5.0
+
+
 class BrowserGuardRequestHandler(SimpleXMLRPCRequestHandler):
     """Refuse requests a web page could have sent before they are dispatched."""
+
+    def discard_body(self) -> None:
+        """Read the unread body of a request that is being refused.
+
+        Closing a socket with unread input sends a TCP reset instead of a
+        normal close, and on Windows the reset can reach the client before it
+        reads the reply: it then sees "connection aborted" instead of the
+        status that says why (401 for a wrong token, 403, 415). A body sent
+        without Content-Length (chunked) is not read.
+        """
+        try:
+            remaining = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return
+        if remaining <= 0 or remaining > _DISCARD_MAX_BYTES:
+            return
+        deadline = time.monotonic() + _DISCARD_TIMEOUT_S
+        read = getattr(self.rfile, "read1", self.rfile.read)
+        try:
+            while remaining > 0:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return
+                self.connection.settimeout(left)
+                # read1 returns what has arrived instead of waiting for the
+                # whole chunk, so the deadline holds for a slow sender too.
+                chunk = read(min(remaining, 64 * 1024))
+                if not chunk:
+                    return
+                remaining -= len(chunk)
+        except OSError:
+            pass  # the reply is still sent; the client may just see a reset
 
     def do_POST(self) -> None:
         rejection = browser_request_rejection(self.headers, self.server.loopback_only)
@@ -70,6 +110,7 @@ class BrowserGuardRequestHandler(SimpleXMLRPCRequestHandler):
         FreeCAD.Console.PrintWarning(
             f"MCP RPC: Rejected request from {self.client_address[0]}: {reason}\n"
         )
+        self.discard_body()
         body = reason.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -113,6 +154,7 @@ class TokenAuthRequestHandler(BrowserGuardRequestHandler):
         FreeCAD.Console.PrintWarning(
             f"MCP RPC: Rejected unauthenticated request from {self.client_address[0]}\n"
         )
+        self.discard_body()
         self.send_error(401, "Unauthorized: valid auth token required")
         return False
 
