@@ -220,10 +220,11 @@ if [ "$code" -eq "$EXIT_CANCELLED" ]; then
   restore_backup
   rc_undo
   undo_directories
+  # The wizard already said "Setup cancelled"; say what was restored.
   if [ -n "$BACKUP" ]; then
-    printf '  Setup cancelled. The previously installed %s was kept; nothing else changed.\n' "$BIN"
+    printf '  The previously installed %s was kept.\n' "$BIN"
   else
-    printf '  Setup cancelled. Nothing was installed.\n'
+    printf '  %s was not installed.\n' "$BIN"
   fi
   exit 0
 fi

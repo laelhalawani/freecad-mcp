@@ -196,10 +196,11 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
     Restore-Backup
     Undo-Path
     Undo-Directories
+    # The wizard already said "Setup cancelled"; say what was restored.
     if ($backup) {
-      Write-Host "  Setup cancelled. The previously installed $Bin was kept; nothing else changed."
+      Write-Host "  The previously installed $Bin was kept."
     } else {
-      Write-Host "  Setup cancelled. Nothing was installed."
+      Write-Host "  $Bin was not installed."
     }
     return
   }

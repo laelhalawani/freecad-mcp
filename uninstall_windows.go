@@ -78,8 +78,12 @@ func removeInstallRoot(root string) error {
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
 	// Run from outside the directory being deleted.
 	cmd.Dir = os.TempDir()
+	// CREATE_NO_WINDOW gives the helper its own hidden console, so it keeps
+	// running when this terminal closes. DETACHED_PROCESS does not work
+	// here: powershell.exe started without any console exits before
+	// running its command (observed on Windows 11 with PowerShell 5.1).
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP,
+		CreationFlags: windows.CREATE_NO_WINDOW | windows.CREATE_NEW_PROCESS_GROUP,
 		HideWindow:    true,
 	}
 	return cmd.Start()
