@@ -4,7 +4,9 @@ from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset, StdioServerParamet
 # Agent configuration
 AGENT_NAME = "cad_design_agent"
 MODEL_NAME = "gemini-2.5-flash-lite"
-FREECAD_MCP_DIR = "path/to/freecad-mcp"  # Replace with actual path
+# The freecad-mcp binary from the one-line installer; use its absolute path
+# if it is not on PATH.
+FREECAD_MCP = "freecad-mcp"
 
 # Basic instruction
 BASIC_PROMPT = "You are a CAD designer."
@@ -17,8 +19,8 @@ root_agent = LlmAgent(
     tools=[
         MCPToolset(
             connection_params=StdioServerParameters(
-                command="uv",
-                args=["--directory", FREECAD_MCP_DIR, "run", "freecad-mcp"]
+                command=FREECAD_MCP,
+                args=["mcp"]
             )
         )
     ]

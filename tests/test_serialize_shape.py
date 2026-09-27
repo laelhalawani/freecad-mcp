@@ -1,6 +1,6 @@
 """Regression test: one invalid shape must not break the whole document serialization.
 
-See https://github.com/neka-nat/freecad-mcp/issues/109
+See https://github.com/neka-nat/freecad-mcp/issues/109 (reported upstream, before the fork)
 """
 
 import importlib

@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  go:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The headless runner's tests use Python in place of freecadcmd.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        run: go build -o dist/ .
+
+  # The FreeCAD addon is Python and runs inside FreeCAD (Python 3.11 in
+  # FreeCAD 1.x), so its tests run on the oldest Python FreeCAD bundles.
+  addon:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Byte-compile the addon
+        run: python -m compileall -q addon
+
+      - name: Test
+        run: |
+          python -m pip install "pytest>=8,<10"
+          python -m pytest -q tests

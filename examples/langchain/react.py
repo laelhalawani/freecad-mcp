@@ -19,10 +19,11 @@ llm = ChatGroq(
     name="cad_design_agent"
 )
 
-# MCP server parameters
+# MCP server parameters: the freecad-mcp binary from the one-line installer
+# (use its absolute path if it is not on PATH).
 server_params = StdioServerParameters(
-    command="uv",
-    args=["--directory", "path/to/freecad-mcp", "run", "freecad-mcp"]
+    command="freecad-mcp",
+    args=["mcp"]
 )
 
 # Basic CAD assistant prompt

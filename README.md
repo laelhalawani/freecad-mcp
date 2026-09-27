@@ -1,5 +1,3 @@
-[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/neka-nat-freecad-mcp-badge.png)](https://mseep.ai/app/neka-nat-freecad-mcp)
-
 # FreeCAD MCP
 
 Control FreeCAD from Claude Desktop and other MCP clients. Create and edit models,
@@ -16,57 +14,60 @@ See [more demos and examples](docs/examples.md) for a toy car, modelling from a
 
 ## Quick start
 
-You need FreeCAD and [uv / uvx](https://docs.astral.sh/uv/guides/tools/).
-FreeCAD MCP has two components: an addon running inside FreeCAD and an MCP server
-launched by your client.
+You only need [FreeCAD](https://www.freecad.org/downloads.php). FreeCAD MCP is a
+single self-contained binary: it needs no Python, uv or pip on your machine. The
+part that runs inside FreeCAD is an addon executed by FreeCAD's own bundled
+Python, and the binary installs it for you.
 
-### 1. Install and start the FreeCAD addon
+Windows (PowerShell):
 
-```bash
-git clone https://github.com/neka-nat/freecad-mcp.git
-cd freecad-mcp
+```powershell
+irm https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.ps1 | iex
 ```
 
-Copy `addon/FreeCADMCP` into your [FreeCAD addon directory](docs/installation.md#addon-directory),
-then restart FreeCAD. Select the **MCP Addon** workbench and click
-**Start RPC Server** in the **FreeCAD MCP** toolbar.
+macOS / Linux:
 
-See the [installation guide](docs/installation.md) for platform-specific commands
-and screenshots.
-
-### 2. Connect Claude Desktop
-
-Add the following entry to `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "freecad": {
-      "command": "uvx",
-      "args": ["freecad-mcp"]
-    }
-  }
-}
+```sh
+curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.sh | sh
 ```
 
-Restart Claude Desktop to load the configuration, keep FreeCAD open with its RPC
-server running, and ask Claude to create a model. Connections use `localhost` by
-default.
+The installer downloads `freecad-mcp`, verifies its SHA256 checksum, puts it on
+your `PATH` and starts the setup wizard, which:
+
+1. finds the AI clients on your machine (Claude Desktop, Claude Code, Cursor,
+   VS Code, Windsurf, Zed and more) and lets you pick the ones to register with;
+2. optionally stores the FreeCAD RPC auth token, if you set one in FreeCAD;
+3. asks FreeCAD where its addons live and installs the addon there, with the
+   RPC server set to start together with FreeCAD;
+4. registers the `freecad` server with the selected clients.
+
+Restart FreeCAD and your AI client, then ask it to create a model. Connections
+use `localhost` by default.
+
+Run `freecad-mcp doctor` at any time to check the installation, and
+`freecad-mcp update` to update the server together with the addon it ships
+(restart FreeCAD afterwards). See the
+[installation guide](docs/installation.md) for unattended installs, manual
+setup and troubleshooting.
 
 ## Documentation
 
 | Guide | Contents |
 | --- | --- |
-| [Installation](docs/installation.md) | Addon directories, setup screenshots, running from source |
-| [Configuration](docs/configuration.md) | Auto-start, text feedback, remote connections |
+| [Installation](docs/installation.md) | Installer, commands, addon directories, running from source |
+| [Configuration](docs/configuration.md) | Environment variables, auto-start, text feedback, remote connections |
 | [Tools](docs/tools.md) | Available tools, screenshots, FEM analysis |
 | [Code execution](docs/execution.md) | GUI execution, background jobs, headless scripts, timeout troubleshooting |
 | [Demos and examples](docs/examples.md) | Design demos, FEM example, ADK and LangChain integrations |
 
 ## Contributors
 
-<a href="https://github.com/neka-nat/freecad-mcp/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=neka-nat/freecad-mcp" />
+<a href="https://github.com/laelhalawani/freecad-mcp/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=laelhalawani/freecad-mcp" />
 </a>
 
 Made with [contrib.rocks](https://contrib.rocks).
+
+## Credits
+
+This project was forked and reworked from [neka-nat/freecad-mcp](https://github.com/neka-nat/freecad-mcp).
