@@ -1,112 +1,215 @@
-param(
-  [string]$Owner = "laelhalawani",
-  [string]$Repo = "freecad-mcp",
-  [string]$Bin = "freecad-mcp",
-  [string[]]$ConfigureArgs = @()
-)
+# Installs freecad-mcp from GitHub releases and runs its setup wizard.
+# Cancelling the wizard undoes everything this script changed.
+#
+#   irm https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.ps1 | iex
+#
+# To pass parameters (a specific release, or flags for the wizard):
+#   & ([scriptblock]::Create((irm <url>))) -Version v0.2.1 -ConfigureArgs "--yes"
+#
+# The whole script is one script block: with `irm ... | iex` it runs in the
+# caller's own session, and this keeps its variables, functions and
+# preference settings out of that session and never calls `exit` in it.
+& {
+  param(
+    [string]$Owner = "laelhalawani",
+    [string]$Repo = "freecad-mcp",
+    [string]$Bin = "freecad-mcp",
+    [string]$Version = "latest",
+    [string[]]$ConfigureArgs = @()
+  )
+  $ErrorActionPreference = "Stop"
+  # Windows PowerShell's progress bar slows downloads down many times over.
+  $ProgressPreference = "SilentlyContinue"
+  # `freecad-mcp configure` exits with 3 when the wizard is left before it
+  # changed anything.
+  $exitCancelled = 3
 
-$ErrorActionPreference = "Stop"
-
-function Get-Arch {
-  $arch = $env:PROCESSOR_ARCHITECTURE
-  switch ($arch) {
-    { $_ -in 'AMD64','x64' } { return 'amd64' }
-    'ARM64'                  { return 'arm64' }
-    default                  { Write-Host "  Unsupported architecture: $arch" -ForegroundColor Red; exit 1 }
+  # --- user PATH, read and written in the registry as stored ---------------
+  # [Environment]::GetEnvironmentVariable expands %VAR% entries and
+  # SetEnvironmentVariable writes REG_SZ, which would turn a REG_EXPAND_SZ
+  # PATH into fixed paths; the registry API keeps both as they are.
+  function Get-UserPath {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment")
+    try {
+      if ($key.GetValueNames() -notcontains "Path") {
+        return @{ Value = ""; Kind = [Microsoft.Win32.RegistryValueKind]::ExpandString }
+      }
+      return @{
+        Value = $key.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        Kind  = $key.GetValueKind("Path")
+      }
+    } finally { $key.Close() }
   }
-}
+  function Set-UserPath([string]$value, $kind) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+    try { $key.SetValue("Path", $value, $kind) } finally { $key.Close() }
+    # Tell Explorer and new terminals, as SetEnvironmentVariable would.
+    try {
+      if (-not ("FreecadMcpInstaller.NativeMethods" -as [type])) {
+        Add-Type -Namespace FreecadMcpInstaller -Name NativeMethods -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint Msg, System.UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out System.UIntPtr lpdwResult);
+'@
+      }
+      $result = [System.UIntPtr]::Zero
+      [void][FreecadMcpInstaller.NativeMethods]::SendMessageTimeout([System.IntPtr]0xffff, 0x1a, [System.UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result)
+    } catch { }
+  }
+  function Test-SameDir([string]$a, [string]$b) {
+    return $a.Trim().TrimEnd("\") -ieq $b.Trim().TrimEnd("\")
+  }
 
-function Get-OS {
-  return "windows"
-}
+  switch ($env:PROCESSOR_ARCHITECTURE) {
+    { $_ -in 'AMD64', 'x64' } { $arch = 'amd64' }
+    'ARM64'                   { $arch = 'arm64' }
+    default { Write-Host "  Unsupported architecture: $($env:PROCESSOR_ARCHITECTURE)" -ForegroundColor Red; return }
+  }
 
-$os = Get-OS
-$arch = Get-Arch
-$asset = "$Bin-$os-$arch.exe"
-$url = "https://github.com/$Owner/$Repo/releases/latest/download/$asset"
-$localAppData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE "AppData\Local" }
-$installDir = Join-Path $localAppData "$Repo\bin"
-$target = "$installDir\$Bin.exe"
+  $asset = "$Bin-windows-$arch.exe"
+  if ($Version -eq "latest") {
+    $base = "https://github.com/$Owner/$Repo/releases/latest/download"
+  } else {
+    $base = "https://github.com/$Owner/$Repo/releases/download/$Version"
+  }
+  $localAppData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE "AppData\Local" }
+  $installRoot = Join-Path $localAppData $Repo
+  $installDir = Join-Path $installRoot "bin"
+  $target = Join-Path $installDir "$Bin.exe"
 
-New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+  # Record what exists now, so a cancelled setup can put it back.
+  $createdRoot = -not (Test-Path $installRoot)
+  $createdDir = -not (Test-Path $installDir)
+  function Undo-Directories {
+    if ($createdDir -and (Test-Path $installDir) -and -not (Get-ChildItem $installDir -Force)) {
+      Remove-Item $installDir -Force -ErrorAction SilentlyContinue
+    }
+    if ($createdRoot -and (Test-Path $installRoot) -and -not (Get-ChildItem $installRoot -Force)) {
+      Remove-Item $installRoot -Force -ErrorAction SilentlyContinue
+    }
+  }
 
-Write-Host "  $Bin installer"
-Write-Host "  Downloading $asset..."
+  New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
-try {
-  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-  Invoke-WebRequest -Uri $url -OutFile "$target.new" -UseBasicParsing -ErrorAction Stop
-} catch {
-  Write-Host "  Download failed: $_" -ForegroundColor Red
-  exit 1
-}
+  Write-Host "  $Bin installer"
+  Write-Host "  Downloading $asset ($Version)..."
+  try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -Uri "$base/$asset" -OutFile "$target.new" -UseBasicParsing
+  } catch {
+    Write-Host "  Download failed: $_" -ForegroundColor Red
+    Remove-Item "$target.new" -Force -ErrorAction SilentlyContinue
+    Undo-Directories
+    return
+  }
 
-if (-not (Test-Path "$target.new")) {
-  Write-Host "  Download did not complete." -ForegroundColor Red
-  exit 1
-}
-
-# Verify SHA256 checksum
-$checksumUrl = $url.Substring(0, $url.LastIndexOf('/')) + '/SHA256SUMS.txt'
-$verified = $false
-try {
-    $checksums = (Invoke-WebRequest -Uri $checksumUrl -UseBasicParsing).Content
+  # Verify the SHA256 checksum.
+  $verified = $false
+  try {
+    $checksums = (Invoke-WebRequest -Uri "$base/SHA256SUMS.txt" -UseBasicParsing).Content
     # GitHub serves release assets as application/octet-stream, for which
     # Windows PowerShell returns the content as bytes rather than text.
     if ($checksums -is [byte[]]) { $checksums = [System.Text.Encoding]::UTF8.GetString($checksums) }
     $pattern = ' \*?' + [regex]::Escape($asset) + '\s*$'
     $line = $checksums -split "`n" | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_ -match $pattern } | Select-Object -First 1
     if ($line) {
-        $expectedHash = ($line -split '\s+')[0].ToLower()
-        $actualHash = (Get-FileHash -Path "$target.new" -Algorithm SHA256).Hash.ToLower()
-        if ($expectedHash -ne $actualHash) {
-            Write-Host "  SHA256 mismatch." -ForegroundColor Red
-            Remove-Item "$target.new" -ErrorAction SilentlyContinue
-            exit 1
-        }
-        $verified = $true
+      $expectedHash = ($line -split '\s+')[0].ToLower()
+      $actualHash = (Get-FileHash -Path "$target.new" -Algorithm SHA256).Hash.ToLower()
+      if ($expectedHash -ne $actualHash) {
+        Write-Host "  SHA256 mismatch; nothing was installed." -ForegroundColor Red
+        Remove-Item "$target.new" -Force -ErrorAction SilentlyContinue
+        Undo-Directories
+        return
+      }
+      $verified = $true
     }
-} catch { }
-if (-not $verified) {
+  } catch { }
+  if (-not $verified) {
     Write-Host "  Warning: could not verify SHA256SUMS.txt; the download was not verified." -ForegroundColor Yellow
-}
+  }
 
-# Swap the new binary into place using move-aside
-$oldTarget = "$target.old-$([System.Guid]::NewGuid().ToString('N').Substring(0,8))"
-if (Test-Path $target) {
+  # Keep a previous version until setup finishes. Its name must not match
+  # "<bin>.exe.old-*": the program deletes those files when it starts.
+  $backup = $null
+  if (Test-Path $target) {
+    $backup = "$target.bak-$([System.Guid]::NewGuid().ToString('N').Substring(0, 8))"
     try {
-        Move-Item $target $oldTarget -Force
+      Move-Item $target $backup -Force
     } catch {
-        Write-Host "  Could not replace binary. Close any running processes and retry." -ForegroundColor Red
-        Remove-Item "$target.new" -ErrorAction SilentlyContinue
-        exit 1
+      Write-Host "  Could not replace $target. Close any running $Bin and retry." -ForegroundColor Red
+      Remove-Item "$target.new" -Force -ErrorAction SilentlyContinue
+      return
     }
-}
-try {
+  }
+  function Restore-Backup {
+    Remove-Item $target -Force -ErrorAction SilentlyContinue
+    if ($backup -and (Test-Path $backup)) { Move-Item $backup $target -Force }
+  }
+  try {
     Move-Item "$target.new" $target -Force
-} catch {
-    Write-Host "  Could not replace binary. Close any running processes and retry." -ForegroundColor Red
-    if (Test-Path $oldTarget) { Move-Item $oldTarget $target -Force }
-    Remove-Item "$target.new" -ErrorAction SilentlyContinue
-    exit 1
-}
-Remove-Item $oldTarget -Force -ErrorAction SilentlyContinue
+  } catch {
+    Write-Host "  Could not install $target." -ForegroundColor Red
+    Remove-Item "$target.new" -Force -ErrorAction SilentlyContinue
+    Restore-Backup
+    Undo-Directories
+    return
+  }
 
-$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($userPath -notlike "*$installDir*") {
-  $newPath = "$installDir;$userPath"
-  [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-  $env:Path = "$installDir;$env:Path"
-  Write-Host "  Added $installDir to your PATH. Restart your terminal."
-}
+  # Put the install directory on the user PATH, remembering whether we did.
+  $addedPath = $false
+  $userPath = Get-UserPath
+  if (-not (@($userPath.Value -split ";") | Where-Object { Test-SameDir $_ $installDir })) {
+    $newValue = if ($userPath.Value) { "$installDir;$($userPath.Value)" } else { $installDir }
+    Set-UserPath $newValue $userPath.Kind
+    $env:Path = "$installDir;$env:Path"
+    $addedPath = $true
+  }
+  function Undo-Path {
+    if (-not $addedPath) { return }
+    # Remove only our entry, keeping any change made to PATH meanwhile.
+    $current = Get-UserPath
+    $kept = @($current.Value -split ";" | Where-Object { -not (Test-SameDir $_ $installDir) })
+    Set-UserPath ($kept -join ";") $current.Kind
+    $env:Path = (@($env:Path -split ";" | Where-Object { -not (Test-SameDir $_ $installDir) })) -join ";"
+  }
 
-# --- launch the configurer ---
-try {
+  # Run the setup wizard, in a terminal only: without one it cannot ask,
+  # and `configure` would register every detected client unasked.
+  $interactive = $false
+  try { $interactive = -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected } catch { }
+  $unattended = $ConfigureArgs -contains "--yes"
+  if (-not $interactive -and -not $unattended) {
+    if ($backup) { Remove-Item $backup -Force -ErrorAction SilentlyContinue }
+    Write-Host "  Installed $Bin to $target."
+    Write-Host "  Not running in a terminal. Finish setup in one with: $Bin configure"
+    return
+  }
+  try {
     & $target configure @ConfigureArgs
-    if ($LASTEXITCODE -ne 0) { throw "exit code $LASTEXITCODE" }
-} catch {
-    Write-Host "  configure did not complete: $_" -ForegroundColor Red
-    Write-Host "  Re-run ``$Bin configure`` later to finish setup." -ForegroundColor Yellow
-}
+    $code = $LASTEXITCODE
+  } catch {
+    Write-Host "  Could not run $target`: $_" -ForegroundColor Red
+    $code = $exitCancelled
+  }
 
-Write-Host "  Installed $Bin to $target"
+  if ($code -eq $exitCancelled) {
+    # Put everything back as it was.
+    Restore-Backup
+    Undo-Path
+    Undo-Directories
+    if ($backup) {
+      Write-Host "  Setup cancelled. The previously installed $Bin was kept; nothing else changed."
+    } else {
+      Write-Host "  Setup cancelled. Nothing was installed."
+    }
+    return
+  }
+
+  if ($backup) { Remove-Item $backup -Force -ErrorAction SilentlyContinue }
+  if ($addedPath) { Write-Host "  Added $installDir to your PATH." }
+  if ($code -ne 0) {
+    Write-Host "  Setup did not finish (exit code $code). $Bin is installed at $target." -ForegroundColor Yellow
+    Write-Host "  Run ``$Bin configure`` to finish, or ``$Bin uninstall --all`` to remove it." -ForegroundColor Yellow
+    return
+  }
+  Write-Host "  Installed $Bin to $target"
+} @args

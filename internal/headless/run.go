@@ -38,12 +38,21 @@ var crashReport = regexp.MustCompile(`(?m)^Program received signal (SIG[A-Z0-9]+
 // ScriptDir is where scripts are written before they run. Flatpak sandboxes
 // usually see $HOME but not /tmp, so it lives under the home directory.
 var ScriptDir = func() (string, error) {
+	dir, err := CacheDir()
+	if err != nil {
+		return "", err
+	}
+	dir = filepath.Join(dir, "headless")
+	return dir, os.MkdirAll(dir, 0o755)
+}
+
+// CacheDir is freecad-mcp's cache directory (not created here).
+func CacheDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, ".cache", "freecad-mcp", "headless")
-	return dir, os.MkdirAll(dir, 0o755)
+	return filepath.Join(home, ".cache", "freecad-mcp"), nil
 }
 
 func clean(output []byte) string {

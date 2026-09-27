@@ -204,6 +204,16 @@ func writeSynced(path string, data []byte, mode os.FileMode) error {
 	return f.Close()
 }
 
+// RemoveSettings deletes the addon's settings file from t. It reports false
+// when there was none.
+func RemoveSettings(t Target) (bool, error) {
+	err := os.Remove(filepath.Join(t.UserDataDir, SettingsFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // AutoStart reports the addon's auto-start setting in t.
 func AutoStart(t Target) bool {
 	data, err := os.ReadFile(filepath.Join(t.UserDataDir, SettingsFile))

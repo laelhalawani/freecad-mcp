@@ -32,17 +32,34 @@ release's `SHA256SUMS.txt`, installs it into `%LOCALAPPDATA%\freecad-mcp\bin`
 `PATH` and runs `freecad-mcp configure`, the setup wizard:
 
 1. **AI clients**: pick the clients to register with. Every client found on the
-   machine is listed, with the ones already configured marked.
+   machine is listed and preselected; move with the arrow keys and press space
+   to deselect one.
 2. **FreeCAD RPC auth token**: skip this unless you set a token with
    **Set Auth Token** in FreeCAD (see [configuration](configuration.md#3-require-an-auth-token)).
 3. **FreeCAD addon**: the wizard asks FreeCAD for its user data directory
-   (`FreeCAD.getUserAppDataDir()`) and installs the addon into its `Mod`
-   directory. The option to start the RPC server together with FreeCAD is on
-   by default; turn it off with space to start the server by hand instead.
+   (`FreeCAD.getUserAppDataDir()`) and shows where the addon will go. The
+   option to start the RPC server together with FreeCAD is on by default; turn
+   it off with space to start the server by hand instead.
 4. **Registration**: the `freecad` server is added to each selected client's
-   configuration, and the wizard tells you which clients need a restart.
+   configuration, and the wizard tells you which clients need a restart. Then
+   the token is saved and the addon installed.
 
-Restart FreeCAD and your AI client when the wizard finishes.
+Nothing is written before step 4. Press `q` or `Ctrl+C` in steps 1 to 3 (or at
+the start of step 4) to cancel: the wizard changes nothing, and the install
+script removes the binary and the `PATH` entry it just added, or puts back the
+version you had installed before. Restart FreeCAD and your AI client when the
+wizard finishes.
+
+To install a specific release instead of the latest, pass `-Version`
+(PowerShell) or set `VERSION` (sh):
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/laelhalawani/freecad-mcp/releases/download/v0.2.1/install.ps1))) -Version v0.2.1
+```
+
+```sh
+curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/download/v0.2.1/install.sh | VERSION=v0.2.1 sh
+```
 
 ### Unattended install
 
@@ -70,6 +87,7 @@ curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/latest/download/
 | `freecad-mcp install` / `configure` | The setup wizard (`--yes` for unattended). |
 | `freecad-mcp add` | Register the server in the current project's client configs instead of the global ones. |
 | `freecad-mcp uninstall` | Remove the server from the AI clients. |
+| `freecad-mcp uninstall --all` | Remove everything: the client registrations, the FreeCAD addon and its settings, the stored token, the cache, and the installed program with its `PATH` entry (`--dry-run` to preview). |
 | `freecad-mcp install-addon` | Install or update the FreeCAD addon (`--user-data-dir <dir>`, `--no-autostart`, `--dry-run`). |
 | `freecad-mcp uninstall-addon` | Remove the addon from FreeCAD. |
 | `freecad-mcp check-connection` | Check that FreeCAD's RPC server answers and that the addon matches. |

@@ -405,34 +405,33 @@ func (c rpcCheck) Run(ctx context.Context) doctor.Result {
 }
 
 // --- Install wizard step ---
+//
+// The step only records the choice. The wizard installs the addon after the
+// AI clients were registered (see runWizard), so leaving the wizard before
+// that point changes nothing on the machine.
 
 type addonPhase int
 
 const (
 	addonLocating addonPhase = iota
 	addonChoosing
-	addonInstalling
-	addonDone
+	addonNotFound
 )
 
 type addonState struct {
 	Phase     addonPhase
 	Targets   []addoninstall.Target
 	AutoStart bool
-	Results   []addonResult
-	Report    string
 }
 
 type addonLocatedMsg struct{ targets []addoninstall.Target }
-type addonInstalledMsg struct{ results []addonResult }
 
 type addonStep struct {
-	ctx    context.Context
-	dryRun bool
+	ctx context.Context
 }
 
-func newAddonStep(ctx context.Context, dryRun bool) flow.Step[AppState] {
-	return &addonStep{ctx: ctx, dryRun: dryRun}
+func newAddonStep(ctx context.Context) flow.Step[AppState] {
+	return &addonStep{ctx: ctx}
 }
 
 func (s *addonStep) ID() string { return "freecad-addon" }
@@ -442,9 +441,9 @@ func (s *addonStep) Title(*AppState) string { return "FreeCAD addon" }
 func (s *addonStep) Hints(state *AppState) []struct{ Key, Label string } {
 	switch state.Addon.Phase {
 	case addonChoosing:
-		return []struct{ Key, Label string }{{"space", "toggle"}, {"enter", "install"}, {"esc", "back"}}
-	case addonDone:
-		return []struct{ Key, Label string }{{"enter", "continue"}}
+		return []struct{ Key, Label string }{{"space", "toggle"}, {"enter", "continue"}, {"esc", "back"}, {"q", "cancel"}}
+	case addonNotFound:
+		return []struct{ Key, Label string }{{"enter", "continue"}, {"esc", "back"}, {"q", "cancel"}}
 	}
 	return nil
 }
@@ -463,63 +462,31 @@ func (s *addonStep) Update(msg tea.Msg, state *AppState) (flow.Directive, tea.Cm
 	case addonLocatedMsg:
 		a.Targets = m.targets
 		if len(a.Targets) == 0 {
-			a.Phase, a.Report = addonDone, freecadNotFound
+			a.Phase = addonNotFound
 		} else {
 			a.Phase = addonChoosing
 		}
 		return flow.Continue, nil
-	case addonInstalledMsg:
-		a.Results = m.results
-		var b strings.Builder
-		if printAddonResults(&b, m.results, a.AutoStart) != 0 {
-			// Registration still runs, but the wizard must not exit 0.
-			for _, r := range m.results {
-				if r.Err != nil {
-					state.Failure = fmt.Errorf("FreeCAD addon: %s: %w", r.Target.AddonDir(), r.Err)
-					break
-				}
-			}
-		}
-		a.Phase, a.Report = addonDone, b.String()
-		return flow.Continue, nil
 	case tea.KeyMsg:
 		key := m.String()
-		if key == "ctrl+c" || key == "q" && a.Phase != addonInstalling {
+		if key == "ctrl+c" || key == "q" {
 			return flow.Quit, nil
 		}
-		switch a.Phase {
-		case addonChoosing:
-			switch key {
-			case " ", "space":
+		if a.Phase == addonLocating {
+			return flow.Continue, nil
+		}
+		switch key {
+		case " ", "space":
+			if a.Phase == addonChoosing {
 				a.AutoStart = !a.AutoStart
-			case "esc":
-				return flow.Back, nil
-			case "enter":
-				if s.dryRun {
-					var b strings.Builder
-					for _, t := range a.Targets {
-						fmt.Fprintf(&b, "  would install the FreeCAD addon into %s\n", t.AddonDir())
-					}
-					a.Phase, a.Report = addonDone, b.String()
-					return flow.Continue, nil
-				}
-				a.Phase = addonInstalling
-				targets, auto := a.Targets, a.AutoStart
-				return flow.Continue, tea.Batch(tui.Spinner(), func() tea.Msg {
-					var results []addonResult
-					for _, t := range targets {
-						results = append(results, installAddon(t, auto))
-					}
-					return addonInstalledMsg{results: results}
-				})
 			}
-		case addonDone:
-			if key == "enter" {
-				return flow.Next, nil
-			}
+		case "esc":
+			return flow.Back, nil
+		case "enter":
+			return flow.Next, nil
 		}
 	}
-	if tui.IsSpinMsg(msg) && (a.Phase == addonLocating || a.Phase == addonInstalling) {
+	if tui.IsSpinMsg(msg) && a.Phase == addonLocating {
 		state.Spinner.Frame++
 		return flow.Continue, tui.Spinner()
 	}
@@ -533,11 +500,9 @@ func (s *addonStep) View(state *AppState) string {
 	switch a.Phase {
 	case addonLocating:
 		fmt.Fprintf(&b, "  %s Asking FreeCAD where its addons live...\n", tui.SpinFrame(state.Spinner.Frame))
-	case addonInstalling:
-		fmt.Fprintf(&b, "  %s Installing the addon...\n", tui.SpinFrame(state.Spinner.Frame))
 	case addonChoosing:
 		version, _, _ := addoninstall.EmbeddedVersion()
-		fmt.Fprintf(&b, "  The MCP server talks to FreeCAD through an addon (version %s).\n  It will be installed into:\n\n", version)
+		fmt.Fprintf(&b, "  The MCP server talks to FreeCAD through an addon (version %s).\n  After the AI clients are registered, it is installed into:\n\n", version)
 		for _, t := range a.Targets {
 			line := "    " + t.AddonDir()
 			if v, err := addoninstall.InstalledVersion(t); err == nil {
@@ -554,13 +519,12 @@ func (s *addonStep) View(state *AppState) string {
 			ID: "autostart", Label: "Start the RPC server with FreeCAD", Tier: "recommended", Checked: a.AutoStart,
 		}}, 0))
 		b.WriteString(tui.Footer(theme, tui.Hints(theme,
-			tui.Hint{Key: "space", Label: "toggle"}, tui.Hint{Key: "enter", Label: "install"}, tui.Hint{Key: "esc", Label: "back"})))
-	case addonDone:
-		b.WriteString(a.Report)
-		if !strings.HasSuffix(a.Report, "\n") {
-			b.WriteString("\n")
-		}
-		b.WriteString(tui.Footer(theme, tui.Hints(theme, tui.Hint{Key: "enter", Label: "continue"})))
+			tui.Hint{Key: "space", Label: "toggle"}, tui.Hint{Key: "enter", Label: "continue"},
+			tui.Hint{Key: "esc", Label: "back"}, tui.Hint{Key: "q", Label: "cancel"})))
+	case addonNotFound:
+		b.WriteString(freecadNotFound + "\n\n  The AI clients can still be registered now.\n")
+		b.WriteString(tui.Footer(theme, tui.Hints(theme,
+			tui.Hint{Key: "enter", Label: "continue"}, tui.Hint{Key: "esc", Label: "back"}, tui.Hint{Key: "q", Label: "cancel"})))
 	}
 	return tui.Section(theme, s.Title(state), b.String())
 }
