@@ -6,6 +6,7 @@ import base64
 import io
 import math
 import os
+import re
 import tempfile
 import threading
 import time
@@ -13,6 +14,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 from xmlrpc.client import Fault
+from xmlrpc.server import resolve_dotted_attribute
 
 from PySide import QtCore
 
@@ -39,6 +41,9 @@ rpc_server_thread = None
 rpc_server_instance = None
 _stop_thread = None  # drains shutdown off the GUI thread; see stop_rpc_server
 
+# Clients accepted while remote connections are off.
+LOOPBACK_ALLOWED_IPS = "127.0.0.1,::1"
+
 # Persistent namespace for execute_code / execute_code_async. A dedicated dict
 # (instead of this module's globals()) keeps user code from shadowing server
 # internals like dispatch_to_gui while preserving the documented pattern of
@@ -51,10 +56,10 @@ _EXEC_NAMESPACE: dict[str, Any] = {
 }
 _async_execution = threading.local()
 
-# Background jobs started by execute_code_async, newest last. Errors raised off
-# the GUI thread used to reach only the Report View; the registry lets the
-# client read them via get_async_status. Retain all running jobs and bound only
-# completed history, in completion order.
+# Background jobs started by execute_code_async, newest last. The registry lets
+# the client read errors raised off the GUI thread via get_async_status instead
+# of only the Report View. Retain all running jobs and bound only completed
+# history, in completion order.
 _ASYNC_JOBS: dict[str, dict[str, Any]] = {}
 _ASYNC_JOBS_LOCK = threading.Lock()
 _ASYNC_JOBS_KEEP = 20
@@ -71,6 +76,33 @@ def _record_job(job_id: str, **fields: Any) -> None:
         ]
         for key in finished[:max(0, len(finished) - _ASYNC_JOBS_KEEP)]:
             del _ASYNC_JOBS[key]
+
+
+# XML 1.0 allows tab, line feed, carriage return and the characters from
+# U+0020 up, except the surrogates, U+FFFE and U+FFFF. xmlrpc.client escapes
+# only markup characters, so any other character (terminal colour codes in
+# script output, a stray NUL in an object label) would make the whole reply
+# unreadable to the client.
+_XML_FORBIDDEN_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿]")
+
+
+def _escape_forbidden(match: "re.Match[str]") -> str:
+    return f"\\u{ord(match.group()):04x}"
+
+
+def _xml_safe(value: Any) -> Any:
+    """Return ``value`` with every string made valid XML 1.0 text.
+
+    Forbidden characters are written as ``\\uXXXX`` escapes, so they stay
+    visible in the reply instead of being dropped.
+    """
+    if isinstance(value, str):
+        return _XML_FORBIDDEN_RE.sub(_escape_forbidden, value)
+    if isinstance(value, dict):
+        return {_xml_safe(key): _xml_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_xml_safe(item) for item in value]
+    return value
 
 
 def _ok(res) -> bool:
@@ -118,12 +150,34 @@ def _query_on_gui(task: Callable[[], Any], operation: str) -> Any:
 
 class FreeCADRPC:
     """RPC server for FreeCAD"""
-    TIMEOUT = 60               # generous wait for GUI thread to become free
     EXECUTE_CODE_TIMEOUT = 90  # GUI-thread execution; use execute_code_async for heavy OCCT ops
     # Ceiling for a caller-supplied execute_code timeout. A GUI task cannot be
     # cancelled once started, so an unbounded wait would hide a wedged GUI
     # thread from the caller indefinitely.
     MAX_EXECUTE_CODE_TIMEOUT = 1800
+
+    def _dispatch(self, method: str, params: tuple) -> Any:
+        """Call ``method`` and keep its reply and any fault valid XML.
+
+        SimpleXMLRPCServer calls this for every method of the registered
+        instance. Names starting with ``_`` are refused, as the default lookup
+        refuses them, so helpers such as this one and ``_create_object_gui``
+        cannot be called over RPC. Faults use the default wording, with
+        characters XML 1.0 forbids escaped (see ``_xml_safe``).
+        """
+        try:
+            func = resolve_dotted_attribute(self, method, False)
+        except AttributeError:
+            func = None
+        if func is None or not callable(func):
+            raise Exception(f'method "{method}" is not supported')
+        try:
+            result = func(*params)
+        except Fault as fault:
+            raise Fault(fault.faultCode, _xml_safe(str(fault.faultString))) from None
+        except Exception as e:
+            raise Fault(1, _xml_safe(f"{type(e)}:{e}")) from None
+        return _xml_safe(result)
 
     def ping(self):
         return True
@@ -159,7 +213,7 @@ class FreeCADRPC:
             return {"success": True, "jobs": [dict(j) for j in _ASYNC_JOBS.values()]}
 
     def create_document(self, name="New_Document"):
-        # The GUI handler reports the document's ACTUAL name — FreeCAD
+        # The GUI handler reports the document's ACTUAL name: FreeCAD
         # sanitises requested names ("My Doc" -> "My_Doc") and de-duplicates
         # ("Doc" -> "Doc001"); reporting the requested name breaks every
         # follow-up call that uses it.
@@ -179,7 +233,7 @@ class FreeCADRPC:
             properties=obj_data.get("Properties", {}),
         )
         # create_object_gui reports the created object's actual Name (see
-        # its docstring) — same sanitise/de-duplicate concern as documents.
+        # its docstring), the same sanitise/de-duplicate concern as documents.
         res = dispatch_to_gui(
             lambda: self._create_object_gui(doc_name, obj),
             operation_name="create_object",
@@ -215,14 +269,15 @@ class FreeCADRPC:
         """Close and re-open a document by name to pick up external file
         changes (e.g. edits made by another process such as `freecadcmd`
         running headlessly). Returns success once the new document is
-        loaded from disk.
+        loaded from disk, with ``document_name`` set to the name FreeCAD gave
+        the reopened document, which can differ from ``doc_name``.
         """
         res = dispatch_to_gui(
             lambda: self._reload_document_gui(doc_name),
             operation_name="reload_document",
         )
-        if _ok(res):
-            return {"success": True, "document_name": doc_name}
+        if isinstance(res, dict) and res.get("success"):
+            return res
         return _err(res)
 
     def run_fem_analysis(self, doc_name: str, analysis_name: str, timeout: int = 600) -> dict[str, Any]:
@@ -244,10 +299,12 @@ class FreeCADRPC:
         """Start code execution in a background thread and return immediately.
 
         Use for long-running OCCT *geometry* work (fuse/cut/loft on shapes) that
-        would otherwise exceed the MCP timeout. The caller should poll a document
-        object for completion status (e.g. check SessionState.Label via get_object).
+        would otherwise exceed the MCP timeout. The reply carries a ``job_id``;
+        pass it to get_async_status to read the job's state (``running``,
+        ``done`` or ``failed``) and, when it failed, its error and traceback.
+        Starting a job never waits for the GUI thread.
 
-        Thread-safety contract — read before using this method:
+        Thread-safety contract (read before using this method):
 
         FreeCAD documents and the Coin3D scenegraph are NOT thread-safe. Code run
         here executes off the GUI thread, so it must not touch them directly.
@@ -273,22 +330,9 @@ class FreeCADRPC:
         functions can reuse it in later async calls. It may only be called from
         an async worker, not from a synchronous script or GUI callback.
         """
-        def _set_status(msg):
-            dispatch_to_gui(
-                lambda: FreeCADGui.getMainWindow().statusBar().showMessage(msg),
-                operation_name="show_async_status",
-            )
-
-        def _clear_status():
-            # Short timeout: this runs in the worker's finally block, so a wedged
-            # or busy GUI thread must not keep the worker alive for the full
-            # default dispatch timeout. Losing a status-bar reset is harmless.
-            dispatch_to_gui(
-                lambda: FreeCADGui.getMainWindow().statusBar().clearMessage(),
-                timeout=5,
-                operation_name="clear_async_status",
-            )
-
+        # No status-bar message is shown for the job: setting one would wait on
+        # the GUI thread, and process_gui_tasks clears the status bar as soon as
+        # the task that set it finishes. Progress is read via get_async_status.
         job_id = f"job-{uuid.uuid4().hex}"
         code_preview = code if len(code) <= 200 else code[:200] + "…"
 
@@ -314,8 +358,8 @@ class FreeCADRPC:
                 }
             finally:
                 del _async_execution.active
-                # Publish the result before best-effort GUI/log cleanup. A busy
-                # GUI must not prevent a client from observing script failure.
+                # Publish the result before best-effort logging, so a failing
+                # log call cannot hide the script's outcome from the client.
                 _record_job(job_id, finished=time.time(), **outcome)
                 try:
                     if outcome["state"] == "done":
@@ -326,14 +370,9 @@ class FreeCADRPC:
                         )
                 except Exception:
                     pass
-                try:
-                    _clear_status()
-                except Exception:
-                    pass  # never let status cleanup mask or outlive the real work
 
         _record_job(job_id, state="running", started=time.time(), code=code_preview)
         try:
-            _set_status("MCP: running background task…")
             threading.Thread(target=worker, daemon=True).start()
         except Exception as e:
             import traceback as _tb
@@ -349,8 +388,8 @@ class FreeCADRPC:
             "message": (
                 "Code execution started in background. Document writes "
                 "(obj.Shape = ..., recompute, addObject, save, ViewObject) must "
-                "go through commit(fn) — direct writes from this thread can wedge "
-                "FreeCAD."
+                "go through commit(fn); direct writes from this thread can wedge "
+                "FreeCAD. Read the outcome with get_async_status(job_id)."
             ),
         }
 
@@ -458,37 +497,52 @@ class FreeCADRPC:
     ) -> str:
         """Get a screenshot of the active view as a base64-encoded PNG string.
 
-        Returns None if the active view does not support screenshots
-        (e.g., TechDraw or Spreadsheet workbench).
+        Returns None when there is no active view or it cannot be captured
+        (e.g., a TechDraw page or a spreadsheet). Any other failure, including
+        a GUI dispatch timeout, raises a Fault that says what went wrong.
         """
-        fd, tmp_path = tempfile.mkstemp(suffix=".png")
-        os.close(fd)
 
         def task():
             try:
                 active_view = FreeCADGui.ActiveDocument.ActiveView
             except Exception:
-                return False
+                active_view = None
             if active_view is None or not hasattr(active_view, "saveImage"):
                 view_type = type(active_view).__name__ if active_view is not None else "None"
                 FreeCAD.Console.PrintWarning(
                     f"MCP RPC: view type '{view_type}' does not support screenshots\n"
                 )
-                return False
-            return save_active_screenshot(tmp_path, view_name, width, height, focus_object)
-
-        try:
-            res = dispatch_to_gui(task, operation_name="get_active_screenshot")
-            if _ok(res):
+                return (None,)
+            # The GUI thread owns the temporary file from creation to removal:
+            # a caller that timed out never deletes it while saveImage writes.
+            fd, tmp_path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
+            try:
+                saved = save_active_screenshot(tmp_path, view_name, width, height, focus_object)
+                if saved is not True:
+                    return f"could not save the screenshot: {saved}"
                 with open(tmp_path, "rb") as f:
-                    return base64.b64encode(f.read()).decode("utf-8")
-            if res is False:
-                return None
-            FreeCAD.Console.PrintWarning(f"MCP RPC: screenshot failed: {res}\n")
-            return None
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+                    data = f.read()
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            if not data:
+                return "could not save the screenshot: FreeCAD wrote an empty image"
+            return (base64.b64encode(data).decode("ascii"),)
+
+        res = dispatch_to_gui(task, operation_name="get_active_screenshot")
+        if isinstance(res, tuple):
+            return res[0]
+        if isinstance(res, dict):
+            code = res.get("code", "GUI_DISPATCH_FAILED")
+            message = str(res.get("error", res))
+        else:
+            code = "SCREENSHOT_FAILED"
+            message = str(res)
+        FreeCAD.Console.PrintWarning(f"MCP RPC: screenshot failed: {message}\n")
+        raise Fault(1, f"{code}: {message}")
 
     def _create_document_gui(self, name):
         doc = FreeCAD.newDocument(name)
@@ -533,15 +587,16 @@ class FreeCADRPC:
             )
         if not os.path.exists(file_path):
             return f"File for '{doc_name}' not found at {file_path!r}."
-        # Close, then reopen from the same file. Reopen preserves the
-        # original document name when the file was previously saved
-        # under that name.
+        # Close, then reopen from the same file. FreeCAD names the reopened
+        # document after the file (de-duplicated against open documents), so
+        # report the name it actually received.
         FreeCAD.closeDocument(doc_name)
-        FreeCAD.openDocument(file_path)
+        reopened = FreeCAD.openDocument(file_path)
         FreeCAD.Console.PrintMessage(
-            f"Document '{doc_name}' reloaded from '{file_path}' via RPC.\n"
+            f"Document '{doc_name}' reloaded from '{file_path}' as "
+            f"'{reopened.Name}' via RPC.\n"
         )
-        return True
+        return {"success": True, "document_name": reopened.Name}
 
     def _insert_part_from_library(self, relative_path):
         try:
@@ -578,11 +633,11 @@ def start_rpc_server(port: int = 9875) -> str:
 
     settings = load_settings()
     remote_enabled = settings.get("remote_enabled", False)
-    allowed_ips = settings.get("allowed_ips", "127.0.0.1")
     auth_token = settings.get("auth_token", "")
 
     if remote_enabled:
         host = "0.0.0.0"
+        allowed_ips = settings.get("allowed_ips", "127.0.0.1")
         if not auth_token:
             FreeCAD.Console.PrintWarning(
                 "MCP RPC: remote connections are enabled WITHOUT an auth token. "
@@ -591,6 +646,10 @@ def start_rpc_server(port: int = 9875) -> str:
             )
     else:
         host = "127.0.0.1"
+        # The stored allowlist applies to remote connections only. A LAN-only
+        # list such as 192.168.1.0/24 would otherwise reject every client of
+        # the loopback-bound server.
+        allowed_ips = LOOPBACK_ALLOWED_IPS
 
     server = FilteredXMLRPCServer(
         (host, port),

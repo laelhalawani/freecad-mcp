@@ -2,6 +2,10 @@ __pycache__/
 .venv/
 .pytest_cache/
 
+# Local notes, research reports and reference sources
+/dev_docs/
+/.reference/
+
 # Go build output
 /freecad-mcp
 /freecad-mcp.exe

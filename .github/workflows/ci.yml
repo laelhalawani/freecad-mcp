@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # The release workflow runs these jobs for a tag before publishing.
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   go:
@@ -50,6 +55,41 @@ jobs:
       - uses: actions/checkout@v7
       - name: Test
         run: ${{ matrix.shell }} tests/install_sh_test.sh
+
+  # install.ps1 parses under Windows PowerShell 5.1 and PowerShell 7. The
+  # script is only parsed, never run.
+  install-ps1:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Parse with Windows PowerShell
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          $path = (Resolve-Path install.ps1).Path
+          [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
+          foreach ($e in $errors) {
+            $message = $e.Message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error file=install.ps1,line=$($e.Extent.StartLineNumber),col=$($e.Extent.StartColumnNumber)::$message"
+          }
+          if ($errors.Count -gt 0) { exit 1 }
+          Write-Output "install.ps1 parses under PowerShell $($PSVersionTable.PSVersion)"
+
+      - name: Parse with PowerShell 7
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          $path = (Resolve-Path install.ps1).Path
+          [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
+          foreach ($e in $errors) {
+            $message = $e.Message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error file=install.ps1,line=$($e.Extent.StartLineNumber),col=$($e.Extent.StartColumnNumber)::$message"
+          }
+          if ($errors.Count -gt 0) { exit 1 }
+          Write-Output "install.ps1 parses under PowerShell $($PSVersionTable.PSVersion)"
 
   # The FreeCAD addon is Python and runs inside FreeCAD (Python 3.11 in
   # FreeCAD 1.x), so its tests run on the oldest Python FreeCAD bundles,

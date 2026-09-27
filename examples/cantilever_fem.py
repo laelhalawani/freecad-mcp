@@ -7,25 +7,32 @@ runs CalculiX, and compares against beam-theory analytics.
 Prereqs:
 - FreeCAD is running with the FreeCADMCP addon loaded.
 - "Start RPC Server" was clicked, or auto-start is enabled.
+- When an auth token is set in FreeCAD ("Set Auth Token"), FREECAD_MCP_TOKEN
+  holds the same token.
 
 Run:
     python3 examples/cantilever_fem.py
 
 Expected output: σ_max within ~50% of analytic and δ_tip within ~50% of
-analytic — coarser-than-textbook because the default mesh is linear tets at
+analytic - coarser-than-textbook because the default mesh is linear tets at
 ~5 mm size, which lock under bending. Refine the mesh or switch to second-
 order elements for closer convergence; that is out of scope for the smoke
 test, which only validates the pipeline end-to-end.
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
+import urllib.parse
 import xmlrpc.client
 
 
 HOST = "localhost"
 PORT = 9875
+# The RPC server's auth token, if one is set in FreeCAD. It is sent as the
+# password of HTTP Basic authentication, which the addon accepts.
+TOKEN = os.environ.get("FREECAD_MCP_TOKEN", "").strip()
 
 DOC = "MCPCantilever"
 BEAM = "Beam"
@@ -63,7 +70,8 @@ def call(server, name, *args):
 
 
 def main():
-    server = xmlrpc.client.ServerProxy(f"http://{HOST}:{PORT}", allow_none=True)
+    credentials = f":{urllib.parse.quote(TOKEN, safe='')}@" if TOKEN else ""
+    server = xmlrpc.client.ServerProxy(f"http://{credentials}{HOST}:{PORT}", allow_none=True)
     if not server.ping():
         print("RPC server is not responding. Start it from the FreeCAD MCP toolbar.")
         sys.exit(2)

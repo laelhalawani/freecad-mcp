@@ -235,7 +235,7 @@ func TestClassifyWizard(t *testing.T) {
 		{"a dry run completed", flow.BaseState{Settled: true}, 0, true, true, outcomeCompleted},
 	}
 	for _, c := range cases {
-		if got := classifyWizard(&c.base, c.runCode, c.applyStarted, c.dryRun); got != c.want {
+		if got := classifyWizard(&c.base, c.runCode, c.applyStarted, c.dryRun, false); got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
 	}

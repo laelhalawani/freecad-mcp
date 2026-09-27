@@ -65,9 +65,18 @@ def browser_request_rejection(
 _DISCARD_MAX_BYTES = 16 * 1024 * 1024
 _DISCARD_TIMEOUT_S = 5.0
 
+# Longest wait for any single read or write on a request's socket. A peer that
+# stops sending (for example in the middle of its headers) is disconnected
+# after this long instead of holding a request thread forever. Time spent
+# running the called method is not limited by it.
+_REQUEST_TIMEOUT_S = 30.0
+
 
 class BrowserGuardRequestHandler(SimpleXMLRPCRequestHandler):
     """Refuse requests a web page could have sent before they are dispatched."""
+
+    # StreamRequestHandler.setup applies this to the connection.
+    timeout = _REQUEST_TIMEOUT_S
 
     def discard_body(self) -> None:
         """Read the unread body of a request that is being refused.
@@ -91,6 +100,8 @@ class BrowserGuardRequestHandler(SimpleXMLRPCRequestHandler):
                 left = deadline - time.monotonic()
                 if left <= 0:
                     return
+                if self.timeout is not None:
+                    left = min(left, self.timeout)
                 self.connection.settimeout(left)
                 # read1 returns what has arrived instead of waiting for the
                 # whole chunk, so the deadline holds for a slow sender too.
@@ -100,6 +111,13 @@ class BrowserGuardRequestHandler(SimpleXMLRPCRequestHandler):
                 remaining -= len(chunk)
         except OSError:
             pass  # the reply is still sent; the client may just see a reset
+        finally:
+            # The reply is written with the handler's own timeout, not with
+            # whatever was left of the discard deadline.
+            try:
+                self.connection.settimeout(self.timeout)
+            except OSError:
+                pass
 
     def do_POST(self) -> None:
         rejection = browser_request_rejection(self.headers, self.server.loopback_only)
@@ -125,18 +143,32 @@ def authorization_ok(header_value: str, token: str) -> bool:
 
     Accepts ``Bearer <token>`` and HTTP Basic (token in the password field,
     username ignored) so stdlib clients can use ``http://:token@host:port``
-    URIs. Comparisons are constant-time.
+    URIs. Comparisons are constant-time and never raise.
+
+    ``header_value`` is the header as http.server decodes it, one character
+    per byte (latin-1), and ``token`` is matched as UTF-8, which is how
+    clients send a non-ASCII token. Both are compared as bytes:
+    ``hmac.compare_digest`` refuses str values with non-ASCII characters.
     """
-    if header_value.startswith("Bearer "):
-        supplied = header_value[len("Bearer "):].strip()
-        return hmac.compare_digest(supplied, token)
-    if header_value.startswith("Basic "):
+    if not isinstance(header_value, str) or not isinstance(token, str):
+        return False
+    try:
+        raw = header_value.encode("latin-1")
+    except UnicodeEncodeError:
+        return False  # not a value read from the wire
+    expected = token.encode("utf-8", "surrogatepass")
+    if raw.startswith(b"Bearer "):
+        # bytes.strip removes ASCII whitespace only; str.strip would also
+        # remove U+0085 and U+00A0, which are bytes of UTF-8 characters here.
+        supplied = raw[len(b"Bearer "):].strip()
+        return hmac.compare_digest(supplied, expected)
+    if raw.startswith(b"Basic "):
         try:
-            decoded = base64.b64decode(header_value[len("Basic "):], validate=True).decode("utf-8")
-        except Exception:
+            decoded = base64.b64decode(raw[len(b"Basic "):].strip(), validate=True)
+        except ValueError:
             return False
-        _, _, password = decoded.partition(":")
-        return hmac.compare_digest(password, token)
+        _, _, password = decoded.partition(b":")
+        return hmac.compare_digest(password, expected)
     return False
 
 
@@ -168,7 +200,7 @@ class FilteredXMLRPCServer(ThreadingMixIn, SimpleXMLRPCServer):
     serialise onto the GUI thread through dispatch_to_gui. The opt-in
     execute_code_async worker retains its existing background execution.
 
-    daemon_threads must stay true — ThreadingMixIn.server_close() joins
+    daemon_threads must stay true: ThreadingMixIn.server_close() joins
     non-daemon request threads, which would make Stop wait out the stuck
     operation.
     """
@@ -222,7 +254,7 @@ def validate_allowed_ips(allowed_ips_str):
 
     if not _COMMA_SEP_RE.match(allowed_ips_str):
         return [], [
-            "Malformed list — check for leading/trailing commas, "
+            "Malformed list - check for leading/trailing commas, "
             "double commas, or missing separators."
         ]
 

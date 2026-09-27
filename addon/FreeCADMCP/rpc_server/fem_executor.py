@@ -7,6 +7,36 @@ import FreeCAD
 import ObjectsFem
 
 
+# FEM solvers are all Fem::FemSolverObjectPython; FreeCAD tells them apart by
+# the Python proxy's Type (femtools.femutils.type_of_obj). These are the
+# CalculiX solvers ObjectsFem creates, in order of preference:
+# makeSolverCalculiXCcxTools, then makeSolverCalculiX. FemToolsCcx is built
+# for the ccx tools solver, and the other one carries every property its input
+# writer reads. The older solver-framework type "Fem::SolverCalculix" lacks
+# some of them (IncrementsMaximum, for one), so an analysis holding only that
+# one gets a new ccx tools solver instead.
+_CALCULIX_SOLVER_TYPES = ("Fem::SolverCcxTools", "Fem::SolverCalculiX")
+
+
+def _fem_type(obj) -> str:
+    """Return ``obj``'s FEM type the way ``femutils.type_of_obj`` does."""
+    proxy = getattr(obj, "Proxy", None)
+    proxy_type = getattr(proxy, "Type", None)
+    if isinstance(proxy_type, str):
+        return proxy_type
+    return getattr(obj, "TypeId", "")
+
+
+def _find_calculix_solver(analysis):
+    """Return the preferred CalculiX solver in ``analysis``, or None."""
+    members = list(analysis.Group)
+    for solver_type in _CALCULIX_SOLVER_TYPES:
+        for member in members:
+            if _fem_type(member) == solver_type:
+                return member
+    return None
+
+
 def run_fem_analysis(doc_name: str, analysis_name: str) -> dict:
     """Run the CalculiX solver on an existing FEM analysis container.
 
@@ -28,12 +58,7 @@ def run_fem_analysis(doc_name: str, analysis_name: str) -> dict:
             return {"success": False, "error": f"'{analysis_name}' is not a FEM analysis (TypeId={analysis.TypeId})."}
 
         stage = "solver resolution"
-        solver = None
-        for member in analysis.Group:
-            tid = getattr(member, "TypeId", "")
-            if "SolverCcx" in tid or "SolverCalculix" in tid:
-                solver = member
-                break
+        solver = _find_calculix_solver(analysis)
         if solver is None:
             solver_factory = (
                 getattr(ObjectsFem, "makeSolverCalculiXCcxTools", None)

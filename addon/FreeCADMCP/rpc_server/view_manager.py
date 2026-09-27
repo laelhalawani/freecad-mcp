@@ -35,8 +35,17 @@ def _get_view_size(view: Any) -> tuple[int, int]:
 # screenshot's cost to an LLM client scales with its pixel count, and hosts
 # commonly downscale anything larger than ~1.5k px before the model ever sees
 # it, so rendering at the full window size just inflates the payload. An
-# explicit width/height is always honoured as given.
+# explicit width/height is honoured within MIN/MAX_SCREENSHOT_EDGE.
 MAX_AUTO_SCREENSHOT_EDGE = 1024
+
+# Accepted range for each screenshot dimension; the Go get_view schema uses
+# the same bounds. Larger images rarely fit the 1 MiB an MCP reply carries.
+MIN_SCREENSHOT_EDGE = 1
+MAX_SCREENSHOT_EDGE = 2048
+
+
+def _clamp_edge(value: int) -> int:
+    return min(MAX_SCREENSHOT_EDGE, max(MIN_SCREENSHOT_EDGE, int(value)))
 
 
 def _scale_to_max_edge(width: int, height: int, max_edge: int) -> tuple[int, int]:
@@ -55,9 +64,9 @@ def _resolve_screenshot_size(
     view_width, view_height = _get_view_size(view)
     if width is None and height is None:
         return _scale_to_max_edge(view_width, view_height, MAX_AUTO_SCREENSHOT_EDGE)
-    resolved_width = view_width if width is None else max(1, int(width))
-    resolved_height = view_height if height is None else max(1, int(height))
-    return resolved_width, resolved_height
+    resolved_width = view_width if width is None else width
+    resolved_height = view_height if height is None else height
+    return _clamp_edge(resolved_width), _clamp_edge(resolved_height)
 
 
 _STD_COMMAND_DISPATCH = {
@@ -100,8 +109,8 @@ def save_active_screenshot(
 ):
     """Save a PNG of the active view to ``save_path``.
 
-    Returns ``True`` on success, or an error string on failure (preserves the
-    legacy GUI-handler return contract).
+    Returns ``True`` on success, or an error string on failure, as the other
+    GUI-thread handlers do.
     """
     try:
         view = FreeCADGui.ActiveDocument.ActiveView
@@ -135,7 +144,7 @@ def save_active_screenshot(
         # On macOS, when the FreeCAD window is not exposed (fully occluded or
         # minimized), saveImage() right after pumping the event loop grabs a blank
         # frame. Re-issuing the framing synchronously forces a redraw first. The
-        # flush above is kept intentionally — Linux needs it for the stale-frame
+        # flush above is kept intentionally - Linux needs it for the stale-frame
         # fix (#51/#53).
         if focused_selection and focus_target is not None:
             FreeCADGui.Selection.addSelection(focus_target)
@@ -144,14 +153,12 @@ def save_active_screenshot(
         else:
             view.fitAll()
         resolved_width, resolved_height = _resolve_screenshot_size(view, width, height)
-        # On Wayland the offscreen GL contexts used by the default saveImage()
-        # method render solid black; "Framebuffer" reads back the on-screen GL
-        # context and captures correctly (and also works on X11/Windows/macOS).
-        # FreeCAD < 1.0 lacks the method argument — fall back to the legacy call.
-        try:
-            view.saveImage(save_path, resolved_width, resolved_height, "Current", "Framebuffer")
-        except TypeError:
-            view.saveImage(save_path, resolved_width, resolved_height, "Current")
+        # View3DInventorPy.saveImage(filename, width, height, background,
+        # comment, samples): the fifth argument is the comment embedded in the
+        # image, so it is left at FreeCAD's default. The capture method comes
+        # from the "SavePicture" parameter (the "Creation method" option of
+        # FreeCAD's Save Image dialog), not from an argument.
+        view.saveImage(save_path, resolved_width, resolved_height, "Current")
 
         if focused_selection:
             FreeCADGui.Selection.clearSelection()

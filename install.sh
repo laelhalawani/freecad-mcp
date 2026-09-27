@@ -21,32 +21,47 @@ MARKER="# added by ${BIN} installer"
 # RC_STATE is a private directory holding, for each profile this run
 # changed, a copy of the original and the text that was appended.
 
-rc_append() { # rc_append <profile> <line>
+rc_append() { # rc_append <profile> <line>; returns non-zero when a step failed
   rc="$1"; line="$2"
-  key=$(printf '%s' "$rc" | cksum | awk '{print $1}')
-  cp -p "$rc" "$RC_STATE/$key.orig"
-  printf '%s\n' "$rc" > "$RC_STATE/$key.path"
-  : > "$RC_STATE/$key.added"
+  key=$(printf '%s' "$rc" | cksum | awk '{print $1}') || return 1
+  cp -p "$rc" "$RC_STATE/$key.orig" || return 1
+  # Empty files are written with printf, a regular builtin: a failed
+  # redirection on the special builtin `:` would end the whole script.
+  printf '' > "$RC_STATE/$key.added" || return 1
   # End an unterminated last line first, so the block starts on its own line.
   if [ -s "$rc" ] && [ -n "$(tail -c 1 "$rc")" ]; then
-    printf '\n' >> "$RC_STATE/$key.added"
+    printf '\n' >> "$RC_STATE/$key.added" || return 1
   fi
-  printf '\n%s\n%s\n' "$MARKER" "$line" >> "$RC_STATE/$key.added"
+  printf '\n%s\n%s\n' "$MARKER" "$line" >> "$RC_STATE/$key.added" || return 1
+  # .path once .orig and .added are complete: rc_undo acts on a profile once
+  # its .path exists, and an interrupt can come between any two steps.
+  printf '%s\n' "$rc" > "$RC_STATE/$key.path" || return 1
   cat "$RC_STATE/$key.added" >> "$rc"
 }
 
 rc_create() { # rc_create <profile>: creates it, and rc_undo deletes it again
   rc="$1"
-  : > "$rc"
-  key=$(printf '%s' "$rc" | cksum | awk '{print $1}')
-  : > "$RC_STATE/$key.created"
+  key=$(printf '%s' "$rc" | cksum | awk '{print $1}') || return 1
+  # Recorded as an empty profile before it exists, so rc_undo removes it
+  # even when setup is interrupted before rc_append runs.
+  printf '' > "$RC_STATE/$key.created" || return 1
+  printf '' > "$RC_STATE/$key.orig" || return 1
+  printf '' > "$RC_STATE/$key.added" || return 1
+  printf '%s\n' "$rc" > "$RC_STATE/$key.path" || return 1
+  printf '' > "$rc"
 }
 
-rc_undo() { # restores every profile rc_append changed in this run
+rc_undo() { # restores every profile rc_append or rc_create changed in this run
   for pathfile in "$RC_STATE"/*.path; do
     [ -f "$pathfile" ] || continue
     key=$(basename "$pathfile" .path)
     rc=$(cat "$pathfile")
+    [ -e "$rc" ] || continue
+    if cmp -s "$rc" "$RC_STATE/$key.orig"; then
+      # Nothing was appended yet: only a profile this run created goes.
+      if [ -f "$RC_STATE/$key.created" ]; then rm -f "$rc"; fi
+      continue
+    fi
     cat "$RC_STATE/$key.orig" "$RC_STATE/$key.added" > "$RC_STATE/$key.expected"
     if cmp -s "$rc" "$RC_STATE/$key.expected"; then
       # Unchanged since: put the original back byte for byte, or remove
@@ -57,12 +72,17 @@ rc_undo() { # restores every profile rc_append changed in this run
         cat "$RC_STATE/$key.orig" > "$rc"
       fi
     else
-      # Edited meanwhile: remove only the two lines this run added.
+      # Edited meanwhile: remove only the block this run added, the marker
+      # and export lines and the blank line written before them. A blank
+      # line is held back until the next line shows whether the block
+      # starts there.
       awk -v marker="$MARKER" -v line="$(tail -n 1 "$RC_STATE/$key.added")" '
+        held == 1 && $0 == line { held = 0; blank = 0; next }
+        held == 1 { if (blank) print ""; print marker; held = 0; blank = 0 }
         $0 == marker { held = 1; next }
-        held == 1 && $0 == line { held = 0; next }
-        held == 1 { print marker; held = 0 }
-        { print }' "$rc" > "$RC_STATE/$key.new" && cat "$RC_STATE/$key.new" > "$rc"
+        $0 == "" { if (blank) print ""; blank = 1; next }
+        { if (blank) print ""; blank = 0; print }
+        END { if (blank) print ""; if (held) print marker }' "$rc" > "$RC_STATE/$key.new" && cat "$RC_STATE/$key.new" > "$rc"
     fi
   done
 }
@@ -98,21 +118,92 @@ URL="${BASE}/${ASSET}"
 INSTALL_ROOT="$HOME/.${REPO}"
 INSTALL_DIR="$INSTALL_ROOT/bin"
 TARGET="$INSTALL_DIR/$BIN"
+TEMP="${TARGET}.new"
+RC_STATE=""
+BACKUP=""
 
 # Record what exists now, so a cancelled setup can put it back.
 created_root=0; [ -d "$INSTALL_ROOT" ] || created_root=1
 created_dir=0; [ -d "$INSTALL_DIR" ] || created_dir=1
-mkdir -p "$INSTALL_DIR"
-RC_STATE=$(mktemp -d)
 
 undo_directories() {
   if [ "$created_dir" -eq 1 ]; then rmdir "$INSTALL_DIR" 2>/dev/null || true; fi
   if [ "$created_root" -eq 1 ]; then rmdir "$INSTALL_ROOT" 2>/dev/null || true; fi
 }
+restore_backup() {
+  if [ -z "$BACKUP" ]; then
+    rm -f "$TARGET"
+  elif [ -f "$BACKUP" ]; then
+    mv -f "$BACKUP" "$TARGET"
+  fi
+  # Otherwise the previous binary was not moved aside yet and is in place.
+}
+rolled_back_message() {
+  if [ -n "$BACKUP" ]; then
+    printf '  The previously installed %s was kept.\n' "$BIN"
+  else
+    printf '  %s was not installed.\n' "$BIN"
+  fi
+}
 
-TEMP="${TARGET}.new"
-cleanup() { rm -f "$TEMP" "$TEMP.err"; rm -rf "$RC_STATE"; }
-trap cleanup EXIT HUP INT TERM
+cleanup() {
+  rm -f "$TEMP" "$TEMP.err"
+  if [ -n "$RC_STATE" ]; then rm -rf "$RC_STATE"; fi
+}
+
+# stage is what an interrupt (HUP, INT or TERM), or a failure that ends the
+# script, has to undo, as a cancel does:
+#   download   the new binary is fetched and checked; only it goes
+#   replace    it replaces the installed one, which is kept as $BACKUP
+#   path       shell profiles are edited
+#   configure  the setup wizard runs. It gets the interrupt too, and its exit
+#              status decides what is kept, as without one; the script then
+#              exits with the interrupt's status.
+#   done       setup finished, or its outcome was handled; nothing is undone
+stage=download
+signal_status=""
+
+# undo_stage undoes what this run changed up to $stage, running every step
+# even if one fails, and says so ($1 names the cause).
+undo_stage() {
+  set +e
+  trap '' HUP INT TERM # a second interrupt must not cut the undo short
+  rm -f "$TEMP" "$TEMP.err"
+  if [ "$stage" = download ]; then
+    printf '\n  Setup %s; nothing was installed.\n' "$1" >&2
+  else
+    restore_backup
+    if [ -n "$RC_STATE" ]; then rc_undo; fi
+    printf '\n  Setup %s; the changes were undone.\n' "$1" >&2
+    rolled_back_message >&2
+  fi
+  undo_directories
+  stage=done
+}
+on_signal() { # on_signal <exit status>
+  if [ "$stage" = configure ]; then
+    # The script carries on with its own error handling.
+    signal_status=$1
+    return 0
+  fi
+  if [ "$stage" != done ]; then undo_stage interrupted; fi
+  exit "$1" # runs on_exit through the EXIT trap
+}
+on_exit() { # on_exit <exit status>
+  # A command that failed under set -e while the new binary or the profile
+  # edits were in place ends the script here; put things back first.
+  if [ "$1" -ne 0 ] && { [ "$stage" = replace ] || [ "$stage" = path ]; }; then
+    undo_stage failed
+  fi
+  cleanup
+}
+trap 'on_exit "$?"' EXIT
+trap 'on_signal 129' HUP
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+
+mkdir -p "$INSTALL_DIR"
+RC_STATE=$(mktemp -d)
 
 printf '\n  %s installer\n\n  Downloading %s (%s)...\n' "$BIN" "$ASSET" "$VERSION"
 
@@ -192,24 +283,29 @@ fi
 chmod +x "$TEMP"
 
 # Keep a previous version until setup finishes. Its name must not match
-# "<bin>.old-*": the program deletes those files when it starts.
-BACKUP=""
+# "<bin>.old-*": the program deletes those files when it starts. From here
+# an interrupt or a failure puts it back (restore_backup).
+if [ ! -f "$TARGET" ] && [ -f "${TARGET}.bak" ]; then
+  # A run that was killed after moving the installed binary aside left it
+  # only as the backup: that is the version installed, so it goes back.
+  mv -f "${TARGET}.bak" "$TARGET"
+fi
 if [ -f "$TARGET" ]; then
+  # Any backup left beside the installed binary is stale.
+  rm -f "${TARGET}.bak"
   BACKUP="${TARGET}.bak"
+fi
+stage=replace
+if [ -n "$BACKUP" ]; then
   mv -f "$TARGET" "$BACKUP"
 fi
-restore_backup() {
-  rm -f "$TARGET"
-  if [ -n "$BACKUP" ] && [ -f "$BACKUP" ]; then mv -f "$BACKUP" "$TARGET"; fi
-}
 if ! mv -f "$TEMP" "$TARGET"; then
   printf '\n  Failed to install binary to %s\n' "$TARGET" >&2
-  restore_backup
-  undo_directories
-  exit 1
+  exit 1 # on_exit restores the previous binary
 fi
 
 # Put the install directory on PATH through the shell profiles.
+stage=path
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) on_path=1 ;;
   *) on_path=0 ;;
@@ -217,16 +313,40 @@ esac
 if [ "$on_path" -eq 0 ]; then
   # zsh, the default shell on macOS, reads none of the other files, so a zsh
   # user without a .zshrc gets one, where zsh looks for it.
+  # A profile or directory this user cannot write is left alone, and so is a
+  # .zshrc that is a symlink (often into a read-only, managed store, and
+  # possibly dangling); a profile that cannot be edited is reported, and
+  # setup goes on with the others.
   ZSHRC="${ZDOTDIR:-$HOME}/.zshrc"
+  zshrc_dir=$(dirname "$ZSHRC")
   case "${SHELL:-}" in
-    */zsh) [ -e "$ZSHRC" ] || [ ! -d "$(dirname "$ZSHRC")" ] || rc_create "$ZSHRC" ;;
+    */zsh)
+      if [ ! -e "$ZSHRC" ] && [ ! -L "$ZSHRC" ] && [ -d "$zshrc_dir" ] && [ -w "$zshrc_dir" ]; then
+        if ! rc_create "$ZSHRC"; then
+          printf '  Could not create %s; add %s to your PATH yourself.\n' "$ZSHRC" "$INSTALL_DIR" >&2
+        fi
+      fi ;;
   esac
   for rc in "$ZSHRC" "$HOME/.bashrc" "$HOME/.profile" "$HOME/.bash_profile"; do
-    [ -f "$rc" ] || continue
-    if ! grep -qF "$INSTALL_DIR" "$rc" 2>/dev/null; then
-      rc_append "$rc" "export PATH=\"$INSTALL_DIR:\$PATH\""
+    if [ "$rc" = "$ZSHRC" ] && [ -L "$rc" ]; then
+      # Checked first: a dangling symlink is not a regular file either.
+      if [ -f "$rc" ] && grep -qF "$INSTALL_DIR" "$rc" 2>/dev/null; then
+        on_path=2
+      else
+        printf '  Skipped %s: it is a symlink.\n' "$rc" >&2
+      fi
+      continue
     fi
-    on_path=2
+    [ -f "$rc" ] || continue
+    if grep -qF "$INSTALL_DIR" "$rc" 2>/dev/null; then
+      on_path=2
+    elif [ ! -w "$rc" ]; then
+      printf '  Skipped %s: it is not writable.\n' "$rc" >&2
+    elif rc_append "$rc" "export PATH=\"$INSTALL_DIR:\$PATH\""; then
+      on_path=2
+    else
+      printf '  Could not add %s to %s.\n' "$INSTALL_DIR" "$rc" >&2
+    fi
   done
 fi
 
@@ -236,30 +356,44 @@ export PATH
 # Run the setup wizard, in a terminal only: without one it cannot ask, and
 # `configure` would register every detected client unasked. Its input and
 # output both go to the terminal, since the script's own may be a pipe
-# (curl ... | sh | tee log). With --yes, setup runs unattended anywhere.
+# (curl ... | sh | tee log). With --yes, or --all, --clients or --token,
+# which also make configure skip the wizard, setup runs unattended anywhere.
 # CONFIGURE_ARGS is split into words below, never expanded as file names.
 set -f
 unattended=0
 for arg in $CONFIGURE_ARGS; do
+  # Go's flag package reads -flag and --flag alike.
   case "$arg" in
-    # The spellings Go's flag package reads as --yes.
-    --yes|-yes|--yes=1|-yes=1|--yes=t|-yes=t|--yes=T|-yes=T|--yes=true|-yes=true|--yes=TRUE|-yes=TRUE|--yes=True|-yes=True)
+    --*) flag=${arg#--} ;;
+    -*) flag=${arg#-} ;;
+    *) continue ;;
+  esac
+  case "$flag" in
+    # configure skips the wizard for --yes, --all, --clients and the
+    # credential flags (runsUnattended in wizard.go). These are the spellings
+    # Go's flag package reads as true, and the string flags with a value.
+    yes|yes=1|yes=t|yes=T|yes=true|yes=TRUE|yes=True|all|all=1|all=t|all=T|all=true|all=TRUE|all=True)
+      unattended=1 ;;
+    token|token=?*|clients|clients=?*|email|email=?*)
       unattended=1 ;;
   esac
 done
 if [ "$unattended" -eq 1 ]; then
   set +e
+  stage=configure
   # shellcheck disable=SC2086
   "$TARGET" configure $CONFIGURE_ARGS </dev/null
   code=$?
   set -e
 elif ( : </dev/tty >/dev/tty ) 2>/dev/null; then
   set +e
+  stage=configure
   # shellcheck disable=SC2086
   "$TARGET" configure $CONFIGURE_ARGS </dev/tty >/dev/tty
   code=$?
   set -e
 else
+  stage=done
   printf '\n  Installed %s to %s.\n  Not running in a terminal. Finish setup in one with:\n    %s configure\n' "$BIN" "$TARGET" "$BIN"
   code=0
 fi
@@ -271,15 +405,13 @@ if [ "$code" -eq "$EXIT_CANCELLED" ]; then
   rc_undo
   undo_directories
   # The wizard already said "Setup cancelled"; say what was restored.
-  if [ -n "$BACKUP" ]; then
-    printf '  The previously installed %s was kept.\n' "$BIN"
-  else
-    printf '  %s was not installed.\n' "$BIN"
-  fi
-  exit 0
+  rolled_back_message
+  stage=done
+  exit "${signal_status:-0}"
 fi
 
 rm -f "$BACKUP"
+stage=done
 if [ "$code" -ne 0 ]; then
   printf '  Setup did not finish (exit code %s). %s is installed at %s.\n' "$code" "$BIN" "$TARGET"
   printf '  Run `%s configure` to finish, or `%s uninstall --all` to remove it.\n' "$BIN" "$BIN"
@@ -290,3 +422,5 @@ if [ "$on_path" -eq 0 ]; then
 elif [ "$on_path" -eq 2 ]; then
   printf '\n  Open a new terminal so `%s` is on your PATH.\n' "$BIN"
 fi
+# An interrupt while the wizard ran ends the script with its status.
+if [ -n "$signal_status" ]; then exit "$signal_status"; fi

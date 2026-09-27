@@ -65,6 +65,81 @@ func Locate(ctx context.Context, command []string) []Target {
 	return targets
 }
 
+// LocateInstalled finds every FreeCAD user data directory that holds this
+// addon: the one FreeCAD reports and each one found on disk, so a copy
+// installed for another FreeCAD version or profile is found too. command
+// overrides the detected freecadcmd.
+func LocateInstalled(ctx context.Context, command []string) []Target {
+	return LocateAll(ctx, command).Installed
+}
+
+// Installations lists the FreeCAD user data directories found for an
+// uninstall.
+type Installations struct {
+	// DataDirs are the directory FreeCAD reports, every versioned or
+	// unversioned directory found on disk, and the platform base directories
+	// that exist: every place the addon's settings file can be, including
+	// where the addon was installed before uninstall-addon removed it.
+	DataDirs []Target
+	// Installed are the DataDirs whose addon folder holds this addon.
+	Installed []Target
+}
+
+// LocateAll asks FreeCAD once for its user data directory and combines it
+// with the directories found on disk. command overrides the detected
+// freecadcmd.
+func LocateAll(ctx context.Context, command []string) Installations {
+	reported := AskFreeCAD(ctx, command)
+	candidates := scanUserDataDirs()
+	for _, base := range baseDirs() {
+		if info, err := os.Stat(base); err == nil && info.IsDir() {
+			candidates = append(candidates, base)
+		}
+	}
+	var all Installations
+	all.DataDirs = dataDirsOf(reported, candidates)
+	all.Installed = installedIn(all.DataDirs)
+	return all
+}
+
+// dataDirsOf returns reported (when not "") and the candidates, in that
+// order and without duplicates.
+func dataDirsOf(reported string, candidates []string) []Target {
+	var targets []Target
+	seen := map[string]bool{}
+	add := func(dir, source string) {
+		dir = filepath.Clean(dir)
+		key := dir
+		if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+			key = strings.ToLower(dir)
+		}
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		targets = append(targets, Target{UserDataDir: dir, Source: source})
+	}
+	if reported != "" {
+		add(reported, "freecad")
+	}
+	for _, dir := range candidates {
+		add(dir, "scan")
+	}
+	return targets
+}
+
+// installedIn keeps the targets whose addon folder holds
+// rpc_server/version.py.
+func installedIn(targets []Target) []Target {
+	var out []Target
+	for _, t := range targets {
+		if info, err := os.Stat(filepath.Join(t.AddonDir(), filepath.FromSlash(versionFile))); err == nil && !info.IsDir() {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // AskFreeCAD runs freecadcmd to print FreeCAD.getUserAppDataDir(). It
 // returns "" when FreeCAD cannot be found or asked.
 func AskFreeCAD(ctx context.Context, command []string) string {

@@ -1,9 +1,14 @@
-"""Object creation dispatch for the RPC ``create_object`` handler.
+"""Object creation and property updates for the RPC ``create_object`` and
+``edit_object`` handlers.
 
-The legacy ``_create_object_gui`` mixed three flows: FEM mesh (Gmsh) with
-legacy parameter remapping, generic FEM-typed objects, and arbitrary
-``doc.addObject`` types. Each lives in its own helper here, with a single
-public entry point that selects the branch.
+``create_object_gui`` selects one helper per kind of object:
+``_create_fem_mesh`` for a Gmsh FEM mesh (accepting the older parameter
+names), ``_create_fem_object`` for the other ``Fem::`` types,
+``_create_python_object`` for the Python-implemented types that have a
+factory here (``Part::Tube`` and the Draft shapes), and
+``_create_generic_object`` for any type registered with ``doc.addObject``.
+``edit_object_gui`` sets properties on an existing object. Both check the
+object after recompute and report the actual object name.
 """
 
 from contextlib import contextmanager
@@ -253,8 +258,8 @@ def create_object_gui(doc_name: str, obj: Object):
     """Create an object in ``doc_name`` according to ``obj.type``.
 
     Returns the created object's actual ``Name`` on success (FreeCAD
-    sanitises and de-duplicates requested names — ``Box`` may come back as
-    ``Box001`` — and every later get_object/edit_object call needs the real
+    sanitises and de-duplicates requested names - ``Box`` may come back as
+    ``Box001`` - and every later get_object/update_object call needs the real
     one), or an error string on failure.
     """
     try:

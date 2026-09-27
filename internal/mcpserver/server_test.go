@@ -89,10 +89,10 @@ func TestToolsAreListedWithTheirSchemas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"create_document", "create_object", "delete_object", "edit_object", "execute_code",
-		"execute_code_async", "execute_code_headless", "get_async_status", "get_object", "get_objects",
-		"get_parts_list", "get_rpc_status", "get_view", "insert_part_from_library", "list_documents",
-		"reload_document", "run_fem_analysis"}
+	want := []string{"create_document", "create_object", "delete_object", "execute_code",
+		"execute_code_async", "execute_code_headless", "get_async_status", "get_object",
+		"get_rpc_status", "get_view", "insert_part_from_library", "list_documents", "list_objects",
+		"list_parts", "reload_document", "run_fem_analysis", "update_object"}
 	var got []string
 	schemas := map[string]map[string]any{}
 	for _, tool := range res.Tools {
@@ -120,8 +120,8 @@ func TestToolsAreListedWithTheirSchemas(t *testing.T) {
 	if !reflect.DeepEqual(required, []any{"doc_name", "obj_type", "obj_name"}) {
 		t.Errorf("create_object required = %v", required)
 	}
-	if !reflect.DeepEqual(schemas["edit_object"]["required"], []any{"doc_name", "obj_name", "obj_properties"}) {
-		t.Errorf("edit_object required = %v", schemas["edit_object"]["required"])
+	if !reflect.DeepEqual(schemas["update_object"]["required"], []any{"doc_name", "obj_name", "obj_properties"}) {
+		t.Errorf("update_object required = %v", schemas["update_object"]["required"])
 	}
 }
 
@@ -193,10 +193,10 @@ func TestScreenshotsFollowTheOptions(t *testing.T) {
 	}
 }
 
-func TestEditObjectRequiresAnObject(t *testing.T) {
+func TestUpdateObjectRequiresAnObject(t *testing.T) {
 	fc := addon(t, nil)
 	cs := session(t, settingsFor(fc))
-	res := call(t, cs, "edit_object", map[string]any{"doc_name": "D", "obj_name": "Box", "obj_properties": nil})
+	res := call(t, cs, "update_object", map[string]any{"doc_name": "D", "obj_name": "Box", "obj_properties": nil})
 	if !res.IsError || len(fc.CallsTo("edit_object")) != 0 {
 		t.Fatalf("null obj_properties accepted: %v", texts(res))
 	}
@@ -235,7 +235,7 @@ func TestFailureIsAStructuredError(t *testing.T) {
 		},
 	})
 	cs := session(t, settingsFor(fc))
-	res := call(t, cs, "edit_object", map[string]any{"doc_name": "D", "obj_name": "Nope", "obj_properties": map[string]any{"Length": 5}})
+	res := call(t, cs, "update_object", map[string]any{"doc_name": "D", "obj_name": "Nope", "obj_properties": map[string]any{"Length": 5}})
 	text := strings.Join(texts(res), "\n")
 	if !res.IsError || !strings.Contains(text, "code: freecad_error") || !strings.Contains(text, "Object 'Nope' not found") || !strings.Contains(text, "hint:") {
 		t.Fatalf("reply = %v (isError %v)", text, res.IsError)

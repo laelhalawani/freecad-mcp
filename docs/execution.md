@@ -10,6 +10,9 @@
 | `execute_code_async` | Long background computations on independent geometry; hand document and view access to the GUI thread with `commit()`. |
 | `execute_code_headless` | Heavy OCCT operations in a separate process, isolating native crashes from the GUI. |
 
+A reply keeps at most the last 512 KiB of printed output or a traceback, and
+says when it left the start out, so it stays within the 1 MiB reply limit.
+
 ## Shared script state
 
 `execute_code` and `execute_code_async` share a persistent script namespace with
@@ -23,17 +26,19 @@ namespace.
 
 ## Background jobs
 
-`execute_code_async` returns a `job_id`. `get_async_status(job_id)` reports
-whether the job is `running`, `done`, or `failed`, and includes the exception and
-traceback for failed jobs.
+`execute_code_async` returns a `job_id` at once, without waiting for the GUI
+thread. `get_async_status(job_id)` reports whether the job is `running`, `done`,
+or `failed`, and includes the exception and traceback for failed jobs.
 
 All running jobs and the 20 most recently completed jobs are retained in memory
 until FreeCAD exits. `get_async_status()` lists this history; `get_rpc_status`
-lists the IDs of jobs still running. Job status does not wait for GUI cleanup.
-Script success does not certify geometry validity.
+lists the IDs of jobs still running. Neither uses the GUI thread, so both answer
+while a job or a GUI operation runs. Script success does not certify geometry
+validity.
 
-Install the updated addon to use job status. With an older addon, continue
-polling a document status object and checking FreeCAD's Report View.
+Job status needs the addon that ships with this server; `freecad-mcp
+install-addon` installs it. An addon without job IDs reports only that the job
+started; its outcome then shows in FreeCAD's Report View.
 
 ### Document and view access
 
@@ -63,7 +68,8 @@ shape export). After saving an `.FCStd` file that is open in the GUI, use
 
 The executable runs on the machine hosting the MCP server; `FREECAD_MCP_HOST`
 only selects the GUI RPC host. Use file paths accessible on the MCP server machine. The
-timeout must be positive and finite (default: 600 seconds). A timeout returns
+timeout is more than 0 and at most 604800 seconds (a week); the default is
+600 seconds. A timeout returns
 partial stdout/stderr, and temporary scripts are removed on success, failure,
 and timeout.
 
@@ -90,18 +96,18 @@ dispatch as stuck.
 
 | Operation | Queue budget | Execution budget | MCP server's reply timeout |
 | --- | --- | --- | --- |
-| `execute_code` | 90 seconds (or capped `timeout`) | 90 seconds (or capped `timeout`) | At least `2 * timeout + 30` seconds; 210 seconds by default |
-| `run_fem_analysis` | Requested `timeout` | Requested `timeout` | At least `2 * timeout + 30` seconds |
+| `execute_code` | 90 seconds (or `timeout`) | 90 seconds (or `timeout`) | At least `2 * timeout + 30` seconds; 210 seconds by default |
+| `run_fem_analysis` | Requested `timeout` (1 to 604800 seconds, default 600) | Requested `timeout` | At least `2 * timeout + 30` seconds |
 
 A GUI task cannot be cancelled once it has started, so a slower `execute_code`
 call reports a timeout while the task keeps running, and its result is discarded
-even though the work completes. Pass `timeout` (positive finite seconds, capped at 1800) for
-work that genuinely has to run on the GUI thread and takes longer, such as
-importing or exporting a large STEP assembly; the MCP server widens its reply
-timeout to match the capped budget. Invalid values are rejected before execution.
-Omitting `timeout` preserves the 90-second default and compatibility with older
-addons; an explicit timeout requires an updated addon. For heavy pure-geometry work that touches neither the document
-nor the GUI, prefer `execute_code_async`.
+even though the work completes. Pass `timeout` (more than 0 and at most 1800
+seconds) for work that genuinely has to run on the GUI thread and takes
+longer, such as importing or exporting a large STEP assembly; the MCP server
+widens its reply timeout to match. Values outside that range are rejected
+before the MCP server contacts FreeCAD. Without `timeout` the 90-second default applies. For
+heavy pure-geometry work that touches neither the document nor the GUI, prefer
+`execute_code_async`.
 
 The MCP server's timeout covers both budgets plus a 30-second margin. MCP hosts
 must allow these response times in their own timeout settings.
@@ -118,7 +124,7 @@ once the stuck operation returns.
 Use `get_rpc_status` from a separate RPC client to identify the operation that
 is still running. The RPC server handles connections concurrently, so
 diagnostics do not wait for another request to finish. Document queries
-(`get_object`, `get_objects`, and `list_documents`) run on the GUI thread
+(`get_object`, `list_objects`, and `list_documents`) run on the GUI thread
 alongside modelling operations and report an RPC fault if dispatch times out or
 is stuck.
 

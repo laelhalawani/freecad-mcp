@@ -21,6 +21,7 @@ import (
 	"io"
 	"math"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,11 +37,15 @@ func (f *Fault) Error() string {
 	return fmt.Sprintf("XML-RPC fault %d: %s", f.Code, f.String)
 }
 
+// missingMethodRe is SimpleXMLRPCServer's exact wording for a method it does
+// not have: <class 'Exception'>:method "x" is not supported.
+var missingMethodRe = regexp.MustCompile(`^<class '[^']*'>:method ".*" is not supported$`)
+
 // MissingMethod reports whether the fault says the server lacks the called
-// method. SimpleXMLRPCServer words it as 'method "x" is not supported'; any
-// other fault is a failure inside a method the server has.
+// method. Any other fault, even one whose text mentions "is not supported",
+// is a failure inside a method the server has.
 func (f *Fault) MissingMethod() bool {
-	return strings.Contains(f.String, "is not supported")
+	return missingMethodRe.MatchString(f.String)
 }
 
 // EncodeCall renders a methodCall document.

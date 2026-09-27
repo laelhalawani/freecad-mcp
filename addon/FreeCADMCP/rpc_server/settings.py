@@ -2,6 +2,7 @@
 
 import json
 import os
+import tempfile
 
 import FreeCAD
 
@@ -40,13 +41,32 @@ def load_settings():
 
 
 def save_settings(settings):
-    """Write the settings, readable only by the user: they hold the auth token."""
+    """Write the settings, readable only by the user: they hold the auth token.
+
+    The file is replaced atomically: the settings are written to a temporary
+    file in the same directory, which then takes the settings file's place, so
+    a crash or a failed write leaves the previous settings intact.
+    """
     path = _get_settings_path()
+    tmp_path = None
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # mkstemp creates the file with mode 0600 on POSIX.
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=_SETTINGS_FILENAME + ".", suffix=".tmp", dir=os.path.dirname(path)
+        )
         with open(fd, "w", encoding=_ENCODING) as f:
             if os.name != "nt":
-                os.fchmod(f.fileno(), 0o600)  # also for a file an older version created
+                os.fchmod(f.fileno(), 0o600)  # exactly 0600, whatever the umask
             json.dump(settings, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        tmp_path = None
     except Exception as e:
         FreeCAD.Console.PrintError(f"Failed to save MCP settings: {e}\n")
+    finally:
+        if tmp_path is not None:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass

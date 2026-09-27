@@ -29,7 +29,7 @@ def get_parts_list() -> list[str]:
     parts_lib_path = os.path.join(FreeCAD.getUserAppDataDir(), "Mod", "parts_library")
 
     if not os.path.exists(parts_lib_path):
-        # Library addon not installed — return empty so the caller can show a
+        # Library addon not installed - return empty so the caller can show a
         # friendly "no parts found" message instead of raising over XML-RPC.
         return []
 

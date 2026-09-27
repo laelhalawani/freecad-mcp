@@ -1,10 +1,10 @@
 """Qt Command classes for the MCP Addon workbench menu.
 
-Defines the five toolbar/menu entries (Start, Stop, Toggle Auto-Start,
-Toggle Remote, Configure Allowed IPs).
+Defines the six toolbar/menu entries (Start, Stop, Toggle Auto-Start,
+Toggle Remote, Configure Allowed IPs, Set Auth Token).
 
 ``register_commands()`` and ``schedule_toggle_sync()`` are invoked from
-``rpc_server.py`` at import time to preserve current side-effect behavior.
+``rpc_server.py`` at import time, so importing it registers the commands.
 """
 
 import FreeCAD
@@ -82,7 +82,7 @@ class ToggleRemoteConnectionsCommand:
             )
             if not settings.get("auth_token", ""):
                 FreeCAD.Console.PrintWarning(
-                    "Remote connections have no auth token configured — anyone on "
+                    "Remote connections have no auth token configured - anyone on "
                     "an allowed IP can execute code in FreeCAD. Set one via "
                     "'Set Auth Token' in the FreeCAD MCP menu.\n"
                 )
@@ -129,7 +129,7 @@ class ConfigureAllowedIPsCommand:
                        if valid else "\n\nNo valid entries found. Settings not changed."),
                 )
             if not valid:
-                FreeCAD.Console.PrintWarning("Allowed IPs not changed — no valid entries.\n")
+                FreeCAD.Console.PrintWarning("Allowed IPs not changed - no valid entries.\n")
                 return
             normalised = ", ".join(valid)
             settings["allowed_ips"] = normalised
@@ -175,9 +175,9 @@ class SetAuthTokenCommand:
         settings["auth_token"] = text.strip()
         save_settings(settings)
         if settings["auth_token"]:
-            FreeCAD.Console.PrintMessage("Auth token set — clients must authenticate.\n")
+            FreeCAD.Console.PrintMessage("Auth token set - clients must authenticate.\n")
         else:
-            FreeCAD.Console.PrintMessage("Auth token cleared — authentication disabled.\n")
+            FreeCAD.Console.PrintMessage("Auth token cleared - authentication disabled.\n")
         if rpc_server.rpc_server_instance:
             FreeCAD.Console.PrintMessage(
                 "Restart the RPC server for changes to take effect.\n"

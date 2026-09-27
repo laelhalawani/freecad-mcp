@@ -14,14 +14,18 @@ Robustness and performance guarantees:
    RPC thread; the GUI thread processes the task immediately rather than
    waiting for the next 500 ms heartbeat tick. The 500 ms heartbeat is kept
    only as a fallback.
-3. Mouse-button guard: ``process_gui_tasks`` skips the current tick while
+3. Mouse-button guard: a dispatch tick is skipped while
    mouse buttons are held so MCP tasks cannot interrupt 3D navigation drags,
    for at most ``MOUSE_DEFER_MAX_S`` so a lost mouse-release cannot wedge
    dispatch. A queued call that times out names the guard that held it.
-4. Clean shutdown: the ``_SHUTDOWN`` sentinel sets a flag that suppresses the
-   ``finally`` reschedule, so ``stop_rpc_server`` actually stops the loop.
-5. Exception isolation: exceptions inside a task are caught, logged, and
-   returned as error strings; they never kill the dispatch loop.
+4. One heartbeat chain: every 500 ms tick reschedules itself, including a
+   tick that fires re-entrantly while a task pumps events, so guard-deferred
+   work is always retried. Each start claims a new chain id and only the
+   live chain reschedules, so a restart never leaves two chains running;
+   ``request_shutdown`` ends the live chain and any start tick still pending.
+5. Exception isolation: exceptions inside a task (including ``SystemExit``
+   and ``KeyboardInterrupt``) are caught, logged, and returned as error
+   strings; they never kill the dispatch loop.
 6. Stuck-task fail-fast: once a task that already started times out, later GUI
    calls fail immediately until that task returns. Status remains available
    through a GUI-independent RPC method.
@@ -48,8 +52,7 @@ from rpc_server.dispatch_health import DispatchHealth, stuck_failure
 
 
 _rpc_request_queue: "queue.Queue[Any]" = queue.Queue()
-_SHUTDOWN = object()
-_processing = False  # re-entrancy guard: True while process_gui_tasks is draining
+_processing = False  # re-entrancy guard: True while _drain_gui_tasks runs tasks
 _processing_since: float = 0.0  # wall-clock time when _processing became True
 _task_ids = itertools.count(1)
 _dispatch_health = DispatchHealth()
@@ -76,6 +79,15 @@ _event_seq = itertools.count()
 # without touching Qt off-thread. One tuple assignment keeps reason and
 # sequence consistent without a lock.
 _last_defer: "tuple[str, int] | None" = None
+
+# The 500 ms heartbeat is a chain of single-shot timers. Only the chain whose
+# id matches _heartbeat_chain may reschedule, so a start claims a new id and
+# any older chain ends at its next tick. _heartbeat_stopped keeps a start tick
+# that was scheduled before request_shutdown from reviving the chain;
+# init_waker clears it when the server starts again.
+_heartbeat_lock = threading.Lock()
+_heartbeat_chain = 0
+_heartbeat_stopped = False
 
 
 def _mouse_guard_should_defer(mouse_down: bool, now: float) -> bool:
@@ -133,8 +145,14 @@ _waker: "_WakeSignal | None" = None
 
 
 def init_waker() -> None:
-    """Create the wake-signal bridge. Call once from the GUI thread."""
-    global _waker
+    """Create the wake-signal bridge and re-arm the heartbeat.
+
+    Call once from the GUI thread when the server starts, before scheduling
+    the first ``process_gui_tasks`` tick.
+    """
+    global _waker, _heartbeat_stopped
+    with _heartbeat_lock:
+        _heartbeat_stopped = False
     _waker = _WakeSignal()
 
 
@@ -163,21 +181,64 @@ def _flush_gui_events(delay_ms: int = 20) -> None:
 
 
 def process_gui_tasks(reschedule: bool = True) -> None:
-    """Drain queued GUI-thread callables and optionally reschedule.
+    """Drain queued GUI-thread callables and optionally start the heartbeat.
 
-    Skips the current tick when any mouse button is held (e.g., 3D navigation
-    drag) or when already executing a task (re-entrancy guard). The guard
-    prevents ``doc.recompute()`` or ``processEvents()`` inside a task from
-    triggering a nested ``process_gui_tasks`` call that corrupts FreeCAD state.
+    ``reschedule=True`` (the server's start tick) claims a new 500 ms
+    heartbeat chain, which supersedes any older chain, then drains. It claims
+    nothing after ``request_shutdown`` until ``init_waker`` re-arms it.
 
     ``reschedule=False`` is used by the immediate-wake path so it does not
     start a second heartbeat chain alongside the existing 500 ms one.
+    """
+    chain = _claim_heartbeat_chain() if reschedule else None
+    try:
+        _drain_gui_tasks()
+    finally:
+        if chain is not None:
+            _schedule_heartbeat(chain)
+
+
+def _claim_heartbeat_chain() -> "int | None":
+    global _heartbeat_chain
+    with _heartbeat_lock:
+        if _heartbeat_stopped:
+            return None
+        _heartbeat_chain += 1
+        return _heartbeat_chain
+
+
+def _schedule_heartbeat(chain: int) -> None:
+    """Queue the next tick of ``chain`` unless a restart or shutdown ended it."""
+    with _heartbeat_lock:
+        if chain != _heartbeat_chain:
+            return
+    QtCore.QTimer.singleShot(500, lambda: _heartbeat_tick(chain))
+
+
+def _heartbeat_tick(chain: int) -> None:
+    if chain != _heartbeat_chain:
+        return  # superseded by a restart or ended by request_shutdown
+    try:
+        _drain_gui_tasks()
+    finally:
+        # Also after a re-entrant tick that skipped draining: the chain must
+        # survive so ticks deferred by a guard are retried.
+        _schedule_heartbeat(chain)
+
+
+def _drain_gui_tasks() -> None:
+    """Run queued GUI-thread callables unless a guard defers this tick.
+
+    Skips the current tick when any mouse button is held (e.g., 3D navigation
+    drag), a popup or modal dialog is open, or a task is already executing
+    (re-entrancy guard). The guard prevents ``doc.recompute()`` or
+    ``processEvents()`` inside a task from triggering a nested drain that
+    corrupts FreeCAD state.
     """
     global _processing, _processing_since, _last_defer
     if _processing:
         return  # re-entrant call from processEvents inside a task; skip
 
-    shutdown = False
     try:
         if _rpc_request_queue.empty():
             return  # nothing queued; skip cursor/status-bar churn on idle heartbeat ticks
@@ -212,12 +273,9 @@ def process_gui_tasks(reschedule: bool = True) -> None:
         try:
             while not _rpc_request_queue.empty():
                 task = _rpc_request_queue.get()
-                if task is _SHUTDOWN:
-                    shutdown = True
-                    return
                 try:
                     task()
-                except Exception as e:
+                except BaseException as e:  # SystemExit/KeyboardInterrupt must not kill the drain
                     FreeCAD.Console.PrintError(
                         f"MCP RPC: unhandled exception in GUI task: {type(e).__name__}: {e}\n"
                         f"{traceback.format_exc()}"
@@ -229,13 +287,14 @@ def process_gui_tasks(reschedule: bool = True) -> None:
                 status_bar.clearMessage()
     finally:
         _processing = False
-        if not shutdown and reschedule:
-            QtCore.QTimer.singleShot(500, process_gui_tasks)
 
 
 def request_shutdown() -> None:
-    """Post the sentinel so the next dispatch tick exits without rescheduling."""
-    _rpc_request_queue.put(_SHUTDOWN)
+    """End the heartbeat chain, including a start tick that has not fired yet."""
+    global _heartbeat_chain, _heartbeat_stopped
+    with _heartbeat_lock:
+        _heartbeat_stopped = True
+        _heartbeat_chain += 1
 
 
 def get_dispatch_status() -> dict[str, Any]:
@@ -301,7 +360,7 @@ def dispatch_to_gui(
         try:
             try:
                 res = task()
-            except Exception as e:
+            except BaseException as e:  # sys.exit() in user code is a task error too
                 FreeCAD.Console.PrintError(
                     f"MCP RPC: GUI task raised {type(e).__name__}: {e}\n"
                     f"{traceback.format_exc()}"
@@ -318,8 +377,9 @@ def dispatch_to_gui(
     queued_at = time.monotonic()
     queued_seq = next(_event_seq)
     _rpc_request_queue.put(_wrapped)
-    if _waker is not None:
-        _waker.wake()  # immediate wake via Qt signal (thread-safe)
+    waker = _waker  # read once: cleanup_waker() may clear it concurrently
+    if waker is not None:
+        waker.wake()  # immediate wake via Qt signal (thread-safe)
 
     # Phase 1: wait for the task to start. Earlier queued tasks run first on
     # the GUI thread; that wait must not eat into this task's run budget.
@@ -333,7 +393,7 @@ def dispatch_to_gui(
         if _processing:
             busy_for = time.monotonic() - _processing_since
             hint = (
-                f" (GUI thread has been busy for {busy_for:.1f}s — for heavy OCCT"
+                f" (GUI thread has been busy for {busy_for:.1f}s; for heavy OCCT"
                 " geometry consider execute_code_async, which must apply document"
                 " writes through its commit() helper)"
             )

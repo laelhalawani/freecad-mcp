@@ -142,17 +142,28 @@ func (c *Connection) CheckAddonVersion(ctx context.Context, serverVersion string
 // ErrInvalidTimeout rejects a timeout that is not a positive finite number.
 var ErrInvalidTimeout = errors.New("timeout must be a positive finite number")
 
+// CheckTimeout returns ErrInvalidTimeout for a timeout that is given but not
+// a positive finite number, so a caller can reject it before connecting.
+func CheckTimeout(timeout *float64) error {
+	if timeout == nil {
+		return nil
+	}
+	if t := *timeout; math.IsNaN(t) || math.IsInf(t, 0) || t <= 0 {
+		return ErrInvalidTimeout
+	}
+	return nil
+}
+
 // ExecuteCodeBudget returns the run budget sent to the addon and the time to
 // wait for the reply. The addon permits a full queue budget followed by a
 // full run budget, so the wait must outlast both.
 func (c *Connection) ExecuteCodeBudget(timeout *float64) (run float64, wait time.Duration, err error) {
 	run = c.ExecuteCodeTimeout
+	if err := CheckTimeout(timeout); err != nil {
+		return 0, 0, err
+	}
 	if timeout != nil {
-		t := *timeout
-		if math.IsNaN(t) || math.IsInf(t, 0) || t <= 0 {
-			return 0, 0, ErrInvalidTimeout
-		}
-		run = math.Min(t, c.MaxExecuteCodeTimeout)
+		run = math.Min(*timeout, c.MaxExecuteCodeTimeout)
 	}
 	wait = max(c.timeout, seconds(2*run+c.RPCTimeoutMargin))
 	return run, wait, nil
@@ -213,7 +224,8 @@ func (c *Connection) InsertPartFromLibrary(ctx context.Context, relativePath str
 }
 
 // GetActiveScreenshot returns the active view as base64 PNG, or "" when the
-// active view cannot be captured (a TechDraw page or a spreadsheet).
+// active view cannot be captured (a TechDraw page or a spreadsheet). Any
+// other failure to capture it is an *xmlrpc.Fault.
 func (c *Connection) GetActiveScreenshot(ctx context.Context, view string, width, height *int, focus *string) (string, error) {
 	var w, h, f any
 	if width != nil {

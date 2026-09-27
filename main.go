@@ -311,7 +311,7 @@ func runInstall(ctx context.Context, cmd cli.Command) int {
 	}
 	credStore := secret.NewFileStore(domain.CredentialPath())
 
-	if tui.IsInteractive() && !cmd.Yes {
+	if tui.IsInteractive() && !runsUnattended(cmd) {
 		return runWizard(ctx, detector, harness.Scope{}, domain.LoginConfig(credStore), cmd, "freecad-mcp setup")
 	}
 	return runUnattended(ctx, detector, harness.Scope{}, credStore, cmd, harness.Present)
@@ -345,7 +345,7 @@ func runAdd(ctx context.Context, cmd cli.Command) int {
 	scope := harness.ProjectScopeDir(dir)
 	credStore := secret.NewFileStore(domain.ProjectCredentialPath(dir))
 
-	if tui.IsInteractive() && !cmd.Yes {
+	if tui.IsInteractive() && !runsUnattended(cmd) {
 		return runWizard(ctx, detector, scope, domain.ProjectLoginConfig(credStore, dir), cmd, "freecad-mcp project setup")
 	}
 	return runUnattended(ctx, detector, scope, credStore, cmd, harness.Present)
@@ -369,7 +369,7 @@ func runWizard(ctx context.Context, detector *harness.Detector, scope harness.Sc
 				return untickedClients(clientEntries(ctx, detector, scope, hs))
 			},
 		},
-		loginFresh{installer.LoginStep(ctx, login, loginState), store},
+		loginFresh{loginInput{installer.LoginStep(ctx, login, loginState)}, store},
 		newAddonStep(ctx),
 		applyGuard{installer.ApplyStep(ctx, detector, harnessState, resultsState, installer.ApplyStepOptions{Scope: scope, DryRun: cmd.DryRun}), cmd.DryRun},
 	}
@@ -377,7 +377,7 @@ func runWizard(ctx context.Context, detector *harness.Detector, scope harness.Sc
 	f := flow.New(steps, state)
 	code := tui.Run(ctx, f, tui.Options{Title: title})
 
-	switch classifyWizard(&state.BaseState, code, f.Current() >= applyIndex, cmd.DryRun) {
+	switch classifyWizard(&state.BaseState, code, f.Current() >= applyIndex, cmd.DryRun, ctx.Err() != nil) {
 	case outcomeCancelled:
 		fmt.Println("  Setup cancelled; nothing was changed.")
 		return exitCancelled
@@ -513,6 +513,14 @@ func runUninstall(ctx context.Context, cmd cli.Command) int {
 	}
 	scope := harness.Scope{}
 	if cmd.Scope == string(harness.ScopeProject) {
+		// --all removes the program and everything installed for the user,
+		// which a project-scoped uninstall must not touch.
+		if cmd.All {
+			fmt.Fprintln(os.Stderr, "  --all removes the program itself, so it cannot be combined with --scope project.\n"+
+				"  Run `"+domain.BinaryName+" uninstall --scope project` to remove this project's client entries,\n"+
+				"  or `"+domain.BinaryName+" uninstall --all` to remove everything installed for your user.")
+			return 2
+		}
 		dir, err := projectDir(cmd)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -551,9 +559,7 @@ func runLogin(ctx context.Context, cmd cli.Command) int {
 	}
 
 	state := &AppState{}
-	step := installer.LoginStep(ctx, domain.LoginConfig(credStore),
-		func(s *AppState) *installer.LoginState { return &s.Login },
-	)
+	step := loginInput{installer.LoginStep(ctx, domain.LoginConfig(credStore), loginState)}
 	f := flow.New([]flow.Step[AppState]{step}, state)
 	return tui.Run(ctx, f, tui.Options{Title: "freecad-mcp login"})
 }
@@ -720,14 +726,15 @@ func runUpdate(ctx context.Context, cmd cli.Command) int {
 	opts := updateOptions()
 
 	// `update --from <file>` swaps in a binary that was already downloaded
-	// and verified by other means.
+	// and verified by other means, then lets it update FreeCAD's copy of the
+	// addon, as a download does.
 	if len(cmd.Args) >= 2 && cmd.Args[0] == "--from" {
 		if err := update.SwapFrom(ctx, cmd.Args[1], opts); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
 		fmt.Println("  Updated.")
-		return 0
+		return runNewBinaryAddonRefresh(ctx, filepath.Join(opts.InstallDir, opts.BinaryName))
 	}
 
 	if version == "dev" {
@@ -865,11 +872,20 @@ func (m *appState) View() string {
 func runMCPServer(ctx context.Context, cmd cli.Command) int {
 	transport := os.Getenv("TRANSPORT")
 
-	// --remote, or a configured remote endpoint when TRANSPORT is not set
-	// explicitly, turns this binary into a stdio bridge: the AI client talks
-	// to us, we talk to the remote with the stored credential. An explicit
-	// TRANSPORT always serves the embedded server.
-	if remoteURL, remote := bridgeTarget(cmd); remoteURL != "" && (cmd.Remote != "" || transport == "") {
+	// The stored credential is the FreeCAD addon's RPC auth token, so it is
+	// never sent to an endpoint named on the command line.
+	if cmd.Remote != "" {
+		fmt.Fprintf(os.Stderr, "  %s serves FreeCAD's MCP tools itself and does not bridge to other MCP servers,\n"+
+			"  so `mcp --remote %s` is refused: the stored token belongs to FreeCAD's RPC server\n"+
+			"  and is only sent to it. Run `%s mcp` without --remote.\n", domain.BinaryName, cmd.Remote, domain.BinaryName)
+		return 2
+	}
+
+	// A configured remote endpoint, when TRANSPORT is not set explicitly,
+	// turns this binary into a stdio bridge: the AI client talks to us, we
+	// talk to the remote with the stored credential. An explicit TRANSPORT
+	// always serves the embedded server.
+	if remoteURL, remote := bridgeTarget(); remoteURL != "" && transport == "" {
 		return runBridge(ctx, remoteURL, remote)
 	}
 
@@ -900,19 +916,11 @@ func runMCPServer(ctx context.Context, cmd cli.Command) int {
 	return 1
 }
 
-// bridgeTarget returns the remote URL to bridge to: --remote wins, then the
-// project's RemoteConfig. The second value carries the header settings.
-func bridgeTarget(cmd cli.Command) (string, *domain.RemoteConfig) {
-	remote := domain.Remote()
-	if cmd.Remote != "" {
-		if remote == nil {
-			// Ad-hoc bridge on a project without a configured remote: a
-			// bearer token stored with `login --token`.
-			remote = &domain.RemoteConfig{HeaderName: "Authorization", HeaderPrefix: "Bearer ", CredentialKey: "token"}
-		}
-		return cmd.Remote, remote
-	}
-	if remote != nil {
+// bridgeTarget returns the remote URL to bridge to, from the project's
+// RemoteConfig, or "" when there is none. The second value carries the
+// header settings.
+func bridgeTarget() (string, *domain.RemoteConfig) {
+	if remote := domain.Remote(); remote != nil {
 		return remote.URL, remote
 	}
 	return "", nil

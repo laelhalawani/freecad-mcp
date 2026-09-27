@@ -32,7 +32,7 @@ func New(config Config) *Server {
 			},
 			&mcp.ServerOptions{
 				Instructions: "FreeCAD integration through the Model Context Protocol. " +
-					"Start with list_documents or get_objects to see the current state, " +
+					"Start with list_documents or list_objects to see the current state, " +
 					"and read the asset_creation_strategy prompt for the recommended workflow.",
 			},
 		),
@@ -44,6 +44,7 @@ func New(config Config) *Server {
 	srv.registerViewTools()
 	srv.registerStatusTools()
 	srv.registerPrompts()
+	srv.mcpServer.AddReceivingMiddleware(invalidArguments)
 
 	return srv
 }

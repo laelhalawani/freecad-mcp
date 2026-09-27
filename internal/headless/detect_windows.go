@@ -11,8 +11,9 @@ import (
 )
 
 // windowsInstallDirs returns FreeCAD installation directories from the
-// uninstall registry entries the FreeCAD installer writes, then from the
-// Program Files folders.
+// uninstall registry entries the FreeCAD installer writes, in registry order,
+// then the FreeCAD* folders in Program Files and in the per-user
+// %LOCALAPPDATA%\Programs, without duplicates.
 func windowsInstallDirs() []string {
 	seen := map[string]bool{}
 	var dirs []string
