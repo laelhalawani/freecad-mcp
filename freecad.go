@@ -58,7 +58,7 @@ func registerFreeCADCommands(r *command.Registry) {
 		Run: func(ctx context.Context, args []string) int {
 			fs := flag.NewFlagSet("install-addon", flag.ContinueOnError)
 			dir := fs.String("user-data-dir", "", "FreeCAD user data directory (default: ask FreeCAD)")
-			noAuto := fs.Bool("no-autostart", false, "do not turn on starting the RPC server with FreeCAD")
+			noAuto := fs.Bool("no-autostart", false, "turn off starting the RPC server with FreeCAD (default: keep the current setting, on for a new install)")
 			refresh := fs.Bool("refresh", false, "only update existing installs, keeping their settings (used by update)")
 			dryRun := fs.Bool("dry-run", false, "show where the addon would go without writing")
 			if err := fs.Parse(args); err != nil {
@@ -71,25 +71,29 @@ func registerFreeCADCommands(r *command.Registry) {
 			if *refresh {
 				return refreshAddon(ctx, os.Stdout, targets, *dryRun)
 			}
-			return installAddonReport(ctx, os.Stdout, targets, *dryRun, withAutoStart(!*noAuto))
+			var opts []installOption
+			if *noAuto {
+				opts = append(opts, withAutoStart(false))
+			}
+			return installAddonReport(ctx, os.Stdout, targets, *dryRun, opts...)
 		},
 	})
 	r.Register(command.Handler{
 		Name:        "uninstall-addon",
-		Description: "Remove the FreeCAD addon",
+		Description: "Remove the FreeCAD addon from every FreeCAD data folder that holds it",
 		Usage:       "uninstall-addon [--user-data-dir <dir>]",
 		Run: func(ctx context.Context, args []string) int {
 			fs := flag.NewFlagSet("uninstall-addon", flag.ContinueOnError)
-			dir := fs.String("user-data-dir", "", "FreeCAD user data directory (default: ask FreeCAD)")
+			dir := fs.String("user-data-dir", "", "FreeCAD user data directory (default: every one that holds the addon)")
 			if err := fs.Parse(args); err != nil {
 				return 2
 			}
 			targets := []addoninstall.Target{{UserDataDir: *dir, Source: "flag"}}
 			if *dir == "" {
-				targets = addoninstall.Locate(ctx, freecadCommand())
+				targets = addoninstall.LocateInstalled(ctx, freecadCommand())
 			}
 			if len(targets) == 0 {
-				fmt.Println("  FreeCAD's user data directory was not found; nothing to remove.")
+				fmt.Println("  No FreeCAD data folder holds the addon; nothing to remove.")
 				return 0
 			}
 			code := 0
@@ -119,34 +123,108 @@ func registerFreeCADCommands(r *command.Registry) {
 	})
 }
 
-type installOptions struct{ autoStart bool }
+// autoStartChoice is what an install does with the addon's "start the RPC
+// server with FreeCAD" setting.
+type autoStartChoice int
+
+const (
+	// autoStartKeep keeps an existing setting and turns it on when unset.
+	autoStartKeep autoStartChoice = iota
+	autoStartOn
+	autoStartOff
+	// autoStartUntouched leaves the settings file alone.
+	autoStartUntouched
+)
+
+type installOptions struct{ autoStart autoStartChoice }
 
 type installOption func(*installOptions)
 
-func withAutoStart(on bool) installOption { return func(o *installOptions) { o.autoStart = on } }
+// withAutoStart turns auto-start on or off instead of keeping the current
+// setting.
+func withAutoStart(on bool) installOption {
+	return func(o *installOptions) {
+		o.autoStart = autoStartOff
+		if on {
+			o.autoStart = autoStartOn
+		}
+	}
+}
 
 // addonResult is the outcome for one FreeCAD user data directory.
 type addonResult struct {
 	Target   addoninstall.Target
 	Replaced bool
 	Previous string
-	Err      error
+	// AutoStart is the auto-start setting the install left in Target.
+	AutoStart bool
+	Err       error
 }
 
+// installAddon installs the addon into t and turns auto-start on or off as
+// the user chose.
 func installAddon(t addoninstall.Target, autoStart bool) addonResult {
+	choice := autoStartOff
+	if autoStart {
+		choice = autoStartOn
+	}
+	return installAddonWith(t, choice)
+}
+
+func installAddonWith(t addoninstall.Target, choice autoStartChoice) addonResult {
 	r := addonResult{Target: t}
 	r.Previous, _ = addoninstall.InstalledVersion(t)
 	r.Replaced, r.Err = addoninstall.Install(t)
-	if r.Err == nil && autoStart {
-		if err := addoninstall.SetAutoStart(t, true); err != nil {
-			r.Err = fmt.Errorf("installed, but could not turn on auto-start: %w", err)
-		}
+	if r.Err != nil {
+		return r
 	}
+	current, set := addoninstall.AutoStartSetting(t)
+	r.AutoStart = current
+	want := current
+	switch choice {
+	case autoStartUntouched:
+		return r
+	case autoStartOn:
+		want = true
+	case autoStartOff:
+		want = false
+	case autoStartKeep:
+		if set {
+			return r
+		}
+		want = true
+	}
+	if set && want == current {
+		return r
+	}
+	if err := addoninstall.SetAutoStart(t, want); err != nil {
+		state := "off"
+		if want {
+			state = "on"
+		}
+		r.Err = fmt.Errorf("installed, but could not turn %s auto-start: %w", state, err)
+		return r
+	}
+	r.AutoStart = want
 	return r
 }
 
-func printAddonResults(w io.Writer, results []addonResult, autoStart bool) int {
+// reportAddonResults reports each install and how to start the RPC server,
+// following the auto-start setting each install left (addonResult.AutoStart).
+// It returns a process exit code.
+func reportAddonResults(w io.Writer, results []addonResult) int {
 	version, _, _ := addoninstall.EmbeddedVersion()
+	var on, off int
+	for _, r := range results {
+		switch {
+		case r.Err != nil:
+		case r.AutoStart:
+			on++
+		default:
+			off++
+		}
+	}
+	mixed := on > 0 && off > 0
 	code := 0
 	for _, r := range results {
 		if r.Err != nil {
@@ -160,12 +238,22 @@ func printAddonResults(w io.Writer, results []addonResult, autoStart bool) int {
 		} else if r.Replaced {
 			verb = "replaced with"
 		}
-		fmt.Fprintf(w, "  [ok]   %s addon %s\n         %s\n", verb, version, r.Target.AddonDir())
+		note := ""
+		if mixed {
+			note = "  (auto-start off)"
+			if r.AutoStart {
+				note = "  (auto-start on)"
+			}
+		}
+		fmt.Fprintf(w, "  [ok]   %s addon %s\n         %s%s\n", verb, version, r.Target.AddonDir(), note)
 	}
 	if code == 0 && len(results) > 0 {
-		if autoStart {
+		switch {
+		case mixed:
+			fmt.Fprintln(w, "  Restart FreeCAD if it is running. Where auto-start is off, select the MCP Addon\n  workbench and click Start RPC Server.")
+		case on > 0:
 			fmt.Fprintln(w, "  The RPC server starts with FreeCAD. Restart FreeCAD if it is running.")
-		} else {
+		default:
 			fmt.Fprintln(w, "  Restart FreeCAD, select the MCP Addon workbench and click Start RPC Server.")
 		}
 	}
@@ -177,9 +265,11 @@ const freecadNotFound = "  FreeCAD was not found. Install FreeCAD (and start it 
 	"  FreeCAD.getUserAppDataDir() prints in FreeCAD's Python console."
 
 // installAddonReport installs the addon into targets (located when empty)
-// and writes a report. It returns a process exit code.
+// and writes a report. Each target keeps its auto-start setting, which is
+// turned on where it is unset, unless an option chooses otherwise. It returns
+// a process exit code.
 func installAddonReport(ctx context.Context, w io.Writer, targets []addoninstall.Target, dryRun bool, opts ...installOption) int {
-	o := installOptions{autoStart: true}
+	o := installOptions{autoStart: autoStartKeep}
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -198,41 +288,52 @@ func installAddonReport(ctx context.Context, w io.Writer, targets []addoninstall
 	}
 	var results []addonResult
 	for _, t := range targets {
-		results = append(results, installAddon(t, o.autoStart))
+		results = append(results, installAddonWith(t, o.autoStart))
 	}
-	return printAddonResults(w, results, o.autoStart)
+	return reportAddonResults(w, results)
 }
 
-// refreshAddon updates the addon where it is installed already, so an updated
-// binary and the addon it talks to stay in step. Settings are left alone.
+// refreshAddon updates the addon where it is installed already, in every
+// FreeCAD data folder that holds a copy (see addoninstall.LocateInstalled),
+// so an updated binary and the addon it talks to stay in step. Settings are
+// left alone.
 func refreshAddon(ctx context.Context, w io.Writer, targets []addoninstall.Target, dryRun bool) int {
 	if len(targets) == 0 {
-		targets = addoninstall.Locate(ctx, freecadCommand())
+		targets = addoninstall.LocateInstalled(ctx, freecadCommand())
 	}
 	if len(targets) == 0 {
-		fmt.Fprintln(w, freecadNotFound)
+		fmt.Fprintf(w, "  No installed FreeCAD addon was found; `%s install-addon` installs it.\n", domain.BinaryName)
 		return 0
 	}
-	want, _, _ := addoninstall.EmbeddedVersion()
+	want, wantProtocol, _ := addoninstall.EmbeddedVersion()
 	var results []addonResult
 	for _, t := range targets {
-		got, err := addoninstall.InstalledVersion(t)
-		if err != nil || got == want {
+		// A copy is current only when both its version and its protocol match:
+		// a pre-release can share the version number but not the protocol.
+		// One whose version cannot be read is replaced too.
+		got, protocol, err := addoninstall.InstalledRelease(t)
+		if errors.Is(err, os.ErrNotExist) || err == nil && addoninstall.SameRelease(got, protocol) {
 			continue
 		}
 		if dryRun {
-			fmt.Fprintf(w, "  would update the FreeCAD addon %s -> %s in %s\n", got, want, t.AddonDir())
+			from := got
+			if err != nil {
+				from = "an unreadable copy"
+			} else if got == want {
+				from = fmt.Sprintf("%s (protocol %d)", got, protocol)
+			}
+			fmt.Fprintf(w, "  would update the FreeCAD addon %s -> %s (protocol %d) in %s\n", from, want, wantProtocol, t.AddonDir())
 			continue
 		}
-		results = append(results, installAddon(t, false))
+		results = append(results, installAddonWith(t, autoStartUntouched))
 	}
 	if len(results) == 0 {
 		if !dryRun {
-			fmt.Fprintln(w, "  The installed FreeCAD addon is up to date.")
+			fmt.Fprintln(w, "  Every installed copy of the FreeCAD addon is up to date.")
 		}
 		return 0
 	}
-	return printAddonResults(w, results, false)
+	return reportAddonResults(w, results)
 }
 
 // runNewBinaryAddonRefresh runs `install-addon --refresh` with the binary an
@@ -351,32 +452,68 @@ type addonCheck struct{}
 
 func (addonCheck) Name() string { return "FreeCAD addon" }
 
+// Run checks every installed copy of the addon, in each FreeCAD data folder
+// that holds one, and that the folder FreeCAD reports holds one.
 func (c addonCheck) Run(ctx context.Context) doctor.Result {
-	targets := addoninstall.Locate(ctx, freecadCommand())
+	located := addoninstall.LocateAll(ctx, freecadCommand())
+	targets := located.Installed
 	if len(targets) == 0 {
-		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: "FreeCAD's user data directory was not found; start FreeCAD once, then run `" + domain.BinaryName + " install-addon`"}
+		if len(located.DataDirs) == 0 {
+			return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: "FreeCAD's user data directory was not found; start FreeCAD once, then run `" + domain.BinaryName + " install-addon`"}
+		}
+		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: "not installed in " + located.DataDirs[0].ModDir() + "; run `" + domain.BinaryName + " install-addon`"}
 	}
-	want, _, _ := addoninstall.EmbeddedVersion()
-	var problems, found []string
+	want, wantProtocol, _ := addoninstall.EmbeddedVersion()
+	// FreeCAD loads addons only from the folder it reports, which comes first
+	// and is where install-addon installs. A problem there fails the check.
+	// Without a reported folder, install-addon installs into every folder
+	// found on disk, so a problem anywhere fails it. A copy in another folder
+	// (for another FreeCAD version or profile) only warns, with the command
+	// that updates or removes that copy.
+	reported := ""
+	if first := located.DataDirs[0]; first.Source == "freecad" {
+		reported = first.UserDataDir
+	}
+	var problems, warnings, found []string
+	if reported != "" && targets[0].UserDataDir != reported {
+		problems = append(problems, "not installed in "+located.DataDirs[0].ModDir()+", the folder FreeCAD loads addons from")
+	}
 	for _, t := range targets {
-		got, err := addoninstall.InstalledVersion(t)
+		got, protocol, err := addoninstall.InstalledRelease(t)
+		problem := ""
 		switch {
-		case errors.Is(err, os.ErrNotExist):
-			problems = append(problems, "not installed in "+t.ModDir())
 		case err != nil:
-			problems = append(problems, fmt.Sprintf("%s: %v", t.AddonDir(), err))
+			problem = fmt.Sprintf("%s: %v", t.AddonDir(), err)
 		case got != want:
-			problems = append(problems, fmt.Sprintf("%s is %s, this server ships %s", t.AddonDir(), got, want))
+			problem = fmt.Sprintf("%s is %s, this server ships %s", t.AddonDir(), got, want)
+		case protocol != wantProtocol:
+			// A pre-release can share the version number but not the protocol.
+			problem = fmt.Sprintf("%s is %s with protocol %d, this server ships %s with protocol %d",
+				t.AddonDir(), got, protocol, want, wantProtocol)
 		default:
 			auto := "manual start"
 			if addoninstall.AutoStart(t) {
 				auto = "auto-start on"
 			}
 			found = append(found, fmt.Sprintf("%s %s (%s)", got, t.AddonDir(), auto))
+			continue
+		}
+		if reported == "" || t.UserDataDir == reported {
+			problems = append(problems, problem)
+		} else {
+			warnings = append(warnings, fmt.Sprintf("%s (run `%s install-addon --user-data-dir \"%s\"` to update it, or `%s uninstall-addon --user-data-dir \"%s\"` to remove it)",
+				problem, domain.BinaryName, t.UserDataDir, domain.BinaryName, t.UserDataDir))
 		}
 	}
-	if len(problems) > 0 {
-		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: strings.Join(problems, "; ") + "; run `" + domain.BinaryName + " install-addon`"}
+	switch {
+	case len(problems) > 0:
+		detail := strings.Join(problems, "; ") + "; run `" + domain.BinaryName + " install-addon`"
+		if len(warnings) > 0 {
+			detail += "; also " + strings.Join(warnings, "; ")
+		}
+		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: detail}
+	case len(warnings) > 0:
+		return doctor.Result{Name: c.Name(), Status: doctor.Warn, Detail: strings.Join(append(found, warnings...), "; ")}
 	}
 	return doctor.Result{Name: c.Name(), Status: doctor.OK, Detail: strings.Join(found, "; ")}
 }
@@ -424,7 +561,25 @@ type addonState struct {
 	AutoStart bool
 }
 
-type addonLocatedMsg struct{ targets []addoninstall.Target }
+type addonLocatedMsg struct {
+	targets   []addoninstall.Target
+	autoStart bool
+}
+
+// currentAutoStart is where the wizard's auto-start toggle starts for
+// targets: on when a target has it on or none has it set, off when every
+// target that has it set has it off.
+func currentAutoStart(targets []addoninstall.Target) bool {
+	anySet := false
+	for _, t := range targets {
+		on, set := addoninstall.AutoStartSetting(t)
+		if on {
+			return true
+		}
+		anySet = anySet || set
+	}
+	return !anySet
+}
 
 type addonStep struct {
 	ctx context.Context
@@ -452,7 +607,8 @@ func (s *addonStep) Init(state *AppState) tea.Cmd {
 	state.Addon = addonState{Phase: addonLocating, AutoStart: true}
 	ctx := s.ctx
 	return tea.Batch(tui.Spinner(), func() tea.Msg {
-		return addonLocatedMsg{targets: addoninstall.Locate(ctx, freecadCommand())}
+		targets := addoninstall.Locate(ctx, freecadCommand())
+		return addonLocatedMsg{targets: targets, autoStart: currentAutoStart(targets)}
 	})
 }
 
@@ -461,6 +617,7 @@ func (s *addonStep) Update(msg tea.Msg, state *AppState) (flow.Directive, tea.Cm
 	switch m := msg.(type) {
 	case addonLocatedMsg:
 		a.Targets = m.targets
+		a.AutoStart = m.autoStart
 		if len(a.Targets) == 0 {
 			a.Phase = addonNotFound
 		} else {

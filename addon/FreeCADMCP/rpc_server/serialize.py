@@ -1,5 +1,7 @@
 import FreeCAD as App
 import json
+import math
+import xmlrpc.client
 
 
 def _get_optional_app_type(name: str) -> type | tuple[type, ...] | None:
@@ -14,15 +16,40 @@ def _get_optional_app_type(name: str) -> type | tuple[type, ...] | None:
 _COLOR_TYPE = _get_optional_app_type("Color")
 
 
+def _serialize_int(value: int) -> int | float | str:
+    """Keep an int inside XML-RPC's 32-bit range so the reply can be marshalled.
+
+    Larger values go out as a float when that is exact, otherwise as a
+    decimal string.
+    """
+    if xmlrpc.client.MININT <= value <= xmlrpc.client.MAXINT:
+        return value
+    try:
+        as_float = float(value)
+    except OverflowError:
+        return str(value)
+    if as_float == value:
+        return as_float
+    return str(value)
+
+
 def serialize_value(value):
-    if isinstance(value, (int, float, str, bool)):
+    if value is None:
+        return None
+    elif isinstance(value, bool):
+        return value
+    elif isinstance(value, int):
+        return _serialize_int(value)
+    elif isinstance(value, (float, str)):
         return value
     elif isinstance(value, App.Vector):
         return {"x": value.x, "y": value.y, "z": value.z}
     elif isinstance(value, App.Rotation):
+        # Rotation.Angle is in radians; the angle goes out in degrees, the unit
+        # FreeCAD.Rotation(axis, angle) takes when property_mapper writes it back.
         return {
             "Axis": {"x": value.Axis.x, "y": value.Axis.y, "z": value.Axis.z},
-            "Angle": value.Angle,
+            "Angle": math.degrees(value.Angle),
         }
     elif isinstance(value, App.Placement):
         return {

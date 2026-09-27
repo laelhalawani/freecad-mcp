@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/laelhalawani/freecad-mcp/internal/domain"
+	"github.com/laelhalawani/freecad-mcp/internal/freecad"
 	"github.com/laelhalawani/freecad-mcp/internal/headless"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sairaph/mcp-wizard/render"
@@ -12,7 +14,7 @@ import (
 
 type executeCodeInput struct {
 	Code    string   `json:"code" jsonschema:"the Python code to execute"`
-	Timeout *float64 `json:"timeout,omitempty" jsonschema:"positive seconds for each of the queue and GUI execution budgets, overriding the 90 s default for this call (capped at 1800); raise it for slow work that must run on the GUI thread, such as importing or exporting a large STEP assembly"`
+	Timeout *float64 `json:"timeout,omitempty" jsonschema:"seconds for each of the queue and GUI execution budgets, more than 0 and at most 1800, overriding the 90 s default for this call; raise it for slow work that must run on the GUI thread, such as importing or exporting a large STEP assembly"`
 	screenshotOptions
 }
 
@@ -22,11 +24,11 @@ type codeInput struct {
 
 type headlessInput struct {
 	Code    string   `json:"code" jsonschema:"a complete Python script for freecadcmd"`
-	Timeout *float64 `json:"timeout,omitempty" jsonschema:"positive seconds to wait before killing the process (default 600); partial output is kept on timeout"`
+	Timeout *float64 `json:"timeout,omitempty" jsonschema:"seconds to wait before killing the process, more than 0 and at most 604800 (a week); default 600; partial output is kept on timeout"`
 }
 
 type asyncStatusInput struct {
-	JobID string `json:"job_id,omitempty" jsonschema:"the job_id execute_code_async returned; empty lists all running jobs and up to 20 recently finished ones"`
+	JobID *string `json:"job_id,omitempty" jsonschema:"the job_id execute_code_async returned; omit it to list all running jobs and up to 20 recently finished ones"`
 }
 
 type executeFront struct {
@@ -83,11 +85,14 @@ Use this for OCCT work that can crash or block FreeCAD: helical threads (makeHel
 
 The script runs on the machine running this MCP server, independently of FREECAD_MCP_HOST, in a fresh process without GUI: import FreeCAD and Part yourself, open documents from disk (FreeCAD.openDocument(path)), and save results with doc.save()/saveAs() or Shape.exportBrep(). Nothing from the execute_code namespace is available. Print progress to stdout; it is returned when the process ends. After the script saved a .FCStd that is open in the GUI, call reload_document to show the result.`
 
+// largerExecuteTimeout says how to give slow GUI-thread code more time.
+const largerExecuteTimeout = "For slow work, call execute_code again with a larger timeout (at most 1800 seconds)."
+
 func (s *Server) registerCodeTools() {
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "execute_code",
 		Description: executeCodeDescription,
-		InputSchema: inputSchema[executeCodeInput](screenshotDefaults),
+		InputSchema: withPositiveMax(inputSchema[executeCodeInput](screenshotDefaults), "timeout", freecad.DefaultMaxExecuteCodeTime),
 	}, s.executeCode)
 
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
@@ -107,27 +112,31 @@ func (s *Server) registerCodeTools() {
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "execute_code_headless",
 		Description: headlessDescription,
-		InputSchema: inputSchema[headlessInput](map[string]string{"timeout": "600"}),
+		InputSchema: withPositiveMax(inputSchema[headlessInput](map[string]string{"timeout": "600"}), "timeout", headless.MaxTimeout),
 	}, s.executeCodeHeadless)
 }
 
 func (s *Server) executeCode(ctx context.Context, _ *mcp.CallToolRequest, in executeCodeInput) (*mcp.CallToolResult, any, error) {
+	if err := freecad.CheckTimeout(in.Timeout); err != nil {
+		return failure("execute code", err, ""), nil, nil
+	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
 		return failure("execute code", err, ""), nil, nil
 	}
 	res, err := conn.ExecuteCode(ctx, in.Code, in.Timeout)
 	if err != nil {
-		return s.withNotice(failure("execute code", err, "")), nil, nil
+		return s.withNotice(timedFailure("execute code", err, largerExecuteTimeout)), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reported("execute code", res,
-			"Fix the code and retry; FreeCAD's Report View shows the traceback. Call get_rpc_status if the GUI thread seems stuck.")), nil, nil
+			"Fix the code and retry; FreeCAD's Report View shows the traceback. Call get_rpc_status if the GUI thread seems stuck. "+
+				largerExecuteTimeout)), nil, nil
 	}
-	out := render.SuccessResult(executeFront{Status: "ok"}, "Code executed successfully: "+str(res, "message"))
+	out := render.SuccessResult(executeFront{Status: "ok"}, "Code executed successfully: "+truncateOutput(str(res, "message")))
 	// A screenshot is only taken after the code completed, so a failure never
 	// queues a second GUI call behind a task that may still be running.
-	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, string(in.ViewName))), nil, nil
+	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName))), nil, nil
 }
 
 func (s *Server) executeCodeAsync(ctx context.Context, _ *mcp.CallToolRequest, in codeInput) (*mcp.CallToolResult, any, error) {
@@ -160,7 +169,11 @@ func (s *Server) getAsyncStatus(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err != nil {
 		return failure("get async status", err, ""), nil, nil
 	}
-	res, err := conn.GetAsyncStatus(ctx, in.JobID)
+	jobID := ""
+	if in.JobID != nil {
+		jobID = *in.JobID
+	}
+	res, err := conn.GetAsyncStatus(ctx, jobID)
 	if err != nil {
 		return s.withNotice(failure("get async status", err, "")), nil, nil
 	}
@@ -189,10 +202,10 @@ func (s *Server) getAsyncStatus(ctx context.Context, _ *mcp.CallToolRequest, in 
 	}
 	text := fmt.Sprintf("Async job %s: %s", id, state)
 	if e := str(job, "error"); e != "" {
-		text += "\nError: " + e
+		text += "\nError: " + shortMessage(e)
 	}
 	if tb := str(job, "traceback"); tb != "" {
-		text += "\n" + tb
+		text += "\n" + truncateOutput(tb)
 	}
 	return s.withNotice(render.SuccessResult(asyncFront{JobID: id, State: state}, text)), nil, nil
 }
@@ -211,23 +224,38 @@ func (s *Server) executeCodeHeadless(ctx context.Context, _ *mcp.CallToolRequest
 	}
 	r := headless.Run(ctx, in.Code, timeout, s.config.FreeCAD.FreecadCmd)
 	front := headlessFront{Success: r.Success, ExitCode: r.ReturnCode, Crashed: r.Crashed, TimedOut: r.TimedOut}
-	text := headless.Format(r)
 	if !r.Success {
 		code := codeFreeCAD
-		hint := "Fix the script and retry; its output above shows where it stopped."
+		hint := "Fix the script and retry; its output below shows where it stopped."
 		switch {
 		case strings.Contains(r.Error, "positive finite"):
-			code, hint = render.CodeInvalidInput, "Pass timeout as a positive number of seconds."
+			code, hint = render.CodeInvalidInput, invalidTimeoutHint
 		case strings.Contains(r.Error, "freecadcmd not found"), strings.Contains(r.Error, "could not start"):
 			code, hint = render.CodeUnavailable, "Install FreeCAD, or set "+
-				"FREECAD_MCP_FREECADCMD in the AI client's config to the command that starts freecadcmd."
+				domain.EnvFreecadCmd+" in the AI client's config to the command that starts freecadcmd."
+		case strings.HasPrefix(r.Error, "could not prepare the script directory"), strings.HasPrefix(r.Error, "could not write the script"):
+			code, hint = render.CodeInternal, "The script could not be written to freecad-mcp's cache directory "+
+				"(.cache/freecad-mcp/headless in the home directory). Make sure it is writable and the disk has space, then retry."
+		case r.TimedOut:
+			code, hint = render.CodeUnavailable, fmt.Sprintf("Call execute_code_headless again with a larger timeout "+
+				"(this run allowed %g s), or split the script into shorter steps; the output below shows how far it got.", timeout)
+		case strings.Contains(r.Error, "cancelled"):
+			code, hint = render.CodeUnavailable, cancelledHint
 		}
 		fields := map[string]any{"crashed": r.Crashed, "timed_out": r.TimedOut}
 		if r.ReturnCode != nil {
 			fields["exit_code"] = *r.ReturnCode
 		}
-		res := render.ErrorResult(render.Error{Code: code, Message: text, Hint: hint, Fields: fields})
+		msg := r.Error
+		if msg == "" {
+			msg = "unknown error"
+		}
+		res := render.ErrorResult(render.Error{Code: code, Message: shortMessage("Headless FreeCAD script failed: " + msg), Hint: hint, Fields: fields})
+		if output := strings.TrimRight(r.Output, " \t\r\n"); output != "" {
+			res.Content = append(res.Content, &mcp.TextContent{Text: "Output:\n" + textBlock(output)})
+		}
 		return s.withNotice(res), nil, nil
 	}
-	return s.withNotice(render.SuccessResult(front, text)), nil, nil
+	r.Output = truncateOutput(r.Output)
+	return s.withNotice(render.SuccessResult(front, headless.Format(r))), nil, nil
 }

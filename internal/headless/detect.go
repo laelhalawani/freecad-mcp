@@ -49,8 +49,11 @@ func isFile(path string) bool {
 	return err == nil && !info.IsDir()
 }
 
-// installedCandidates lists freecadcmd paths of standard installations,
-// newest first where the directory name carries the version.
+// installedCandidates lists freecadcmd paths of standard installations. On
+// Windows those are the installs FreeCAD's uninstall registry entries name,
+// in the order the registry lists them, then the FreeCAD* folders in Program
+// Files and the per-user Programs folder, each in reverse name order (see
+// globDirs).
 func installedCandidates() []string {
 	var out []string
 	switch runtime.GOOS {
@@ -72,8 +75,9 @@ func installedCandidates() []string {
 	return out
 }
 
-// globDirs returns directories matching pattern, sorted newest (highest
-// name) first.
+// globDirs returns directories matching pattern in reverse name order, which
+// puts the newer of two versions first while their numbers have the same
+// digit count ("FreeCAD 1.1" before "FreeCAD 1.0").
 func globDirs(pattern string) []string {
 	matches, _ := filepath.Glob(pattern)
 	sort.Sort(sort.Reverse(sort.StringSlice(matches)))

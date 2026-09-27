@@ -38,7 +38,8 @@ your `PATH` and starts the setup wizard, which:
    VS Code, Windsurf, Zed and more) and lets you pick the ones to register with;
 2. optionally stores the FreeCAD RPC auth token, if you set one in FreeCAD;
 3. asks FreeCAD where its addons live and shows where the addon will go, with
-   the RPC server set to start together with FreeCAD;
+   the option to start the RPC server together with FreeCAD (on for a new
+   install, otherwise as you last set it);
 4. registers the `freecad` server with the selected clients, then saves the
    token and installs the addon.
 
@@ -46,7 +47,9 @@ Nothing is written until step 4, so cancelling earlier leaves your machine as
 it was.
 
 Restart FreeCAD and your AI client, then ask it to create a model. Connections
-use `localhost` by default.
+use `localhost` by default. Without an auth token, any program running on your
+machine can call FreeCAD's RPC server; see
+[configuration](docs/configuration.md#3-require-an-auth-token) to require one.
 
 Run `freecad-mcp doctor` at any time to check the installation, and
 `freecad-mcp update` to update the server together with the addon it ships

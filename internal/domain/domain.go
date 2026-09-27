@@ -24,8 +24,9 @@ const (
 )
 
 // ProtocolVersion is the RPC contract version shared with the FreeCAD addon.
-// It must match PROTOCOL_VERSION in addon/FreeCADMCP/rpc_server/version.py.
-const ProtocolVersion = 1
+// It must match PROTOCOL_VERSION in addon/FreeCADMCP/rpc_server/version.py,
+// which lists what each version changed.
+const ProtocolVersion = 2
 
 // DefaultRPCPort is the port the FreeCAD addon's XML-RPC server listens on.
 const DefaultRPCPort = 9875
@@ -83,8 +84,9 @@ func ProjectCredentialPath(dir string) string {
 }
 
 // RemoteConfig describes a hosted MCP endpoint that this binary bridges to.
-// freecad-mcp talks to a local FreeCAD, so it never bridges; the type stays
-// because the generated main.go supports `mcp --remote <url>`.
+// freecad-mcp talks to a local FreeCAD, so it never bridges, and `mcp
+// --remote <url>` is refused: the stored token is FreeCAD's RPC auth token.
+// The type stays because main.go bridges to a configured endpoint.
 type RemoteConfig struct {
 	URL           string // Streamable HTTP endpoint, e.g. https://mcp.example.com/mcp
 	HeaderName    string // request header carrying the credential, e.g. "Authorization"
@@ -118,7 +120,7 @@ func loginStages() []installer.LoginStage {
 			Name: TokenKey, Label: "Token", Masked: true,
 			Validate: func(v string) error {
 				if strings.TrimSpace(v) == "" {
-					return fmt.Errorf("the token must not be empty; press esc to skip")
+					return fmt.Errorf("the token must not be empty; to go on without one, press esc to return to Sign in / Skip for now and choose Skip for now")
 				}
 				return nil
 			},

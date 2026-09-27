@@ -79,6 +79,8 @@ def set_object_property(
                     else:
                         pos = {}
                     rot = val.get("Rotation", {})
+                    # Rotation(axis, angle) takes the angle in degrees, the unit
+                    # serialize_value reports it in.
                     placement = FreeCAD.Placement(
                         FreeCAD.Vector(
                             pos.get("x", 0),

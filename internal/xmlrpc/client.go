@@ -84,10 +84,20 @@ func (c *Client) Call(ctx context.Context, timeout time.Duration, method string,
 		if _, ok := err.(*Fault); ok {
 			return nil, err
 		}
-		return nil, fmt.Errorf("%s: %w", method, scrub(err, c.token))
+		return nil, &DecodeError{Method: method, Err: scrub(err, c.token)}
 	}
 	return v, nil
 }
+
+// DecodeError is a reply that arrived but could not be read as XML-RPC,
+// such as a malformed or cut-off document.
+type DecodeError struct {
+	Method string
+	Err    error
+}
+
+func (e *DecodeError) Error() string { return e.Method + ": " + e.Err.Error() }
+func (e *DecodeError) Unwrap() error { return e.Err }
 
 // CloseIdle closes pooled connections.
 func (c *Client) CloseIdle() { c.http.CloseIdleConnections() }

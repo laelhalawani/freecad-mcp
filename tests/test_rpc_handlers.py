@@ -493,28 +493,21 @@ def test_thread_start_failure_does_not_leave_a_running_job(
     assert rpc.get_rpc_status()["async_jobs_running"] == []
 
 
-def test_job_result_is_available_while_cleanup_is_blocked(
+def test_job_result_is_available_without_the_gui_thread(
     rpc_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cleanup, release = threading.Event(), threading.Event()
-    original = rpc_module.dispatch_to_gui
+    gui_calls = []
 
     def dispatch(task, **kwargs):
-        if kwargs["operation_name"] == "clear_async_status":
-            cleanup.set()
-            release.wait(5)
-            return {"success": False, "error": "GUI busy"}
-        return original(task, **kwargs)
+        gui_calls.append(kwargs.get("operation_name"))
+        return {"success": False, "error": "GUI busy"}
 
     monkeypatch.setattr(rpc_module, "dispatch_to_gui", dispatch)
     rpc = rpc_module.FreeCADRPC()
-    job_id = rpc.execute_code_async("raise ValueError('failed before cleanup')")["job_id"]
-    try:
-        assert cleanup.wait(2)
-        assert wait_for_job(rpc, job_id)["state"] == "failed"
-        assert rpc.get_rpc_status()["async_jobs_running"] == []
-    finally:
-        release.set()
+    job_id = rpc.execute_code_async("raise ValueError('failed without the GUI')")["job_id"]
+    assert wait_for_job(rpc, job_id)["state"] == "failed"
+    assert rpc.get_rpc_status()["async_jobs_running"] == []
+    assert gui_calls == []
 
 
 def test_scripts_and_job_queries_do_not_scan_unrelated_documents(rpc_module: types.ModuleType) -> None:

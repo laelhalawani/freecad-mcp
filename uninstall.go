@@ -1,9 +1,13 @@
 package main
 
-// `uninstall --all` removes everything freecad-mcp put on the machine:
-// the AI client registrations, the FreeCAD addon and its settings, the
-// stored token, the cache, and the binary the install script placed
-// together with its PATH entry.
+// `uninstall --all` removes what `install` and the install scripts put on
+// the machine: the user-level AI client registrations, the FreeCAD addon
+// from every FreeCAD data folder that holds it and its settings file from
+// every FreeCAD data folder that has one, the stored
+// token, the cache, and the binary the install script placed together with
+// its PATH entry. What `add` wrote into a project stays: its client entries
+// (`uninstall --scope project` removes those, per project) and the token in
+// <project>/.freecad-mcp/.
 
 import (
 	"context"
@@ -29,15 +33,22 @@ func runUninstallAll(ctx context.Context, detector *harness.Detector, cmd cli.Co
 	if cmd.DryRun {
 		verb = "would remove"
 	}
-	code := 0
-
 	fmt.Fprintln(w, "  AI clients")
-	code = max(code, runUnattended(ctx, detector, harness.Scope{}, nil, cmd, harness.Absent))
+	clientsCode := runUnattended(ctx, detector, harness.Scope{}, nil, cmd, harness.Absent)
+	code := clientsCode
 
 	fmt.Fprintln(w, "\n  FreeCAD addon")
+	// The addon folder goes wherever the addon is installed. Its settings
+	// file, which can hold the auth token, goes from every FreeCAD data
+	// folder that has one: uninstall-addon keeps it when it removes the
+	// addon, so it can outlive the addon folder.
+	found := addoninstall.LocateAll(ctx, freecadCommand())
 	var paths []string
-	for _, t := range addoninstall.Locate(ctx, freecadCommand()) {
-		paths = append(paths, t.AddonDir(), filepath.Join(t.UserDataDir, addoninstall.SettingsFile))
+	for _, t := range found.Installed {
+		paths = append(paths, t.AddonDir())
+	}
+	for _, t := range found.DataDirs {
+		paths = append(paths, filepath.Join(t.UserDataDir, addoninstall.SettingsFile))
 	}
 	code = max(code, removePaths(w, paths, verb, cmd.DryRun))
 
@@ -54,8 +65,22 @@ func runUninstallAll(ctx context.Context, detector *harness.Detector, cmd cli.Co
 	code = max(code, removePaths(w, paths, verb, cmd.DryRun))
 
 	fmt.Fprintln(w, "\n  Program")
-	code = max(code, removeInstalledBinary(w, cmd.DryRun))
+	code = max(code, removeProgram(w, clientsCode != 0, cmd.DryRun))
 	return code
+}
+
+// removeProgram removes the installed binary unless removing a client
+// registration failed: that client still runs the program, so deleting it
+// would leave the client pointing at a missing file.
+func removeProgram(w io.Writer, clientsFailed, dryRun bool) int {
+	if clientsFailed {
+		fmt.Fprintln(w, "  [skip] keeping the program and its PATH entry: an AI client registration could not be")
+		fmt.Fprintln(w, "         removed (see above), and that client would be left pointing at a deleted program.")
+		fmt.Fprintln(w, "         Fix the reported problem (close the client if it holds its config file open),")
+		fmt.Fprintf(w, "         then run `%s uninstall --all` again.\n", domain.BinaryName)
+		return 1
+	}
+	return removeInstalledBinary(w, dryRun)
 }
 
 // removePaths removes each existing path and says so when none exists.
@@ -102,7 +127,7 @@ func removeInstalledBinary(w io.Writer, dryRun bool) int {
 		fmt.Fprintf(w, "  [fail] cannot locate this program: %v\n", err)
 		return 1
 	}
-	if !samePath(filepath.Dir(exe), installDir) {
+	if !inInstallDir(exe, installDir) {
 		fmt.Fprintf(w, "  %s is not in the install directory %s; leaving it in place.\n", exe, installDir)
 		return 0
 	}
@@ -135,6 +160,17 @@ func removeInstalledBinary(w io.Writer, dryRun bool) int {
 	}
 	fmt.Fprintln(w, "  Open a new terminal for the PATH change to apply.")
 	return code
+}
+
+// inInstallDir reports whether exe, a path with its symlinks resolved, sits
+// in installDir. installDir is resolved the same way, so a home directory
+// reached through a symlink still matches; when it cannot be resolved (it
+// does not exist) it is compared as given.
+func inInstallDir(exe, installDir string) bool {
+	if resolved, err := filepath.EvalSymlinks(installDir); err == nil {
+		installDir = resolved
+	}
+	return samePath(filepath.Dir(exe), installDir)
 }
 
 func samePath(a, b string) bool {

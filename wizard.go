@@ -3,9 +3,9 @@ package main
 // Install wizard plumbing. The wizard writes nothing until the AI clients
 // are registered: the token is held in memory and the addon choice is only
 // recorded, and both are applied after registration. Leaving the wizard
-// before that point (q, ctrl+c, or closing it) leaves the machine unchanged,
-// and the process exits with exitCancelled so the install scripts can roll
-// back the binary they just placed.
+// before that point (q, ctrl+c, closing it, or SIGINT/SIGTERM) leaves the
+// machine unchanged, and the process exits with exitCancelled so the install
+// scripts can roll back the binary they just placed.
 
 import (
 	"context"
@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sairaph/mcp-wizard/cli"
 	"github.com/sairaph/mcp-wizard/flow"
 	"github.com/sairaph/mcp-wizard/harness"
 	"github.com/sairaph/mcp-wizard/secret"
@@ -171,6 +172,31 @@ func (l loginFresh) Update(msg tea.Msg, state *AppState) (flow.Directive, tea.Cm
 	return d, cmd
 }
 
+// loginInput lets a token be typed in full: mcp-wizard v0.1.1's login step
+// quits on q on its input screen as well, so a token containing q could not
+// be entered. On the input screen q goes into the input the way the library
+// adds other keys; on the Sign in / Skip screen q still quits, and ctrl+c
+// quits on both.
+type loginInput struct {
+	flow.Step[AppState]
+}
+
+func (l loginInput) Update(msg tea.Msg, state *AppState) (flow.Directive, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "q" && state.Login.Stage >= 0 && !state.Login.Submitting {
+		state.Login.Input += string(k.Runes)
+		return flow.Continue, nil
+	}
+	return l.Step.Update(msg, state)
+}
+
+// runsUnattended reports whether install or add skip the wizard: --yes, or
+// a flag the wizard would ignore (--token and the other credential flags,
+// --clients, --all). `install` (with or without --scope project) can receive
+// all of them; `add` accepts only --all and --yes of these.
+func runsUnattended(cmd cli.Command) bool {
+	return cmd.Yes || cmd.All || len(cmd.Clients) > 0 || len(cmd.Credentials) > 0
+}
+
 // flush writes the token entered in the wizard, if any.
 func (s *deferredStore) flush(ctx context.Context) error {
 	if s.pending == nil || len(s.pending.Values) == 0 {
@@ -217,18 +243,19 @@ const (
 // classifyWizard decides the outcome from the flow's state. runCode is
 // tui.Run's result: non-zero without a recorded failure means the terminal
 // UI could not run at all. applyStarted reports whether the flow reached the
-// registration step; in a dry run that step writes nothing.
-func classifyWizard(base *flow.BaseState, runCode int, applyStarted, dryRun bool) wizardOutcome {
+// registration step; in a dry run that step writes nothing. signalled
+// reports that the wizard's context was cancelled (SIGINT or SIGTERM), which
+// ends tui.Run with a non-zero code; before registration that is a cancel.
+func classifyWizard(base *flow.BaseState, runCode int, applyStarted, dryRun, signalled bool) wizardOutcome {
 	switch {
 	case base.Settled:
 		return outcomeCompleted
-	case base.Failure != nil || runCode != 0:
-		if applyStarted && !dryRun {
-			return outcomeInterrupted
-		}
-		return outcomeFailed
 	case applyStarted && !dryRun:
 		return outcomeInterrupted
+	case signalled:
+		return outcomeCancelled
+	case base.Failure != nil || runCode != 0:
+		return outcomeFailed
 	default:
 		return outcomeCancelled
 	}
@@ -261,7 +288,7 @@ func finishWizard(ctx context.Context, w io.Writer, state *AppState, store *defe
 	for _, t := range a.Targets {
 		results = append(results, installAddon(t, a.AutoStart))
 	}
-	return max(code, printAddonResults(w, results, a.AutoStart))
+	return max(code, reportAddonResults(w, results))
 }
 
 const interruptedMessage = "  Setup was interrupted while registering the AI clients, so some may be registered.\n" +

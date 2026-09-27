@@ -18,11 +18,24 @@ var ViewNames = []any{"Isometric", "Front", "Top", "Right", "Back", "Left", "Bot
 
 const defaultView = "Isometric"
 
+// maxViewSize bounds get_view's width and height, as the addon clamps them
+// (MAX_SCREENSHOT_EDGE in view_manager.py). A larger image rarely fits the
+// 1 MiB a reply carries; maxImageBytes checks the actual size.
+const maxViewSize = 2048
+
 func viewOrDefault(v string) string {
 	if v == "" {
 		return defaultView
 	}
 	return v
+}
+
+// viewString returns the view an optional view_name argument names, or "".
+func viewString(v *ViewName) string {
+	if v == nil {
+		return ""
+	}
+	return string(*v)
 }
 
 // Properties is a JSON object of FreeCAD property values. It keeps the JSON
@@ -86,11 +99,18 @@ var typeSchemas = map[reflect.Type]*jsonschema.Schema{
 }
 
 // inputSchema infers the schema of T, applying the custom types above and
-// the given property defaults (JSON literals).
+// the given property defaults (JSON literals). An optional enum property,
+// such as a *ViewName, accepts only its listed values: the inferred "null"
+// alternative is dropped, since null is not one of them.
 func inputSchema[T any](defaults map[string]string) *jsonschema.Schema {
 	s, err := jsonschema.For[T](&jsonschema.ForOptions{TypeSchemas: typeSchemas})
 	if err != nil {
 		panic(err)
+	}
+	for _, prop := range s.Properties {
+		if len(prop.Enum) > 0 && len(prop.Types) == 2 && prop.Types[0] == "null" {
+			prop.Type, prop.Types = prop.Types[1], nil
+		}
 	}
 	for name, value := range defaults {
 		prop, ok := s.Properties[name]
@@ -99,6 +119,30 @@ func inputSchema[T any](defaults map[string]string) *jsonschema.Schema {
 		}
 		prop.Default = json.RawMessage(value)
 	}
+	return s
+}
+
+// withRange sets an inclusive minimum and maximum on the named numeric
+// properties of s, which struct tags cannot express.
+func withRange(s *jsonschema.Schema, lo, hi float64, names ...string) *jsonschema.Schema {
+	for _, name := range names {
+		prop, ok := s.Properties[name]
+		if !ok {
+			panic(fmt.Sprintf("withRange: no property %q", name))
+		}
+		prop.Minimum, prop.Maximum = jsonschema.Ptr(lo), jsonschema.Ptr(hi)
+	}
+	return s
+}
+
+// withPositiveMax requires the named numeric property of s to be greater
+// than 0 and at most hi.
+func withPositiveMax(s *jsonschema.Schema, name string, hi float64) *jsonschema.Schema {
+	prop, ok := s.Properties[name]
+	if !ok {
+		panic(fmt.Sprintf("withPositiveMax: no property %q", name))
+	}
+	prop.ExclusiveMinimum, prop.Maximum = jsonschema.Ptr(0.0), jsonschema.Ptr(hi)
 	return s
 }
 

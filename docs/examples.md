@@ -34,5 +34,7 @@ Demo:
 
 The agent examples use optional third-party dependencies and provider
 configuration. Install `freecad-mcp` first (see the [README](../README.md#quick-start))
-and adjust the model settings in each example before running it; the LangChain
-example also expects `GROQ_API_KEY` in the environment.
+and adjust the model settings in each example before running it. The ADK
+example reads `GOOGLE_API_KEY` from [`examples/adk/.env`](../examples/adk/.env);
+replace its placeholder value with your key. The LangChain example expects
+`GROQ_API_KEY` in the environment.

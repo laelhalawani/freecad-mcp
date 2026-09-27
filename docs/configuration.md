@@ -11,14 +11,15 @@ the `env` block of the `freecad` entry in your AI client's configuration:
 | --- | --- | --- |
 | `FREECAD_MCP_HOST` | `localhost` | Host of the FreeCAD RPC server; an IPv4/IPv6 address or host name. |
 | `FREECAD_MCP_PORT` | `9875` | Port of the FreeCAD RPC server. |
-| `FREECAD_MCP_TOKEN` | the token stored with `freecad-mcp login` | Auth token the RPC server requires, when one is set in FreeCAD. |
+| `FREECAD_MCP_TOKEN` | the stored token (see [below](#3-require-an-auth-token)) | Auth token the RPC server requires, when one is set in FreeCAD. |
 | `FREECAD_MCP_ONLY_TEXT_FEEDBACK` | `false` | `true` omits the optional screenshots from tool replies. |
 | `FREECAD_MCP_FREECADCMD` | auto-detected | Command that starts headless FreeCAD for `execute_code_headless`. |
 | `TRANSPORT` | `stdio` | `http` serves MCP over Streamable HTTP instead. |
 | `ADDR` | `127.0.0.1:8080` | Listen address when `TRANSPORT=http`. |
 
-An invalid value stops the server at startup with a message naming the
-variable. For example, a client entry for FreeCAD on another machine without
+An invalid value of a `FREECAD_MCP_*` variable stops the server at startup with
+a message naming the variable. `TRANSPORT` serves stdio for any value other
+than `http`. For example, a client entry for FreeCAD on another machine without
 screenshots:
 
 ```json
@@ -44,9 +45,12 @@ or pass `--all`; `freecad-mcp uninstall` removes it like any other.
 
 ## Auto-start RPC server
 
-The installer turns on starting the RPC server together with FreeCAD unless you
-switch that off in the wizard (or pass `--no-autostart` to
-`freecad-mcp install-addon`). To change it later in FreeCAD:
+A new install turns on starting the RPC server together with FreeCAD. Installing
+again (`install`, `install-addon`, `update`) keeps the setting you have. The
+wizard's **Start the RPC server with FreeCAD** option starts from the current
+setting (on when there is none) and applies what you choose, on or off.
+`freecad-mcp install-addon --no-autostart` turns it off. To change it later in
+FreeCAD:
 
 1. Switch to the **MCP Addon** workbench and open the **FreeCAD MCP** menu.
 2. Check or uncheck **Auto-Start Server**.
@@ -72,7 +76,9 @@ connections. To control FreeCAD from another machine on your network, configure
 both the addon and the MCP client.
 
 Unless you [set an auth token](#3-require-an-auth-token), the RPC server has no
-authentication, and it never encrypts traffic. Any program that can reach the
+authentication: with remote connections off, any program running on the
+machine, under any user, can call it, `execute_code` included. It never
+encrypts traffic. Any program that can reach the
 port from an allowed address can call every tool, including `execute_code`,
 which runs arbitrary Python inside FreeCAD with your user's permissions. Set a
 token whenever remote connections are on, allow only machines you trust, keep
@@ -87,6 +93,8 @@ In the **FreeCAD MCP** toolbar:
 1. Check **Remote Connections**. On the next server restart, the RPC server binds
    to `0.0.0.0` (all interfaces). It only accepts connections from the IP addresses
    or CIDR subnets configured in **Allowed IPs**, which defaults to `127.0.0.1`.
+   The list applies to remote connections only: with them off, the server
+   accepts local connections whatever it holds.
 2. Click **Configure Allowed IPs** and enter a comma-separated list of allowed
    client IP addresses or CIDR subnets, for example:
 
@@ -119,7 +127,12 @@ Give the MCP server the same token in one of two ways:
   `~/.freecad-mcp/credentials.json` (readable only by you), so it never appears
   in any AI client's configuration file. The setup wizard offers the same step.
 - `FREECAD_MCP_TOKEN` in the client entry's `env` block, which takes precedence
-  over the stored token.
+  over a stored token.
+
+Without `FREECAD_MCP_TOKEN`, the MCP server looks for a stored token first in
+the project it runs in (`<project>/.freecad-mcp/`, where `freecad-mcp add`
+stores one), then in the one `freecad-mcp login` stores. The token is only
+ever sent to FreeCAD's RPC server: `freecad-mcp mcp --remote <url>` is refused.
 
 `freecad-mcp doctor` and `freecad-mcp check-connection` report a rejected
 token. The token travels unencrypted, so on a network you do not control, use

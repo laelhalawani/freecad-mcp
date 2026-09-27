@@ -39,12 +39,35 @@ func EmbeddedVersion() (version string, protocol int, err error) {
 // InstalledVersion returns the version of the addon installed in t, or
 // os.ErrNotExist when there is none.
 func InstalledVersion(t Target) (string, error) {
+	v, _, err := InstalledRelease(t)
+	return v, err
+}
+
+// InstalledRelease returns the version and protocol of the addon installed
+// in t, or os.ErrNotExist when there is none. A copy that predates the
+// protocol number reports protocol 0, so it differs from any current one.
+func InstalledRelease(t Target) (version string, protocol int, err error) {
 	data, err := os.ReadFile(filepath.Join(t.AddonDir(), filepath.FromSlash(versionFile)))
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	v, _, err := parseVersion(data)
-	return v, err
+	v := versionRe.FindSubmatch(data)
+	if v == nil {
+		return "", 0, errors.New("version.py has no __version__")
+	}
+	if p := protocolRe.FindSubmatch(data); p != nil {
+		if protocol, err = strconv.Atoi(string(p[1])); err != nil {
+			return "", 0, err
+		}
+	}
+	return string(v[1]), protocol, nil
+}
+
+// SameRelease reports whether an installed copy with this version and
+// protocol matches the embedded addon, which then has nothing to update.
+func SameRelease(version string, protocol int) bool {
+	want, wantProtocol, err := EmbeddedVersion()
+	return err == nil && version == want && protocol == wantProtocol
 }
 
 func parseVersion(data []byte) (string, int, error) {
@@ -216,12 +239,23 @@ func RemoveSettings(t Target) (bool, error) {
 
 // AutoStart reports the addon's auto-start setting in t.
 func AutoStart(t Target) bool {
+	on, _ := AutoStartSetting(t)
+	return on
+}
+
+// AutoStartSetting reports the addon's auto-start setting in t and whether it
+// is set at all. It is unset when the settings file is missing or unreadable,
+// or holds no true or false value for it.
+func AutoStartSetting(t Target) (on, set bool) {
 	data, err := os.ReadFile(filepath.Join(t.UserDataDir, SettingsFile))
 	if err != nil {
-		return false
+		return false, false
 	}
 	var settings struct {
-		AutoStart bool `json:"auto_start_rpc"`
+		AutoStart *bool `json:"auto_start_rpc"`
 	}
-	return json.Unmarshal(data, &settings) == nil && settings.AutoStart
+	if err := json.Unmarshal(data, &settings); err != nil || settings.AutoStart == nil {
+		return false, false
+	}
+	return *settings.AutoStart, true
 }

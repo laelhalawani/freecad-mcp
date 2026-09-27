@@ -5,9 +5,8 @@ package main
 // and treats anything else under the same name as a conflict it may
 // overwrite. That misses two cases: docs/configuration.md tells users to add
 // settings to the entry's env, after which it no longer matches, and another
-// program may use the same name (the Python freecad-mcp this project was
-// forked from registers "freecad" too). So the entry's command is read to
-// tell them apart.
+// program (for example a Python freecad-mcp) may register "freecad" too. So
+// the entry's command is read to tell them apart.
 
 import (
 	"bytes"

@@ -49,7 +49,7 @@ printf 'first\n' > "$rc"
 rc_append "$rc" "$LINE"
 printf 'added later\n' >> "$rc"
 rc_undo
-printf 'first\n\nadded later\n' > "$work/want-edited"
+printf 'first\nadded later\n' > "$work/want-edited"
 check_same "profile edited after the append" "$rc" "$work/want-edited"
 
 # A profile the installer created (zsh without a .zshrc) is removed again.
@@ -71,7 +71,7 @@ rc_create "$rc"
 rc_append "$rc" "$LINE"
 printf 'alias g=git\n' >> "$rc"
 rc_undo
-printf '\nalias g=git\n' > "$work/want-created-edited"
+printf 'alias g=git\n' > "$work/want-created-edited"
 check_same "created profile edited after the append" "$rc" "$work/want-created-edited"
 
 if [ "$failures" -ne 0 ]; then

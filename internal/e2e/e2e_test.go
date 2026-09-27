@@ -106,9 +106,9 @@ func TestAgainstFreeCAD(t *testing.T) {
 
 	must(t, call(t, cs, "get_object", map[string]any{"doc_name": "E2E_Doc", "obj_name": "Box", "include_screenshot": false}),
 		`"Length"`, "20")
-	must(t, call(t, cs, "edit_object", map[string]any{"doc_name": "E2E_Doc", "obj_name": "Box",
-		"obj_properties": map[string]any{"Length": 25}, "view_name": "Top"}), "edited successfully")
-	must(t, call(t, cs, "get_objects", map[string]any{"doc_name": "E2E_Doc", "include_screenshot": false}), "count: 2")
+	must(t, call(t, cs, "update_object", map[string]any{"doc_name": "E2E_Doc", "obj_name": "Box",
+		"obj_properties": map[string]any{"Length": 25}, "view_name": "Top"}), "updated successfully")
+	must(t, call(t, cs, "list_objects", map[string]any{"doc_name": "E2E_Doc", "include_screenshot": false}), "count: 2")
 	must(t, call(t, cs, "list_documents", nil), "E2E_Doc")
 
 	code := call(t, cs, "execute_code", map[string]any{
