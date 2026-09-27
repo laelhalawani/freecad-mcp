@@ -1,11 +1,11 @@
 version: 2
 
-project_name: freecad_mcp
+project_name: freecad-mcp
 
 builds:
-  - id: freecad_mcp
+  - id: freecad-mcp
     main: .
-    binary: freecad_mcp
+    binary: freecad-mcp
     env: [CGO_ENABLED=0]
     goos: [darwin, linux, windows]
     goarch: [amd64, arm64]

@@ -1,5 +1,3 @@
-[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/neka-nat-freecad-mcp-badge.png)](https://mseep.ai/app/neka-nat-freecad-mcp)
-
 # FreeCAD MCP
 
 Control FreeCAD from Claude Desktop and other MCP clients. Create and edit models,
@@ -64,8 +62,12 @@ setup and troubleshooting.
 
 ## Contributors
 
-<a href="https://github.com/neka-nat/freecad-mcp/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=neka-nat/freecad-mcp" />
+<a href="https://github.com/laelhalawani/freecad-mcp/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=laelhalawani/freecad-mcp" />
 </a>
 
 Made with [contrib.rocks](https://contrib.rocks).
+
+## Credits
+
+This project was forked and reworked from [neka-nat/freecad-mcp](https://github.com/neka-nat/freecad-mcp).

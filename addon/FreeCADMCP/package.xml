@@ -4,11 +4,11 @@
   <description>Control FreeCAD from AI assistants via the Model Context Protocol — XML-RPC server addon with GUI-thread dispatch, screenshots, parts library and FEM helpers.</description>
   <version>0.1.25</version>
   <date>2026-09-18</date>
-  <maintainer email="nekanat.stock@gmail.com">neka-nat</maintainer>
+  <maintainer email="laelhalawani@gmail.com">laelhalawani</maintainer>
   <license>MIT</license>
-  <url type="repository" branch="main">https://github.com/neka-nat/freecad-mcp</url>
-  <url type="bugtracker">https://github.com/neka-nat/freecad-mcp/issues</url>
-  <url type="readme">https://github.com/neka-nat/freecad-mcp/blob/main/README.md</url>
+  <url type="repository" branch="main">https://github.com/laelhalawani/freecad-mcp</url>
+  <url type="bugtracker">https://github.com/laelhalawani/freecad-mcp/issues</url>
+  <url type="readme">https://github.com/laelhalawani/freecad-mcp/blob/main/README.md</url>
   <content>
     <workbench>
       <classname>FreeCADMCPAddonWorkbench</classname>
