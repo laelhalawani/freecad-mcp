@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -49,6 +50,21 @@ func AssetName(goos, goarch string) string {
 		name += ".exe"
 	}
 	return name
+}
+
+// InstallDir is where install.ps1 and install.sh put the binary:
+// %LOCALAPPDATA%\freecad-mcp\bin on Windows, ~/.freecad-mcp/bin elsewhere.
+func InstallDir() string {
+	if runtime.GOOS == "windows" {
+		local := os.Getenv("LOCALAPPDATA")
+		if local == "" {
+			home, _ := os.UserHomeDir()
+			local = filepath.Join(home, "AppData", "Local")
+		}
+		return filepath.Join(local, Repo, "bin")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "."+Repo, "bin")
 }
 
 // CredentialPath returns the path where credentials are stored.

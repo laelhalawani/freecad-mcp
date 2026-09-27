@@ -34,6 +34,23 @@ jobs:
       - name: Build
         run: go build -o dist/ .
 
+  # install.sh's shell-profile edits and their undo, under a strict POSIX
+  # shell (dash) and macOS's sh.
+  install-script:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            shell: dash
+          - os: macos-latest
+            shell: sh
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: ${{ matrix.shell }} tests/install_sh_test.sh
+
   # The FreeCAD addon is Python and runs inside FreeCAD (Python 3.11 in
   # FreeCAD 1.x), so its tests run on the oldest Python FreeCAD bundles.
   addon:

@@ -50,7 +50,7 @@ func init() {
 var usageSpecs = []cli.Spec{
 	{Name: "mcp", Description: "Run the MCP server (default when not in a terminal)"},
 	{Name: "install", Description: "Install the FreeCAD addon and register the server with AI clients"},
-	{Name: "uninstall", Description: "Remove AI client integration"},
+	{Name: "uninstall", Description: "Remove AI client integration (--all: also the addon, token, cache and program)"},
 	{Name: "add", Description: "Register the server in this project's AI client configs"},
 	{Name: "login", Description: "Store the FreeCAD RPC auth token (login --token <token>)"},
 	{Name: "doctor", Description: "Diagnose the installation"},
@@ -335,25 +335,47 @@ func runAdd(ctx context.Context, cmd cli.Command) int {
 	return runUnattended(ctx, detector, scope, credStore, cmd, harness.Present)
 }
 
-// runWizard drives the interactive install: pick clients, sign in, register.
+// runWizard drives the interactive install: pick clients, enter the token,
+// choose the addon options, register. Nothing is written before the
+// registration step; the token and the addon follow it (see wizard.go).
 func runWizard(ctx context.Context, detector *harness.Detector, scope harness.Scope, login installer.LoginConfig, cmd cli.Command, title string) int {
-	if cmd.DryRun {
-		// A dry run must not write anything, credentials included.
-		login.Store = nil
+	var store *deferredStore
+	if login.Store != nil {
+		store = &deferredStore{inner: login.Store}
+		login.Store = store
 	}
 	state := &AppState{}
 	steps := []flow.Step[AppState]{
-		installer.HarnessStep(ctx, detector, harnessState, installer.HarnessStepOptions{AllDetected: true, Scope: scope}),
-		installer.LoginStep(ctx, login, loginState),
-		newAddonStep(ctx, cmd.DryRun),
-		installer.ApplyStep(ctx, detector, harnessState, resultsState, installer.ApplyStepOptions{Scope: scope, DryRun: cmd.DryRun}),
+		harnessSelection{installer.HarnessStep(ctx, detector, harnessState, installer.HarnessStepOptions{AllDetected: true, Scope: scope})},
+		loginFresh{installer.LoginStep(ctx, login, loginState), store},
+		newAddonStep(ctx),
+		applyGuard{installer.ApplyStep(ctx, detector, harnessState, resultsState, installer.ApplyStepOptions{Scope: scope, DryRun: cmd.DryRun}), cmd.DryRun},
 	}
+	applyIndex := stepIndex(steps, "apply")
 	f := flow.New(steps, state)
 	code := tui.Run(ctx, f, tui.Options{Title: title})
+
+	switch classifyWizard(&state.BaseState, code, f.Current() >= applyIndex, cmd.DryRun) {
+	case outcomeCancelled:
+		fmt.Println("  Setup cancelled; nothing was changed.")
+		return exitCancelled
+	case outcomeInterrupted:
+		fmt.Fprintln(os.Stderr, interruptedMessage)
+		return 1
+	case outcomeFailed:
+		if state.Failure != nil {
+			fmt.Fprintln(os.Stderr, state.Failure)
+		} else {
+			fmt.Fprintln(os.Stderr, "  The setup wizard could not run in this terminal; nothing was changed.\n"+
+				"  Run `"+domain.BinaryName+" install --yes` to install without it.")
+		}
+		return 1
+	}
 	if state.Failure != nil {
+		// Registration failed for some clients; the rest still get the addon.
 		fmt.Fprintln(os.Stderr, state.Failure)
 	}
-	return code
+	return finishWizard(ctx, os.Stdout, state, store, cmd.DryRun, code)
 }
 
 func runUnattended(ctx context.Context, detector *harness.Detector, scope harness.Scope, credStore secret.Store, cmd cli.Command, desired harness.DesiredState) int {
@@ -450,6 +472,9 @@ func runUninstall(ctx context.Context, cmd cli.Command) int {
 			return 1
 		}
 		scope = harness.ProjectScopeDir(dir)
+	} else if cmd.All {
+		// --all removes everything, not only the client registrations.
+		return runUninstallAll(ctx, detector, cmd)
 	}
 	return runUnattended(ctx, detector, scope, nil, cmd, harness.Absent)
 }
