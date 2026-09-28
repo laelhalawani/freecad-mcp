@@ -2,14 +2,12 @@ package mcpserver
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"math"
 	"strings"
+	"time"
 
 	"github.com/laelhalawani/freecad-mcp/internal/domain"
 	"github.com/laelhalawani/freecad-mcp/internal/freecad"
-	"github.com/laelhalawani/freecad-mcp/internal/xmlrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sairaph/mcp-wizard/render"
 )
@@ -22,7 +20,15 @@ type femInput struct {
 }
 
 type statusFront struct {
-	VersionCheck string `yaml:"version_check"`
+	Freecad        string  `yaml:"freecad"`
+	RPC            string  `yaml:"rpc"`
+	VersionCheck   string  `yaml:"version_check,omitempty"`
+	PID            *int    `yaml:"pid,omitempty"`
+	ElapsedSeconds *int    `yaml:"elapsed_seconds,omitempty"`
+	ExitCode       *int    `yaml:"exit_code,omitempty"`
+	LogFile        *string `yaml:"log_file,omitempty"`
+	ActiveDocument *string `yaml:"active_document,omitempty"`
+	DocumentCount  *int    `yaml:"document_count,omitempty"`
 }
 
 type femFront struct {
@@ -31,6 +37,7 @@ type femFront struct {
 	MaxVonMisesMPa  *float64 `yaml:"max_von_mises_mpa,omitempty"`
 	MaxDisplacement *float64 `yaml:"max_displacement_mm,omitempty"`
 	NodeCount       *int64   `yaml:"node_count,omitempty"`
+	Transaction     string   `yaml:"transaction,omitempty"`
 }
 
 // maxFEMTimeout bounds the solver wait (a week), so the reply timeout derived
@@ -53,10 +60,15 @@ Returns the maximum and minimum von Mises stress (MPa), the maximum displacement
 func (s *Server) registerStatusTools() {
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name: "get_rpc_status",
-		Description: "Get the health of FreeCAD's RPC server and its GUI dispatch. It does not use FreeCAD's GUI " +
-			"thread, so it answers after a GUI operation timed out: a stuck state names the operation still running " +
-			"and means FreeCAD may need a restart. version_check is \"ok\" or says whether the addon or this server " +
-			"needs updating. Use it when other tools time out.",
+		Description: "Check FreeCAD's health without using its GUI thread, so it answers even while FreeCAD has not " +
+			"started yet, is still starting, has exited, or a GUI operation elsewhere is stuck. Reports freecad " +
+			"(running, starting, not_running, exited or unresponsive) and rpc (reachable or unreachable); when " +
+			"reachable, the full status (including gui_dispatch, which names a GUI operation still stuck, and " +
+			"version_check: \"ok\" or whether the addon or this server needs updating) and the open documents; " +
+			"when not, the process id, elapsed time since start_freecad, exit code and launch log tail known so " +
+			"far. This is the tool to poll after start_freecad until it reports rpc: reachable, and to call " +
+			"whenever another tool times out or FreeCAD's state is unclear. Once it reports running, use " +
+			"list_documents for the full per-document detail.",
 		InputSchema: inputSchema[struct{}](nil),
 	}, s.getRPCStatus)
 
@@ -67,41 +79,200 @@ func (s *Server) registerStatusTools() {
 	}, s.runFEMAnalysis)
 }
 
-func mergeDefaults(maps ...map[string]string) map[string]string {
-	out := map[string]string{}
-	for _, m := range maps {
-		for k, v := range m {
-			out[k] = v
-		}
-	}
-	return out
-}
-
+// getRPCStatus never errors because FreeCAD is down: it probes for FreeCAD
+// itself instead of going through s.fc.get (which would turn that into an
+// error result), and always builds a plain success reply, classifying what
+// it found into the freecad/rpc states get_rpc_status promises. A rejection
+// (bad auth token, or the caller's address not allowed) and an addon
+// protocol mismatch are not "down" either way, so they keep their own,
+// separate reports instead of a down state.
 func (s *Server) getRPCStatus(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
-	conn, err := s.fc.get(ctx)
-	if err != nil {
-		return failure("get RPC status", err, ""), nil, nil
+	pr := s.fc.probe(ctx)
+	if pr.rejected != nil {
+		return s.withNotice(render.ErrorResult(*pr.rejected)), nil, nil
 	}
-	status, err := conn.GetRPCStatus(ctx)
-	if err != nil {
-		var fault *xmlrpc.Fault
-		if errors.As(err, &fault) && fault.MissingMethod() {
-			return s.withNotice(render.ErrorResult(render.Error{
-				Code:    codeFreeCAD,
-				Message: freecad.AddonVersionWarning(nil, s.config.Version),
-				Hint:    "Run `" + domain.BinaryName + " install-addon` and restart FreeCAD.",
-			})), nil, nil
-		}
-		return s.withNotice(failure("get RPC status", err, "")), nil, nil
+	if pr.oldAddon {
+		return s.withNotice(render.ErrorResult(render.Error{
+			Code:    codeFreeCAD,
+			Message: freecad.AddonVersionWarning(nil, s.config.Version),
+			Hint:    "Run `" + domain.BinaryName + " install-addon` and restart FreeCAD.",
+		})), nil, nil
 	}
-	check := "ok"
-	if m, ok := status.(map[string]any); ok {
-		if w := freecad.AddonVersionWarning(m, s.config.Version); w != "" {
+
+	front := statusFront{}
+	var sections []string
+
+	switch {
+	case pr.fault != "":
+		// FreeCAD answered and the connection still works; only this
+		// get_rpc_status call raised inside the addon (a bug in
+		// status_snapshot or the dispatch around it). Report FreeCAD as
+		// running rather than misclassifying this as down.
+		front.RPC = "reachable"
+		front.Freecad = "running"
+		sections = append(sections,
+			"FreeCAD answered, but get_rpc_status itself raised an error in the addon:", textBlock(pr.fault))
+	case pr.reachable:
+		front.RPC = "reachable"
+		front.Freecad = "running"
+		check := "ok"
+		if w := freecad.AddonVersionWarning(pr.status, s.config.Version); w != "" {
 			check = w
 		}
-		m["version_check"] = check
+		if pr.status != nil {
+			pr.status["version_check"] = check
+		}
+		front.VersionCheck = check
+		if pid, ok := intFromStatus(pr.status, "pid"); ok {
+			front.PID = &pid
+		}
+		if active, ok := pr.status["active_document"].(string); ok && active != "" {
+			front.ActiveDocument = &active
+		}
+		if docs, ok := pr.status["documents"].([]any); ok {
+			n := len(docs)
+			front.DocumentCount = &n
+		}
+		sections = append(sections, "FreeCAD is running and its RPC server answered.", jsonBlock(pr.status))
+	default:
+		ls := s.launcher.State()
+		everAnswered := s.fc.everAnswered(ls)
+		fillDownState(&front, ls, pr.timedOut, everAnswered)
+		sections = append(sections, nextStepFor(front.Freecad, ls, s.config.FreeCAD.Host, everAnswered))
+		if ls.LogPath != "" {
+			if tail := s.launcher.LogTail(4 << 10); tail != "" {
+				sections = append(sections, fmt.Sprintf("Last launch log (`%s`):", ls.LogPath), textBlock(tail))
+			}
+		}
+		// Documents go in the body only, clearly labelled as a past reading:
+		// active_document and document_count in the front matter would read
+		// as current state, which they are not while freecad is not running.
+		// lastKnownDocuments itself compares when that reading was taken
+		// against ls.StartedAt, so a new launch never shows a previous
+		// process's documents as this one's.
+		if docs, active, ok := s.fc.lastKnownDocuments(ls); ok {
+			sections = append(sections, lastKnownDocumentsBlock(docs, active))
+		}
 	}
-	return s.withNotice(render.SuccessResult(statusFront{VersionCheck: check}, jsonBlock(status))), nil, nil
+
+	return s.withNotice(render.SuccessResult(front, strings.Join(sections, "\n\n"))), nil, nil
+}
+
+// fillDownState classifies why FreeCAD is unreachable (starting, unresponsive,
+// exited or not_running) and fills the launch-derived fields. everAnswered
+// (connector.everAnswered: a connection established for the current launch)
+// rules out "starting": a launch whose RPC already answered at least once
+// cannot still be starting,
+// whatever the elapsed time, so it falls to unresponsive (started) or
+// not_running (forwarded) instead. A forwarded launch is treated specially
+// either way: its own process already exited on purpose right after handing
+// the request to an already-open FreeCAD (launch_state.go), so nothing of
+// this server's launch is "alive" to call unresponsive; not_running fits
+// better, and its exited PID is never reported (a forwarded launch's pid
+// would name a process that no longer exists, since start_freecad itself
+// omits it for the same reason).
+func fillDownState(front *statusFront, ls freecad.LaunchState, timedOut, everAnswered bool) {
+	starting := !everAnswered && (ls.State == freecad.LaunchStarted || ls.State == freecad.LaunchForwarded) &&
+		time.Since(ls.StartedAt) < freecad.StartingWindow
+	switch {
+	case timedOut:
+		// The port accepted the connection but nothing answered in time:
+		// FreeCAD is up but its RPC server (or the process itself) is stuck.
+		front.Freecad = "unresponsive"
+	case starting:
+		front.Freecad = "starting"
+	case ls.State == freecad.LaunchStarted:
+		front.Freecad = "unresponsive"
+	case ls.State == freecad.LaunchForwarded:
+		front.Freecad = "not_running"
+	case ls.State == freecad.LaunchExited:
+		front.Freecad = "exited"
+	default:
+		front.Freecad = "not_running"
+	}
+	front.RPC = "unreachable"
+	if ls.State == "" {
+		return
+	}
+	if ls.State != freecad.LaunchForwarded {
+		pid := ls.PID
+		front.PID = &pid
+	}
+	elapsed := int(time.Since(ls.StartedAt).Round(time.Second).Seconds())
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	front.ElapsedSeconds = &elapsed
+	if ls.ExitCode != nil {
+		front.ExitCode = ls.ExitCode
+	}
+	if ls.LogPath != "" {
+		front.LogFile = &ls.LogPath
+	}
+}
+
+// nextStepFor states what to do next for a freecad state get_rpc_status
+// reported while FreeCAD was unreachable. host is this server's configured
+// FreeCAD host (config.FreeCAD.Host): not_running only suggests start_freecad
+// when it could actually start FreeCAD here (refuseNonLoopbackHost agrees);
+// for a remote host it says where to start FreeCAD instead, since
+// start_freecad would only refuse. ls tells not_running apart from a
+// forwarded launch whose target went away, which gets its own next step,
+// worded differently depending on everAnswered: whether that other FreeCAD
+// ever actually answered before it (or its RPC server) went away, or never
+// answered at all.
+func nextStepFor(state string, ls freecad.LaunchState, host string, everAnswered bool) string {
+	switch state {
+	case "starting":
+		return "FreeCAD is starting. Call get_rpc_status with {} again in a few seconds; it usually reaches " +
+			"rpc: reachable within 15 to 30 seconds of start_freecad."
+	case "unresponsive":
+		return "FreeCAD is running but its RPC server has not answered for a while. Check the FreeCAD window " +
+			"for a dialog blocking it (a save prompt, an importer's options dialog) and close it, then call " +
+			"get_rpc_status again; if it stays unresponsive, close FreeCAD and call start_freecad again. Run `" +
+			domain.BinaryName + " doctor` to check the setup."
+	case "exited":
+		return "The FreeCAD process this server launched has exited. Call start_freecad with {} to launch it again."
+	default: // not_running
+		if ls.State == freecad.LaunchForwarded {
+			if everAnswered {
+				return "start_freecad forwarded this to a FreeCAD window that was already open; its RPC server " +
+					"did answer for a while but has since stopped, most likely because that window was closed. " +
+					"Call start_freecad with {} to launch a fresh one."
+			}
+			return "start_freecad forwarded this to a FreeCAD window that was already open, but its RPC server " +
+				"never answered (it may have closed, or its addon is bound to a different port than " +
+				domain.EnvPort + " configures). Check that window's Report View, then call start_freecad with {} again."
+		}
+		if refuseNonLoopbackHost(host) != nil {
+			return fmt.Sprintf("FreeCAD is not running, and this server is configured for FreeCAD on %s: start "+
+				"it there, then call get_rpc_status with {} to check on it.", host)
+		}
+		return "FreeCAD is not running. Call start_freecad with {} to launch it, then get_rpc_status with {} " +
+			"to check on it."
+	}
+}
+
+// lastKnownDocumentsBlock renders the documents get_rpc_status last saw while
+// FreeCAD was reachable, for a reply made while it is down.
+func lastKnownDocumentsBlock(docs []map[string]any, active string) string {
+	if len(docs) == 0 {
+		return "Last known state (before FreeCAD stopped answering): no document was open."
+	}
+	var b strings.Builder
+	b.WriteString("Last known open documents (as of the last time FreeCAD answered; may be stale now):\n\n")
+	b.WriteString("| document | label | file | active |\n|---|---|---|---|\n")
+	for _, d := range docs {
+		name, _ := d["name"].(string)
+		label, _ := d["label"].(string)
+		file, _ := d["file_name"].(string)
+		mark := ""
+		if name != "" && name == active {
+			mark = "yes"
+		}
+		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", name, label, file, mark)
+	}
+	return b.String()
 }
 
 // femFailureHint returns the hint for a failed analysis. The addon's GUI
@@ -124,23 +295,6 @@ func femFailureHint(res map[string]any, larger string) string {
 			"thread. Call get_rpc_status and wait until it reports the dispatch healthy, then retry, or restart FreeCAD."
 	}
 	return "Check the prerequisites listed in this tool's description with list_objects; the details that follow include the working directory."
-}
-
-func number(v any) (float64, bool) {
-	switch x := v.(type) {
-	case int64:
-		return float64(x), true
-	case float64:
-		return x, !math.IsNaN(x) && !math.IsInf(x, 0)
-	}
-	return 0, false
-}
-
-func formatMeasure(v any, unit string) string {
-	if f, ok := number(v); ok {
-		return fmt.Sprintf("%s %s", fmt.Sprintf("%.4g", f), unit)
-	}
-	return fmt.Sprintf("unavailable (%s)", unit)
 }
 
 func (s *Server) runFEMAnalysis(ctx context.Context, _ *mcp.CallToolRequest, in femInput) (*mcp.CallToolResult, any, error) {
@@ -166,15 +320,23 @@ func (s *Server) runFEMAnalysis(ctx context.Context, _ *mcp.CallToolRequest, in 
 		return s.withNotice(timedFailure("run FEM analysis", err, larger)), nil, nil
 	}
 	if !succeeded(res) {
-		out := render.ErrorResult(render.Error{
-			Code:    codeFreeCAD,
-			Message: shortMessage(fmt.Sprintf("FEM analysis '%s' failed: %v", in.AnalysisName, res["error"])),
-			Hint:    femFailureHint(res, larger),
-		})
+		// fem_executor's own not_found/invalid_input checks (an unknown
+		// document or analysis, the wrong TypeId) carry a code and hint,
+		// which win here same as everywhere else regardless of hintCodes
+		// (reportedCode always prefers the addon's own hint when it sent
+		// one). Everything else fem_executor returns on failure (a
+		// prerequisite check, a solver run, a raised exception) carries no
+		// code at all, landing on codeFreeCAD. A GUI-dispatch timing problem
+		// is the same uncoded codeFreeCAD (gave up waiting, timed out) or
+		// GUI_DISPATCH_STUCK, which reportedCode maps to render.CodeUnavailable.
+		// femFailureHint's wording covers all of these; name both codes here
+		// so it is not silently replaced by codeHints' generic default.
+		out := reportedCode("run FEM analysis", res, femFailureHint(res, larger), codeFreeCAD, render.CodeUnavailable)
 		out.Content = append(out.Content, &mcp.TextContent{Text: jsonBlock(res)})
 		return s.withNotice(out), nil, nil
 	}
-	front := femFront{Analysis: in.AnalysisName, Success: true}
+	txName, txMerged := transactionFields(res)
+	front := femFront{Analysis: in.AnalysisName, Success: true, Transaction: txName}
 	if f, ok := number(res["max_von_mises_MPa"]); ok {
 		front.MaxVonMisesMPa = &f
 	}
@@ -186,6 +348,7 @@ func (s *Server) runFEMAnalysis(ctx context.Context, _ *mcp.CallToolRequest, in 
 	}
 	res["summary"] = fmt.Sprintf("FEM analysis '%s' solved. max von Mises = %s, max displacement = %s (%v nodes).",
 		in.AnalysisName, formatMeasure(res["max_von_mises_MPa"], "MPa"), formatMeasure(res["max_displacement_mm"], "mm"), res["node_count"])
-	out := render.SuccessResult(front, res["summary"].(string)+"\n\n"+jsonBlock(res))
-	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName))), nil, nil
+	body := transactionNote(res["summary"].(string)+"\n\n"+jsonBlock(res), txName, txMerged)
+	out := render.SuccessResult(front, body)
+	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName), in.DocName)), nil, nil
 }

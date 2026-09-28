@@ -22,11 +22,24 @@ var pngBytes = []byte("\x89PNG\r\n\x1a\nfake")
 func addon(t *testing.T, extra map[string]xmlrpctest.Handler) *xmlrpctest.Server {
 	handlers := map[string]xmlrpctest.Handler{
 		"ping": func([]any) (any, error) { return true, nil },
+		// Mirrors FreeCADRPC.get_rpc_status (rpc_server.py): success, rpc_server,
+		// gui_dispatch, async_jobs_running, addon_version, protocol_version,
+		// execute_code_timeout, max_execute_code_timeout, merged with
+		// status_snapshot.snapshot()'s freecad_version, pid, rpc_started_at,
+		// documents and active_document when the snapshot succeeded (a real
+		// addon sends snapshot_error instead when it raised).
 		"get_rpc_status": func([]any) (any, error) {
-			return map[string]any{"success": true, "addon_version": "0.1.25", "protocol_version": domain.ProtocolVersion,
-				"execute_code_timeout": 90, "max_execute_code_timeout": 1800, "gui_dispatch": map[string]any{"state": "healthy"}}, nil
+			return map[string]any{"success": true, "rpc_server": "running", "addon_version": "0.1.25", "protocol_version": domain.ProtocolVersion,
+				"execute_code_timeout": 90, "max_execute_code_timeout": 1800, "gui_dispatch": map[string]any{"state": "healthy"},
+				"async_jobs_running": []any{},
+				"freecad_version":    "1.1.3", "pid": int64(4242), "rpc_started_at": 1700000000.0,
+				"documents": []any{}, "active_document": ""}, nil
 		},
-		"get_active_screenshot": func([]any) (any, error) { return base64.StdEncoding.EncodeToString(pngBytes), nil },
+		// A protocol-3 addon replies with a struct, not the bare base64 string
+		// older addons sent (view_manager.get_active_screenshot).
+		"get_active_screenshot": func([]any) (any, error) {
+			return map[string]any{"success": true, "image": base64.StdEncoding.EncodeToString(pngBytes), "document": ""}, nil
+		},
 	}
 	for k, v := range extra {
 		handlers[k] = v
@@ -89,10 +102,14 @@ func TestToolsAreListedWithTheirSchemas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"create_document", "create_object", "delete_object", "execute_code",
-		"execute_code_async", "execute_code_headless", "get_async_status", "get_object",
-		"get_rpc_status", "get_view", "insert_part_from_library", "list_documents", "list_objects",
-		"list_parts", "reload_document", "run_fem_analysis", "update_object"}
+	want := []string{"activate_document", "analyze_mesh", "check_printability", "close_document",
+		"create_document", "create_object", "delete_object", "execute_code",
+		"execute_code_async", "execute_code_headless", "export_document", "get_async_status", "get_object",
+		"get_rpc_status", "get_selection", "get_spreadsheet_cells", "get_view", "import_file",
+		"insert_part_from_library", "list_documents", "list_objects", "list_parts", "measure",
+		"mesh_to_solid", "open_document", "recompute_document", "redo", "reload_document", "repair_mesh",
+		"run_fem_analysis", "save_document", "save_document_as", "solid_to_mesh", "start_freecad", "undo",
+		"update_object", "update_spreadsheet_cells"}
 	var got []string
 	schemas := map[string]map[string]any{}
 	for _, tool := range res.Tools {
@@ -203,16 +220,26 @@ func TestUpdateObjectRequiresAnObject(t *testing.T) {
 }
 
 func TestFreeCADStoppingAfterConnectPointsAtStartingIt(t *testing.T) {
+	// The list_documents tool calls the addon's get_documents method, not one
+	// named list_documents.
 	fc := addon(t, map[string]xmlrpctest.Handler{
-		"list_documents": func([]any) (any, error) { return []any{}, nil },
+		"get_documents": func([]any) (any, error) {
+			return map[string]any{"success": true, "active_document": "", "count": 0, "documents": []any{}}, nil
+		},
 	})
 	cs := session(t, settingsFor(fc))
 	call(t, cs, "list_documents", nil)
 	fc.Close()
 	res := call(t, cs, "list_documents", nil)
 	text := strings.Join(texts(res), "\n")
-	if !res.IsError || !strings.Contains(text, "Start RPC Server") || strings.Contains(text, "stuck") {
+	if !res.IsError || !strings.Contains(text, "get_rpc_status") {
 		t.Fatalf("reply = %v", text)
+	}
+	// get_rpc_status itself never errors while FreeCAD is down; its own next
+	// step should send the model to start_freecad instead of looping.
+	status := strings.Join(texts(call(t, cs, "get_rpc_status", nil)), "\n")
+	if !strings.Contains(status, "not_running") || !strings.Contains(status, "start_freecad") {
+		t.Fatalf("status reply = %v", status)
 	}
 }
 
@@ -245,15 +272,24 @@ func TestFailureIsAStructuredError(t *testing.T) {
 func TestWarningIsShownOnceInTheNextToolReply(t *testing.T) {
 	fc := addon(t, map[string]xmlrpctest.Handler{
 		"get_rpc_status": func([]any) (any, error) { return map[string]any{"success": true}, nil },
-		"list_documents": func([]any) (any, error) { return []any{"Doc"}, nil },
+		"get_documents": func([]any) (any, error) {
+			return map[string]any{
+				"success": true, "active_document": "Doc", "count": 1,
+				"documents": []any{map[string]any{
+					"name": "Doc", "label": "Doc", "file_name": "", "modified": false,
+					"needs_recompute": false, "partial": false, "object_count": 0,
+					"active": true, "views": []any{},
+				}},
+			}, nil
+		},
 	})
 	cs := session(t, settingsFor(fc))
 	first := texts(call(t, cs, "list_documents", nil))
-	if len(first) != 2 || !strings.HasPrefix(first[0], "Warning: The FreeCAD addon does not report a version") || !strings.Contains(first[1], `"Doc"`) {
+	if len(first) != 2 || !strings.HasPrefix(first[0], "Warning: The FreeCAD addon does not report a version") || !strings.Contains(first[1], "Doc") {
 		t.Fatalf("first reply = %v", first)
 	}
 	second := texts(call(t, cs, "list_documents", nil))
-	if len(second) != 1 || !strings.Contains(second[0], `"Doc"`) {
+	if len(second) != 1 || !strings.Contains(second[0], "Doc") {
 		t.Fatalf("second reply = %v", second)
 	}
 }
@@ -279,7 +315,9 @@ func TestFreeCADNotRunningIsUnavailable(t *testing.T) {
 func TestReconnectAfterFreeCADStarts(t *testing.T) {
 	fc := addon(t, map[string]xmlrpctest.Handler{
 		"get_rpc_status": func([]any) (any, error) { return map[string]any{"success": true}, nil },
-		"list_documents": func([]any) (any, error) { return []any{}, nil },
+		"get_documents": func([]any) (any, error) {
+			return map[string]any{"success": true, "active_document": "", "count": 0, "documents": []any{}}, nil
+		},
 	})
 	var up atomic.Bool
 	fc.Handle("ping", func([]any) (any, error) { return up.Load(), nil })
@@ -316,7 +354,7 @@ func TestAsyncTexts(t *testing.T) {
 	})
 	cs := session(t, settingsFor(fc))
 	started := strings.Join(texts(call(t, cs, "execute_code_async", map[string]any{"code": "x = 1"})), "\n")
-	if !strings.Contains(started, "job_id: job-7") || !strings.Contains(started, `get_async_status(job_id="job-7")`) {
+	if !strings.Contains(started, "job_id: job-7") || !strings.Contains(started, `get_async_status with {"job_id": "job-7"}`) {
 		t.Fatalf("start reply = %v", started)
 	}
 
@@ -339,7 +377,7 @@ func TestAsyncTexts(t *testing.T) {
 
 	fc.Handle("execute_code_async", func([]any) (any, error) { return map[string]any{"success": true}, nil })
 	older := strings.Join(texts(call(t, cs, "execute_code_async", map[string]any{"code": "pass"})), "\n")
-	if !strings.Contains(older, "get_object") || !strings.Contains(older, "Report View") || strings.Contains(older, `get_async_status(job_id=""`) {
+	if !strings.Contains(older, "get_object") || !strings.Contains(older, "Report View") {
 		t.Fatalf("older addon reply = %v", older)
 	}
 }

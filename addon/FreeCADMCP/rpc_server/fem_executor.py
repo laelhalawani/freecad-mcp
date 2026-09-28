@@ -6,6 +6,9 @@ import traceback
 import FreeCAD
 import ObjectsFem
 
+from rpc_server.errors import INVALID_INPUT, NOT_FOUND, fail, tool_call
+from rpc_server.transactions import active_document, transaction
+
 
 # FEM solvers are all Fem::FemSolverObjectPython; FreeCAD tells them apart by
 # the Python proxy's Type (femtools.femutils.type_of_obj). These are the
@@ -50,79 +53,100 @@ def run_fem_analysis(doc_name: str, analysis_name: str) -> dict:
         try:
             doc = FreeCAD.getDocument(doc_name)
         except Exception:
-            return {"success": False, "error": f"Document '{doc_name}' not found."}
+            return fail(
+                NOT_FOUND,
+                f"Document '{doc_name}' not found.",
+                "Call " + tool_call("list_documents", {}) + " to see the open documents.",
+            )
         analysis = doc.getObject(analysis_name)
         if analysis is None:
-            return {"success": False, "error": f"Analysis '{analysis_name}' not found."}
-        if analysis.TypeId not in ("Fem::FemAnalysis", "Fem::FemAnalysisPython"):
-            return {"success": False, "error": f"'{analysis_name}' is not a FEM analysis (TypeId={analysis.TypeId})."}
-
-        stage = "solver resolution"
-        solver = _find_calculix_solver(analysis)
-        if solver is None:
-            solver_factory = (
-                getattr(ObjectsFem, "makeSolverCalculiXCcxTools", None)
-                or getattr(ObjectsFem, "makeSolverCalculixCcxTools", None)
+            return fail(
+                NOT_FOUND,
+                f"Analysis '{analysis_name}' not found.",
+                "Call " + tool_call("list_objects", {"doc_name": doc_name}) + " to see the document's objects.",
             )
-            if solver_factory is None:
-                return {"success": False, "error": "ObjectsFem has no Calculix solver factory."}
-            solver = solver_factory(doc, "CalculiX")
-            analysis.addObject(solver)
+        if analysis.TypeId not in ("Fem::FemAnalysis", "Fem::FemAnalysisPython"):
+            return fail(
+                INVALID_INPUT,
+                f"'{analysis_name}' is not a FEM analysis (TypeId={analysis.TypeId}).",
+                "Call " + tool_call("list_objects", {"doc_name": doc_name}) + " to see the document's objects.",
+            )
 
-        stage = "femtools import"
-        from femtools import ccxtools
+        # Everything from here on can add or change document objects (the
+        # solver, its results): keep it inside one undoable transaction, which
+        # commits on every exit, including the early "failed" returns below,
+        # so a partially-run analysis stays undoable in one step. active_document
+        # holds doc active for as long as that transaction can be open, else
+        # FreeCAD can open an empty linked "-> run_fem_analysis" transaction in
+        # whatever document the GUI has focused (App/Document.cpp:379-386).
+        with active_document(doc), transaction("run_fem_analysis") as tx:
+            stage = "solver resolution"
+            solver = _find_calculix_solver(analysis)
+            if solver is None:
+                solver_factory = (
+                    getattr(ObjectsFem, "makeSolverCalculiXCcxTools", None)
+                    or getattr(ObjectsFem, "makeSolverCalculixCcxTools", None)
+                )
+                if solver_factory is None:
+                    return {"success": False, "error": "ObjectsFem has no Calculix solver factory."}
+                solver = solver_factory(doc, "CalculiX")
+                analysis.addObject(solver)
 
-        stage = "solver setup"
-        fea = ccxtools.FemToolsCcx(analysis=analysis, solver=solver)
-        fea.update_objects()
+            stage = "femtools import"
+            from femtools import ccxtools
 
-        work_dir = tempfile.mkdtemp(prefix="freecad_mcp_fem_")
-        fea.setup_working_dir(work_dir)
-        fea.setup_ccx()
+            stage = "solver setup"
+            fea = ccxtools.FemToolsCcx(analysis=analysis, solver=solver)
+            fea.update_objects()
 
-        stage = "prerequisite check"
-        prereq_msg = fea.check_prerequisites()
-        if prereq_msg:
-            return {"success": False, "error": f"Prerequisites failed: {prereq_msg}", "working_dir": work_dir}
+            work_dir = tempfile.mkdtemp(prefix="freecad_mcp_fem_")
+            fea.setup_working_dir(work_dir)
+            fea.setup_ccx()
 
-        stage = "solver execution"
-        fea.purge_results()
-        # FemToolsCcx.run() reports CalculiX failures by returning False rather
-        # than raising; None is returned on success in some FreeCAD versions,
-        # so only an explicit False is treated as a failure.
-        if fea.run() is False:
+            stage = "prerequisite check"
+            prereq_msg = fea.check_prerequisites()
+            if prereq_msg:
+                return {"success": False, "error": f"Prerequisites failed: {prereq_msg}", "working_dir": work_dir}
+
+            stage = "solver execution"
+            fea.purge_results()
+            # FemToolsCcx.run() reports CalculiX failures by returning False rather
+            # than raising; None is returned on success in some FreeCAD versions,
+            # so only an explicit False is treated as a failure.
+            if fea.run() is False:
+                return {
+                    "success": False,
+                    "error": "CalculiX solver run failed (fea.run() returned False); inspect the .dat/.frd output in working_dir.",
+                    "working_dir": work_dir,
+                }
+
+            stage = "result loading"
+            fea.load_results()
+
+            result_obj = None
+            for member in analysis.Group:
+                if "Result" in getattr(member, "TypeId", "") and hasattr(member, "vonMises"):
+                    result_obj = member
+                    break
+            if result_obj is None:
+                return {"success": False, "error": "Solver ran but no result object was produced.", "working_dir": work_dir}
+
+            stage = "result extraction"
+            # vonMises / DisplacementLengths can be None on a degenerate run.
+            vm = list(getattr(result_obj, "vonMises", None) or [])
+            disp = list(getattr(result_obj, "DisplacementLengths", None) or [])
+            doc.recompute()
+
             return {
-                "success": False,
-                "error": "CalculiX solver run failed (fea.run() returned False); inspect the .dat/.frd output in working_dir.",
+                "success": True,
+                "result_object": result_obj.Name,
+                "node_count": len(vm),
+                "max_von_mises_MPa": max(vm) if vm else None,
+                "min_von_mises_MPa": min(vm) if vm else None,
+                "max_displacement_mm": max(disp) if disp else None,
                 "working_dir": work_dir,
+                **tx.reply_fields(),
             }
-
-        stage = "result loading"
-        fea.load_results()
-
-        result_obj = None
-        for member in analysis.Group:
-            if "Result" in getattr(member, "TypeId", "") and hasattr(member, "vonMises"):
-                result_obj = member
-                break
-        if result_obj is None:
-            return {"success": False, "error": "Solver ran but no result object was produced.", "working_dir": work_dir}
-
-        stage = "result extraction"
-        # vonMises / DisplacementLengths can be None on a degenerate run.
-        vm = list(getattr(result_obj, "vonMises", None) or [])
-        disp = list(getattr(result_obj, "DisplacementLengths", None) or [])
-        doc.recompute()
-
-        return {
-            "success": True,
-            "result_object": result_obj.Name,
-            "node_count": len(vm),
-            "max_von_mises_MPa": max(vm) if vm else None,
-            "min_von_mises_MPa": min(vm) if vm else None,
-            "max_displacement_mm": max(disp) if disp else None,
-            "working_dir": work_dir,
-        }
     except Exception as e:
         return {
             "success": False,

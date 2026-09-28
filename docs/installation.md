@@ -71,11 +71,11 @@ To install a specific release instead of the latest, pass `-Version`
 (PowerShell) or set `VERSION` (sh):
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/laelhalawani/freecad-mcp/releases/download/v0.2.1/install.ps1))) -Version v0.2.1
+& ([scriptblock]::Create((irm https://github.com/laelhalawani/freecad-mcp/releases/download/v0.3.0/install.ps1))) -Version v0.3.0
 ```
 
 ```sh
-curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/download/v0.2.1/install.sh | VERSION=v0.2.1 sh
+curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/download/v0.3.0/install.sh | VERSION=v0.3.0 sh
 ```
 
 ### Unattended install
@@ -153,6 +153,15 @@ and [reported startup failure](../assets/rpc-startup-error.png).
 See [auto-start configuration](configuration.md#auto-start-rpc-server) to change
 the setting later.
 
+### Let your AI client start FreeCAD
+
+You do not have to start FreeCAD by hand every time: an AI client can call the
+`start_freecad` tool, which launches FreeCAD's GUI detached from the MCP
+server and starts the RPC server through a startup macro, independent of the
+auto-start setting. See [starting FreeCAD from your AI client](configuration.md#starting-freecad-from-your-ai-client)
+for how it decides between starting, reporting `already_running`, and
+forwarding to a FreeCAD window that is already open.
+
 ### Keep the addon and server in sync
 
 The binary embeds the addon, and `install`, `install-addon` and `update` install
@@ -160,10 +169,16 @@ the matching copy, so the two normally match. The MCP server checks that the
 running addon speaks its protocol version: if it does not, for example after
 copying an older addon by hand, the next tool reply starts with a warning that
 says which side to update, and `get_rpc_status` and `check-connection` report
-it. This release speaks protocol 2: Placement angles are in degrees both ways,
-a screenshot that fails is reported as an error, and `reload_document` names
-the document it reopened. An addon from an earlier release speaks protocol 1
-and gets the `freecad-mcp install-addon` warning until it is updated.
+it. This release speaks protocol 3 (addon 0.3.0): `start_freecad` launches
+FreeCAD itself when it is not running; documents gain full lifecycle tools
+(open, save, save as, close, activate); `import_file` and `export_document`
+handle CAD, mesh and 2D formats on disk; screenshots and object listings can
+target a chosen document; `list_objects` and `get_object` report bounding
+boxes, center of mass and validity; `recompute_document`, `check_printability`,
+mesh analysis and repair, transactional `undo`/`redo`, spreadsheet cell access,
+and `measure`/`get_selection` are new. An addon from an earlier release speaks
+protocol 1 or 2 and gets the `freecad-mcp install-addon` warning until it is
+updated.
 
 `freecad-mcp doctor` also finds every installed copy of the addon, in the data
 folder FreeCAD reports and in the other FreeCAD data folders on disk, and
@@ -184,9 +199,10 @@ freecad-mcp doctor
 ```
 
 checks the binary and `PATH`, which AI clients have the server registered, the
-FreeCAD installation, the version and auto-start setting of every installed copy
-of the addon,
-and whether the RPC server answers. With FreeCAD running,
+FreeCAD installation (both `freecadcmd` for headless execution and the GUI
+executable `start_freecad` launches), the version and auto-start setting of
+every installed copy of the addon, and whether the RPC server answers. With
+FreeCAD running,
 
 ```sh
 freecad-mcp check-connection

@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/laelhalawani/freecad-mcp/internal/freecad"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -16,14 +17,17 @@ import (
 type Server struct {
 	mcpServer *mcp.Server
 	config    Config
+	launcher  *freecad.Launcher
 	fc        *connector
 }
 
 // New creates a new MCP server with the given config and registers its tools.
 func New(config Config) *Server {
+	launcher := freecad.NewLauncher(config.FreeCAD)
 	srv := &Server{
-		config: config,
-		fc:     newConnector(config.FreeCAD, config.Version),
+		config:   config,
+		launcher: launcher,
+		fc:       newConnector(config.FreeCAD, config.Version, launcher),
 		mcpServer: mcp.NewServer(
 			&mcp.Implementation{
 				Name:    "freecad",
@@ -32,14 +36,28 @@ func New(config Config) *Server {
 			},
 			&mcp.ServerOptions{
 				Instructions: "FreeCAD integration through the Model Context Protocol. " +
-					"Start with list_documents or list_objects to see the current state, " +
-					"and read the asset_creation_strategy prompt for the recommended workflow.",
+					"If FreeCAD is not running, call start_freecad, then poll get_rpc_status every few seconds " +
+					"until it reports rpc: reachable. Start with list_documents or list_objects to see the " +
+					"current state; open_document, import_file and export_document handle files on disk, and " +
+					"undo/redo, recompute_document, check_printability, the mesh tools, the spreadsheet tools, " +
+					"and measure/get_selection cover the rest of the model lifecycle. Read the " +
+					"asset_creation_strategy prompt for the recommended workflow.",
 			},
 		),
 	}
 
+	srv.registerLaunchTools()
 	srv.registerDocumentTools()
+	srv.registerDocumentSaveTools()
+	srv.registerImportTools()
+	srv.registerExportTools()
 	srv.registerObjectTools()
+	srv.registerRecomputeTools()
+	srv.registerPrintabilityTools()
+	srv.registerMeshTools()
+	srv.registerUndoTools()
+	srv.registerSpreadsheetTools()
+	srv.registerInspectTools()
 	srv.registerCodeTools()
 	srv.registerViewTools()
 	srv.registerStatusTools()

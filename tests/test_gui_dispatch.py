@@ -34,6 +34,22 @@ class FakeStatusBar:
         pass
 
 
+def reset_transactions_import() -> None:
+    """Drop the cached ``rpc_server.transactions`` from ``sys.modules``.
+
+    It imports FreeCAD at module level and stays cached once imported, so
+    without this, whichever test loads it first keeps it bound to that
+    test's fake FreeCAD for the rest of the run: every loader that installs
+    a fake FreeCAD calls this right after, forcing the next import of
+    ``rpc_server.transactions`` (directly, or through a module that imports
+    it, such as ``rpc_server.object_factory``) to bind to the fake just
+    installed. ``"rpc_server.transactions"`` still belongs in the caller's
+    own saved/restored module names, so the prior binding comes back when
+    the caller's context exits.
+    """
+    sys.modules.pop("rpc_server.transactions", None)
+
+
 class FakeApplication:
     @staticmethod
     def mouseButtons() -> int:
@@ -60,12 +76,29 @@ class FakeApplication:
 
 @contextmanager
 def load_gui_dispatch() -> Iterator[types.ModuleType]:
-    module_names = ["FreeCAD", "FreeCADGui", "PySide"]
+    module_names = ["FreeCAD", "FreeCADGui", "PySide", "rpc_server.transactions"]
     missing = object()
     saved = {name: sys.modules.get(name, missing) for name in module_names}
 
     freecad = types.ModuleType("FreeCAD")
     freecad.Console = types.SimpleNamespace(PrintError=lambda _message: None)
+    # rpc_server.transactions wraps every mutating handler in a FreeCAD
+    # transaction; a real FreeCAD always has these, so the fake needs them for
+    # execute_code and commit() to run under test. No transaction is ever
+    # active by default, and setActiveTransaction always succeeds (a non-zero
+    # id).
+    freecad._active_transaction_id = 0
+
+    def _set_active_transaction(_name: str, persist: bool = False) -> int:
+        freecad._active_transaction_id += 1
+        return freecad._active_transaction_id
+
+    def _close_active_transaction(abort: bool = False, id: int = 0) -> None:
+        return None
+
+    freecad.getActiveTransaction = lambda: None
+    freecad.setActiveTransaction = _set_active_transaction
+    freecad.closeActiveTransaction = _close_active_transaction
 
     status_bar = FakeStatusBar()
     freecad_gui = types.ModuleType("FreeCADGui")
@@ -97,6 +130,7 @@ def load_gui_dispatch() -> Iterator[types.ModuleType]:
     sys.modules["FreeCAD"] = freecad
     sys.modules["FreeCADGui"] = freecad_gui
     sys.modules["PySide"] = pyside
+    reset_transactions_import()
 
     module_name = f"_gui_dispatch_test_{time.monotonic_ns()}"
     try:

@@ -11,6 +11,7 @@ import (
 )
 
 type getViewInput struct {
+	DocName     *string   `json:"doc_name,omitempty" jsonschema:"the document whose 3D view to capture (default: the active document's active view)"`
 	ViewName    *ViewName `json:"view_name,omitempty" jsonschema:"the view orientation of the screenshot (default Isometric)"`
 	Width       *int      `json:"width,omitempty" jsonschema:"the width of the screenshot in pixels, 1 to 2048 (default: see the tool description)"`
 	Height      *int      `json:"height,omitempty" jsonschema:"the height of the screenshot in pixels, 1 to 2048 (default: see the tool description)"`
@@ -22,8 +23,14 @@ type partInput struct {
 	screenshotOptions
 }
 
+type getViewFront struct {
+	Document string `yaml:"document,omitempty"`
+	View     string `yaml:"view"`
+}
+
 type partFront struct {
-	Part string `yaml:"part"`
+	Part        string `yaml:"part"`
+	Transaction string `yaml:"transaction,omitempty"`
 }
 
 type partsFront struct {
@@ -33,14 +40,18 @@ type partsFront struct {
 func (s *Server) registerViewTools() {
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name: "get_view",
-		Description: "Get a screenshot of FreeCAD's active 3D view from the given orientation (default Isometric). " +
-			"Use it to inspect the model after changes made with include_screenshot false, choosing the most " +
-			"informative angle, or with focus_object to frame one object from list_objects. When width and height " +
-			"are both omitted, the image has the viewport's size, scaled down to keep its aspect ratio when the " +
-			"longest edge exceeds 1024 pixels; when only one is given, the other is the viewport's size in that direction. " +
-			"width and height go up to 2048, and an image too large for one reply (about 740 KiB of PNG) is refused " +
-			"with a hint to ask for a smaller one. Fails when no document is open or the active view cannot be " +
-			"captured, such as a TechDraw page or a spreadsheet.",
+		Description: "Get a screenshot of a FreeCAD document's 3D view from the given orientation (default Isometric). " +
+			"With doc_name, that document's 3D view is captured, switching to it and back if it is not already " +
+			"the active window; without it, the active document's active view is used. Either way FreeCAD's " +
+			"camera and selection are left exactly as found afterwards. Use it to inspect the model after changes " +
+			"made with include_screenshot false, choosing the most informative angle, or with focus_object to " +
+			"frame one object from list_objects. When width and height are both omitted, the image has the " +
+			"viewport's size, scaled down to keep its aspect ratio when the longest edge exceeds 1024 pixels; " +
+			"when only one is given, the other is the viewport's size in that direction. width and height go up " +
+			"to 2048, and an image too large for one reply (about 740 KiB of PNG) is refused with a hint to ask " +
+			"for a smaller one. Fails when no document is open, doc_name is not an open document, that document " +
+			"has no 3D view (opened hidden, or all its 3D views closed), or (without doc_name) the active window " +
+			"is not a 3D view, such as a TechDraw page or a spreadsheet.",
 		InputSchema: withRange(inputSchema[getViewInput](map[string]string{"view_name": `"Isometric"`}),
 			1, maxViewSize, "width", "height"),
 	}, s.getView)
@@ -67,7 +78,11 @@ func (s *Server) getView(ctx context.Context, _ *mcp.CallToolRequest, in getView
 	if err != nil {
 		return failure("get view", err, ""), nil, nil
 	}
-	b64, err := conn.GetActiveScreenshot(ctx, viewOrDefault(viewString(in.ViewName)), in.Width, in.Height, in.FocusObject)
+	docName := ""
+	if in.DocName != nil {
+		docName = *in.DocName
+	}
+	shot, err := conn.GetActiveScreenshot(ctx, viewOrDefault(viewString(in.ViewName)), in.Width, in.Height, in.FocusObject, docName)
 	if err != nil {
 		// A fault is FreeCAD failing to capture the view.
 		hint := ""
@@ -78,10 +93,17 @@ func (s *Server) getView(ctx context.Context, _ *mcp.CallToolRequest, in getView
 		}
 		return s.withNotice(failure("get view", err, hint)), nil, nil
 	}
-	img, ok := imageContent(b64)
+	img, ok := imageContent(shot.Image)
+	if !ok && shot.Reason != "" {
+		// The addon says why there is nothing to capture.
+		return s.withNotice(reportedCode("get view", map[string]any{
+			"code": shot.Code, "error": shot.Message, "hint": shot.Hint,
+		}, "")), nil, nil
+	}
 	if !ok {
-		// The addon answers the same way when no document is open and when
-		// the active view is not a 3D view; the open documents tell them apart.
+		// An addon before protocol 3 answers the same way when no document is
+		// open and when the active view is not a 3D view; the open documents
+		// tell them apart.
 		if docs, err := conn.ListDocuments(ctx); err == nil {
 			if list, isList := docs.([]any); isList && len(list) == 0 {
 				return s.withNotice(render.ErrorResult(render.Error{
@@ -98,16 +120,25 @@ func (s *Server) getView(ctx context.Context, _ *mcp.CallToolRequest, in getView
 			Hint: "Switch FreeCAD to a 3D view of a document, then call get_view again; list_documents shows the open documents.",
 		})), nil, nil
 	}
-	if size := len(img.(*mcp.ImageContent).Data); size > maxImageBytes {
+	viewName := viewOrDefault(viewString(in.ViewName))
+	body := "Screenshot of the " + viewName + " view"
+	if shot.Document != "" {
+		body += " of " + shot.Document
+	}
+	body += "."
+	out := render.SuccessResult(getViewFront{Document: shot.Document, View: viewName}, body)
+	budget := imageBudget(out)
+	if size := len(img.(*mcp.ImageContent).Data); size > budget {
 		return s.withNotice(render.ErrorResult(render.Error{
 			Code: render.CodeInvalidInput,
 			Message: fmt.Sprintf("The screenshot is %d KiB, more than the %d KiB a reply can carry.",
-				size>>10, maxImageBytes>>10),
+				size>>10, budget>>10),
 			Hint: "Call get_view again with a smaller width and height, e.g. {\"width\": 1024, \"height\": 768}, " +
 				"or omit both for a viewport-sized image of at most 1024 pixels on its longest edge.",
 		})), nil, nil
 	}
-	return s.withNotice(&mcp.CallToolResult{Content: []mcp.Content{img}}), nil, nil
+	out.Content = append(out.Content, img)
+	return s.withNotice(out), nil, nil
 }
 
 func (s *Server) insertPartFromLibrary(ctx context.Context, _ *mcp.CallToolRequest, in partInput) (*mcp.CallToolResult, any, error) {
@@ -120,10 +151,21 @@ func (s *Server) insertPartFromLibrary(ctx context.Context, _ *mcp.CallToolReque
 		return s.withNotice(failure("insert part from library", err, "")), nil, nil
 	}
 	if !succeeded(res) {
-		return s.withNotice(reported("insert part from library", res, "Call list_parts to see the available paths.")), nil, nil
+		// _insert_part_from_library's own except FileNotFoundError/ValueError
+		// branches carry a code and hint, which win here regardless of
+		// hintCodes, and this hint fits that not_found case (the default).
+		// Its bare `except Exception as e: return str(e)` carries no code
+		// either, landing on codeFreeCAD, but that is an unexpected failure
+		// during the insert itself, not a bad path, so listing the available
+		// paths does not help there: codeFreeCAD is deliberately not named,
+		// leaving that case to the generic default hint.
+		return s.withNotice(reportedCode("insert part from library", res,
+			"Call list_parts to see the available paths.")), nil, nil
 	}
-	out := render.SuccessResult(partFront{Part: in.RelativePath}, "Part inserted from library: "+str(res, "message"))
-	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName))), nil, nil
+	txName, txMerged := transactionFields(res)
+	out := render.SuccessResult(partFront{Part: in.RelativePath, Transaction: txName},
+		transactionNote("Part inserted from library: "+str(res, "message"), txName, txMerged))
+	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName), "")), nil, nil
 }
 
 func (s *Server) listParts(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {

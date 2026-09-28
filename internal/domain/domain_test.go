@@ -46,7 +46,7 @@ func TestSplitCommand(t *testing.T) {
 }
 
 func TestSettingsFromEnv(t *testing.T) {
-	for _, k := range []string{EnvHost, EnvPort, EnvToken, EnvOnlyTextFeedback, EnvFreecadCmd} {
+	for _, k := range []string{EnvHost, EnvPort, EnvToken, EnvOnlyTextFeedback, EnvFreecadCmd, EnvFreecadGUI} {
 		t.Setenv(k, "")
 	}
 	s, err := SettingsFromEnv(" stored ")

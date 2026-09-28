@@ -26,7 +26,7 @@ const (
 // ProtocolVersion is the RPC contract version shared with the FreeCAD addon.
 // It must match PROTOCOL_VERSION in addon/FreeCADMCP/rpc_server/version.py,
 // which lists what each version changed.
-const ProtocolVersion = 2
+const ProtocolVersion = 3
 
 // DefaultRPCPort is the port the FreeCAD addon's XML-RPC server listens on.
 const DefaultRPCPort = 9875
@@ -38,6 +38,7 @@ const (
 	EnvToken            = "FREECAD_MCP_TOKEN"
 	EnvOnlyTextFeedback = "FREECAD_MCP_ONLY_TEXT_FEEDBACK"
 	EnvFreecadCmd       = "FREECAD_MCP_FREECADCMD"
+	EnvFreecadGUI       = "FREECAD_MCP_FREECAD"
 )
 
 // TokenKey is the credential store key holding the FreeCAD RPC auth token.
@@ -153,6 +154,7 @@ type Settings struct {
 	Token            string   // FreeCAD RPC auth token; empty when the addon has none
 	OnlyTextFeedback bool     // never attach screenshots
 	FreecadCmd       []string // headless FreeCAD command; nil means auto-detect
+	FreecadGUI       []string // FreeCAD GUI command start_freecad runs; nil means auto-detect
 }
 
 // SettingsFromEnv reads Settings from the environment. token is the stored
@@ -188,6 +190,13 @@ func SettingsFromEnv(token string) (Settings, error) {
 			return s, fmt.Errorf("%s: %w", EnvFreecadCmd, err)
 		}
 		s.FreecadCmd = cmd
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvFreecadGUI)); v != "" {
+		cmd, err := SplitCommand(v)
+		if err != nil {
+			return s, fmt.Errorf("%s: %w", EnvFreecadGUI, err)
+		}
+		s.FreecadGUI = cmd
 	}
 	return s, nil
 }

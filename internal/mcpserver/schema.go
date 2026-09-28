@@ -20,7 +20,7 @@ const defaultView = "Isometric"
 
 // maxViewSize bounds get_view's width and height, as the addon clamps them
 // (MAX_SCREENSHOT_EDGE in view_manager.py). A larger image rarely fits the
-// 1 MiB a reply carries; maxImageBytes checks the actual size.
+// 1 MiB a reply carries; imageBudget checks the actual size.
 const maxViewSize = 2048
 
 func viewOrDefault(v string) string {
@@ -108,8 +108,8 @@ func inputSchema[T any](defaults map[string]string) *jsonschema.Schema {
 		panic(err)
 	}
 	for _, prop := range s.Properties {
-		if len(prop.Enum) > 0 && len(prop.Types) == 2 && prop.Types[0] == "null" {
-			prop.Type, prop.Types = prop.Types[1], nil
+		if len(prop.Enum) > 0 {
+			dropNullAlt(prop)
 		}
 	}
 	for name, value := range defaults {
@@ -146,9 +146,82 @@ func withPositiveMax(s *jsonschema.Schema, name string, hi float64) *jsonschema.
 	return s
 }
 
+// withEnum restricts the named property of s to values: a string property
+// directly, an array property through its items. As in inputSchema, the
+// inferred "null" alternative of an optional property is dropped, since null
+// is not one of the values.
+func withEnum(s *jsonschema.Schema, name string, values ...string) *jsonschema.Schema {
+	prop, ok := s.Properties[name]
+	if !ok {
+		panic(fmt.Sprintf("withEnum: no property %q", name))
+	}
+	enum := make([]any, len(values))
+	for i, v := range values {
+		enum[i] = v
+	}
+	dropNullAlt(prop)
+	target := prop
+	if prop.Type == "array" {
+		if prop.Items == nil {
+			panic(fmt.Sprintf("withEnum: array property %q has no items schema", name))
+		}
+		target = prop.Items
+	}
+	target.Enum = enum
+	return s
+}
+
 func boolOr(b *bool, def bool) bool {
 	if b == nil {
 		return def
 	}
 	return *b
+}
+
+// mergeDefaults combines several property-default maps (as inputSchema
+// takes) into one, later maps overriding earlier ones for the same key.
+func mergeDefaults(maps ...map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, m := range maps {
+		for k, v := range m {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// withItemRange requires the named array property of s to have between lo
+// and hi items, inclusive. Struct tags cannot express this.
+func withItemRange(s *jsonschema.Schema, name string, lo, hi int) *jsonschema.Schema {
+	prop, ok := s.Properties[name]
+	if !ok {
+		panic(fmt.Sprintf("withItemRange: no property %q", name))
+	}
+	prop.MinItems, prop.MaxItems = jsonschema.Ptr(lo), jsonschema.Ptr(hi)
+	dropNullAlt(prop)
+	return s
+}
+
+// withMinItems requires the named array property of s to have at least
+// atLeast items, dropping the inferred null alternative an optional-looking
+// slice property gets (as withEnum drops it for an enum), since the property
+// is only ever a JSON array.
+func withMinItems(s *jsonschema.Schema, name string, atLeast int) *jsonschema.Schema {
+	prop, ok := s.Properties[name]
+	if !ok {
+		panic(fmt.Sprintf("withMinItems: no property %q", name))
+	}
+	prop.MinItems = jsonschema.Ptr(atLeast)
+	dropNullAlt(prop)
+	return s
+}
+
+// dropNullAlt removes prop's inferred "null" alternative, a no-op when it has
+// none: a slice or enum property built from a Go pointer type infers
+// ["null", "<type>"], but the property is only ever present with a real
+// value, never JSON null, once its minimum length or its enum is set.
+func dropNullAlt(prop *jsonschema.Schema) {
+	if len(prop.Types) == 2 && prop.Types[0] == "null" {
+		prop.Type, prop.Types = prop.Types[1], nil
+	}
 }

@@ -34,12 +34,20 @@ class _BrokenShape:
         raise RuntimeError("shape is invalid")
 
 
+class _StubBoundBox:
+    XMin, YMin, ZMin = 0.0, 0.0, 0.0
+    XMax, YMax, ZMax = 1.0, 2.0, 3.0
+
+
 class _GoodShape:
     Volume = 42.0
     Area = 10.0
     Vertexes = [object() for _ in range(8)]
     Edges = [object() for _ in range(6)]
     Faces = [object() for _ in range(4)]
+    BoundBox = _StubBoundBox()
+    ShapeType = "Solid"
+    CenterOfMass = _StubVector(0.5, 1.0, 1.5)
 
 
 freecad_stub.Vector = _StubVector

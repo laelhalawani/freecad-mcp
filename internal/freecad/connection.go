@@ -15,11 +15,18 @@ import (
 // Budget defaults. The addon reports its own run budgets through
 // get_rpc_status; CheckAddonVersion adopts them.
 const (
-	DefaultTimeout             = 150 * time.Second
-	DefaultExecuteCodeTimeout  = 90.0   // seconds
-	DefaultMaxExecuteCodeTime  = 1800.0 // seconds
-	DefaultRPCTimeoutMargin    = 30.0   // seconds
-	DefaultVersionCheckTimeout = 5 * time.Second
+	DefaultTimeout            = 150 * time.Second
+	DefaultExecuteCodeTimeout = 90.0   // seconds
+	DefaultMaxExecuteCodeTime = 1800.0 // seconds
+	DefaultRPCTimeoutMargin   = 30.0   // seconds
+	// DefaultVersionCheckTimeout matches pingTimeout (internal/mcpserver):
+	// right after FreeCAD starts, its GUI thread is still running startup
+	// Python (workbench and Start page loading), and every XML-RPC request
+	// runs on a ThreadingMixIn thread that needs the GIL, so even a call that
+	// never waits for the GUI thread can take several seconds. A shorter
+	// bound here was seen to time out about 10 s after the RPC server came
+	// up, when the same ping would have succeeded.
+	DefaultVersionCheckTimeout = 10 * time.Second
 )
 
 // Connection is a client for one FreeCAD addon.
@@ -75,6 +82,39 @@ func (c *Connection) callMap(ctx context.Context, timeout time.Duration, method 
 }
 
 func seconds(s float64) time.Duration { return time.Duration(s * float64(time.Second)) }
+
+// opt returns *p, or nil when p is nil. The addon reads XML-RPC nil as "not
+// given" for every optional argument.
+func opt[T any](p *T) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+// optString returns s, or nil for "" (not given).
+func optString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// optList returns list, or nil when it is empty (not given).
+func optList[T any](list []T) any {
+	if len(list) == 0 {
+		return nil
+	}
+	return list
+}
+
+// optMap returns m, or nil when it is empty (not given).
+func optMap(m map[string]any) any {
+	if len(m) == 0 {
+		return nil
+	}
+	return m
+}
 
 // Ping reports whether the addon answers.
 func (c *Connection) Ping(ctx context.Context) (bool, error) {
@@ -154,11 +194,13 @@ func CheckTimeout(timeout *float64) error {
 	return nil
 }
 
-// ExecuteCodeBudget returns the run budget sent to the addon and the time to
-// wait for the reply. The addon permits a full queue budget followed by a
+// budget returns the run budget sent to the addon for a call whose default
+// run budget is def seconds, and the time to wait for the reply. A given
+// timeout replaces def, capped at MaxExecuteCodeTimeout (1800 s unless the
+// addon reports less). The addon permits a full queue budget followed by a
 // full run budget, so the wait must outlast both.
-func (c *Connection) ExecuteCodeBudget(timeout *float64) (run float64, wait time.Duration, err error) {
-	run = c.ExecuteCodeTimeout
+func (c *Connection) budget(timeout *float64, def float64) (run float64, wait time.Duration, err error) {
+	run = def
 	if err := CheckTimeout(timeout); err != nil {
 		return 0, 0, err
 	}
@@ -167,6 +209,24 @@ func (c *Connection) ExecuteCodeBudget(timeout *float64) (run float64, wait time
 	}
 	wait = max(c.timeout, seconds(2*run+c.RPCTimeoutMargin))
 	return run, wait, nil
+}
+
+// callBudget calls a method that takes a run budget as its last argument. It
+// sends params followed by the run budget resolved from timeout and def, and
+// waits long enough for the queue and run budgets.
+func (c *Connection) callBudget(ctx context.Context, method string, timeout *float64, def float64, params ...any) (map[string]any, error) {
+	run, wait, err := c.budget(timeout, def)
+	if err != nil {
+		return nil, err
+	}
+	return c.callMap(ctx, wait, method, append(params, run)...)
+}
+
+// ExecuteCodeBudget returns the run budget sent to the addon and the time to
+// wait for the reply. The addon permits a full queue budget followed by a
+// full run budget, so the wait must outlast both.
+func (c *Connection) ExecuteCodeBudget(timeout *float64) (run float64, wait time.Duration, err error) {
+	return c.budget(timeout, c.ExecuteCodeTimeout)
 }
 
 // ExecuteCode runs Python code on FreeCAD's GUI thread. Without a timeout it
@@ -223,10 +283,25 @@ func (c *Connection) InsertPartFromLibrary(ctx context.Context, relativePath str
 	return c.callMap(ctx, c.timeout, "insert_part_from_library", relativePath)
 }
 
-// GetActiveScreenshot returns the active view as base64 PNG, or "" when the
-// active view cannot be captured (a TechDraw page or a spreadsheet). Any
-// other failure to capture it is an *xmlrpc.Fault.
-func (c *Connection) GetActiveScreenshot(ctx context.Context, view string, width, height *int, focus *string) (string, error) {
+// Screenshot is a capture of a document's 3D view, or why none was made.
+type Screenshot struct {
+	Image    string // base64-encoded PNG; empty when nothing was captured
+	Document string // the document whose view was captured
+	// When nothing was captured, Code is not_found or unavailable and Reason
+	// one of no_document, document_not_found, no_3d_view, not_3d_view. An
+	// addon older than protocol 3 gives no reason.
+	Code    string
+	Reason  string
+	Message string
+	Hint    string
+}
+
+// GetActiveScreenshot captures the 3D view of docName, or the active view
+// when docName is "". A view that cannot be captured gives a Screenshot
+// without Image that says why; any other failure to capture it is an
+// *xmlrpc.Fault. docName is sent only when set, so automatic screenshots keep
+// working with addons that predate it.
+func (c *Connection) GetActiveScreenshot(ctx context.Context, view string, width, height *int, focus *string, docName string) (Screenshot, error) {
 	var w, h, f any
 	if width != nil {
 		w = *width
@@ -237,22 +312,29 @@ func (c *Connection) GetActiveScreenshot(ctx context.Context, view string, width
 	if focus != nil {
 		f = *focus
 	}
-	v, err := c.call(ctx, c.timeout, "get_active_screenshot", view, w, h, f)
-	if err != nil {
-		return "", err
+	params := []any{view, w, h, f}
+	if docName != "" {
+		params = append(params, docName)
 	}
-	s, _ := v.(string)
-	return s, nil
-}
-
-// GetObjects lists the objects of a document.
-func (c *Connection) GetObjects(ctx context.Context, doc string) (any, error) {
-	return c.call(ctx, c.timeout, "get_objects", doc)
-}
-
-// GetObject returns one object.
-func (c *Connection) GetObject(ctx context.Context, doc, obj string) (any, error) {
-	return c.call(ctx, c.timeout, "get_object", doc, obj)
+	v, err := c.call(ctx, c.timeout, "get_active_screenshot", params...)
+	if err != nil {
+		return Screenshot{}, err
+	}
+	switch r := v.(type) {
+	case string:
+		// Addons before protocol 3 reply with the bare image.
+		return Screenshot{Image: r}, nil
+	case map[string]any:
+		get := func(key string) string { s, _ := r[key].(string); return s }
+		shot := Screenshot{Document: get("document")}
+		if ok, _ := r["success"].(bool); ok {
+			shot.Image = get("image")
+			return shot, nil
+		}
+		shot.Code, shot.Reason, shot.Message, shot.Hint = get("code"), get("reason"), get("error"), get("hint")
+		return shot, nil
+	}
+	return Screenshot{}, nil
 }
 
 // GetPartsList lists the parts library.

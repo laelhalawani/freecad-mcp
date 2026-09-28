@@ -14,7 +14,7 @@ import (
 
 type executeCodeInput struct {
 	Code    string   `json:"code" jsonschema:"the Python code to execute"`
-	Timeout *float64 `json:"timeout,omitempty" jsonschema:"seconds for each of the queue and GUI execution budgets, more than 0 and at most 1800, overriding the 90 s default for this call; raise it for slow work that must run on the GUI thread, such as importing or exporting a large STEP assembly"`
+	Timeout *float64 `json:"timeout,omitempty" jsonschema:"seconds for each of the queue and GUI execution budgets, more than 0 and at most 1800, overriding the 90 s default for this call; raise it for other slow work that must run on the GUI thread"`
 	screenshotOptions
 }
 
@@ -32,7 +32,8 @@ type asyncStatusInput struct {
 }
 
 type executeFront struct {
-	Status string `yaml:"status"`
+	Status      string `yaml:"status"`
+	Transaction string `yaml:"transaction,omitempty"`
 }
 
 type asyncFront struct {
@@ -53,7 +54,7 @@ type headlessFront struct {
 
 const executeCodeDescription = `Execute Python code in FreeCAD on its GUI thread and wait for the result. This is the safe default for FreeCAD automation that the other tools do not cover: FreeCAD, FreeCADGui and the document are available, and whatever the code prints is returned.
 
-The code runs with a 90 s budget for waiting its turn and another for running; pass timeout to raise both for slow GUI-thread work such as importing or exporting a large STEP assembly. Without it such a call reports a timeout while the task keeps running, and its result is lost. Prefer execute_code_async for heavy pure-geometry work that touches neither the document nor the GUI, and execute_code_headless for OCCT work that may crash FreeCAD.
+The code runs with a 90 s budget for waiting its turn and another for running; pass timeout to raise both for other slow GUI-thread work that cannot move off the GUI thread. Without it such a call reports a timeout while the task keeps running, and its result is lost. Use import_file and export_document for STEP, STL, 3MF and other file exchange instead of scripting it here; prefer execute_code_async for heavy pure-geometry work that touches neither the document nor the GUI, and execute_code_headless for OCCT work that may crash FreeCAD.
 
 Set include_screenshot to false when the code does not change the model's appearance, e.g. analytical scripts whose result is printed output.`
 
@@ -84,9 +85,6 @@ const headlessDescription = `Run a FreeCAD Python script in a separate headless 
 Use this for OCCT work that can crash or block FreeCAD: helical threads (makeHelix + makePipeShell), lofts and sweeps, booleans with many or B-spline tools, long parametric rebuilds. A native OpenCascade crash here only kills the helper process; the GUI and its open documents survive, and the tool reports the crash and the script's output.
 
 The script runs on the machine running this MCP server, independently of FREECAD_MCP_HOST, in a fresh process without GUI: import FreeCAD and Part yourself, open documents from disk (FreeCAD.openDocument(path)), and save results with doc.save()/saveAs() or Shape.exportBrep(). Nothing from the execute_code namespace is available. Print progress to stdout; it is returned when the process ends. After the script saved a .FCStd that is open in the GUI, call reload_document to show the result.`
-
-// largerExecuteTimeout says how to give slow GUI-thread code more time.
-const largerExecuteTimeout = "For slow work, call execute_code again with a larger timeout (at most 1800 seconds)."
 
 func (s *Server) registerCodeTools() {
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
@@ -126,17 +124,19 @@ func (s *Server) executeCode(ctx context.Context, _ *mcp.CallToolRequest, in exe
 	}
 	res, err := conn.ExecuteCode(ctx, in.Code, in.Timeout)
 	if err != nil {
-		return s.withNotice(timedFailure("execute code", err, largerExecuteTimeout)), nil, nil
+		return s.withNotice(timedFailure("execute code", err, largerTimeout("execute_code"))), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reported("execute code", res,
 			"Fix the code and retry; FreeCAD's Report View shows the traceback. Call get_rpc_status if the GUI thread seems stuck. "+
-				largerExecuteTimeout)), nil, nil
+				largerTimeout("execute_code"))), nil, nil
 	}
-	out := render.SuccessResult(executeFront{Status: "ok"}, "Code executed successfully: "+truncateOutput(str(res, "message")))
+	txName, txMerged := transactionFields(res)
+	out := render.SuccessResult(executeFront{Status: "ok", Transaction: txName},
+		transactionNote("Code executed successfully: "+truncateOutput(str(res, "message")), txName, txMerged))
 	// A screenshot is only taken after the code completed, so a failure never
 	// queues a second GUI call behind a task that may still be running.
-	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName))), nil, nil
+	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName), "")), nil, nil
 }
 
 func (s *Server) executeCodeAsync(ctx context.Context, _ *mcp.CallToolRequest, in codeInput) (*mcp.CallToolResult, any, error) {
@@ -160,7 +160,7 @@ func (s *Server) executeCodeAsync(ctx context.Context, _ *mcp.CallToolRequest, i
 	}
 	return s.withNotice(render.SuccessResult(asyncFront{JobID: jobID, State: "running"},
 		fmt.Sprintf("Code execution started in background (job_id: %s).\n"+
-			"Poll get_async_status(job_id=%q) for state, error and traceback. "+
+			"Poll get_async_status with {\"job_id\": %q} for state, error and traceback. "+
 			"FreeCAD's Report View shows printed output when done.", jobID, jobID))), nil, nil
 }
 

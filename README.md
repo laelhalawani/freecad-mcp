@@ -1,7 +1,8 @@
 # FreeCAD MCP
 
 Control FreeCAD from Claude Desktop and other MCP clients. Create and edit models,
-run Python scripts, inspect documents, and run FEM analyses.
+import and export files, run Python scripts, inspect and measure documents,
+check printability and repair meshes, and run FEM analyses.
 
 ## Demo
 
@@ -46,10 +47,12 @@ your `PATH` and starts the setup wizard, which:
 Nothing is written until step 4, so cancelling earlier leaves your machine as
 it was.
 
-Restart FreeCAD and your AI client, then ask it to create a model. Connections
-use `localhost` by default. Without an auth token, any program running on your
-machine can call FreeCAD's RPC server; see
-[configuration](docs/configuration.md#3-require-an-auth-token) to require one.
+Restart FreeCAD and your AI client, then ask it to create a model. From then
+on, your AI client can start FreeCAD itself with the `start_freecad` tool
+whenever it is not already running. Connections use `localhost` by default.
+Without an auth token, any program running on your machine can call FreeCAD's
+RPC server; see [configuration](docs/configuration.md#3-require-an-auth-token)
+to require one.
 
 Run `freecad-mcp doctor` at any time to check the installation, and
 `freecad-mcp update` to update the server together with the addon it ships
@@ -63,7 +66,7 @@ setup and troubleshooting.
 | --- | --- |
 | [Installation](docs/installation.md) | Installer, commands, addon directories, running from source |
 | [Configuration](docs/configuration.md) | Environment variables, auto-start, text feedback, remote connections |
-| [Tools](docs/tools.md) | Available tools, screenshots, FEM analysis |
+| [Tools](docs/tools.md) | Available tools, screenshots, file import/export, printability and mesh checks, FEM analysis |
 | [Code execution](docs/execution.md) | GUI execution, background jobs, headless scripts, timeout troubleshooting |
 | [Demos and examples](docs/examples.md) | Design demos, FEM example, ADK and LangChain integrations |
 

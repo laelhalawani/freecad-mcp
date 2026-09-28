@@ -372,7 +372,10 @@ func connectionReport(ctx context.Context, w io.Writer) int {
 		fmt.Fprintf(w, "  [fail] %v\n", err)
 		return 1
 	}
-	conn := freecad.NewConnection(settings.Host, settings.Port, settings.Token, 5*time.Second)
+	// 10 s, not less: right after FreeCAD starts its GUI thread is still busy
+	// with startup Python, and a shorter bound was seen to time out here
+	// while the same ping succeeded a moment later.
+	conn := freecad.NewConnection(settings.Host, settings.Port, settings.Token, 10*time.Second)
 	defer conn.Close()
 	ok, err := conn.Ping(ctx)
 	if err != nil || !ok {
@@ -423,7 +426,7 @@ func (c executableCheck) Run(ctx context.Context) doctor.Result {
 }
 
 func freecadChecks() []doctor.Check {
-	return []doctor.Check{freecadInstallCheck{}, addonCheck{}, rpcCheck{}}
+	return []doctor.Check{freecadInstallCheck{}, freecadGUICheck{}, addonCheck{}, rpcCheck{}}
 }
 
 type freecadInstallCheck struct{}
@@ -444,6 +447,31 @@ func (c freecadInstallCheck) Run(ctx context.Context) doctor.Result {
 	cmd := headless.Detect(ctx)
 	if cmd == nil {
 		return doctor.Result{Name: c.Name(), Status: doctor.Warn, Detail: "freecadcmd not found; execute_code_headless needs it (set " + domain.EnvFreecadCmd + " if FreeCAD is installed elsewhere)"}
+	}
+	return doctor.Result{Name: c.Name(), Status: doctor.OK, Detail: strings.Join(cmd, " ")}
+}
+
+type freecadGUICheck struct{}
+
+func (freecadGUICheck) Name() string { return "FreeCAD GUI" }
+
+// Run checks that start_freecad can find a GUI executable to launch: the
+// FREECAD_MCP_FREECAD override if set, else auto-detection on PATH or in the
+// standard install locations.
+func (c freecadGUICheck) Run(ctx context.Context) doctor.Result {
+	if v := strings.TrimSpace(os.Getenv(domain.EnvFreecadGUI)); v != "" {
+		cmd, err := domain.SplitCommand(v)
+		if err != nil {
+			return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: fmt.Sprintf("%s: %v (the MCP server will not start)", domain.EnvFreecadGUI, err)}
+		}
+		if _, err := exec.LookPath(cmd[0]); err != nil {
+			return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: fmt.Sprintf("%s: %v", domain.EnvFreecadGUI, err)}
+		}
+		return doctor.Result{Name: c.Name(), Status: doctor.OK, Detail: strings.Join(cmd, " ") + " (from " + domain.EnvFreecadGUI + ")"}
+	}
+	cmd := headless.DetectGUI(ctx)
+	if cmd == nil {
+		return doctor.Result{Name: c.Name(), Status: doctor.Warn, Detail: "FreeCAD's GUI executable was not found; start_freecad needs it (set " + domain.EnvFreecadGUI + " if FreeCAD is installed elsewhere)"}
 	}
 	return doctor.Result{Name: c.Name(), Status: doctor.OK, Detail: strings.Join(cmd, " ")}
 }
@@ -527,9 +555,10 @@ func (c rpcCheck) Run(ctx context.Context) doctor.Result {
 	if err != nil {
 		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: err.Error()}
 	}
-	conn := freecad.NewConnection(settings.Host, settings.Port, settings.Token, 3*time.Second)
+	// 10 s: see connectionReport's comment on the same bound.
+	conn := freecad.NewConnection(settings.Host, settings.Port, settings.Token, 10*time.Second)
 	defer conn.Close()
-	conn.VersionCheckTimeout = 3 * time.Second
+	conn.VersionCheckTimeout = 10 * time.Second
 	ok, err := conn.Ping(ctx)
 	if err != nil || !ok {
 		// FreeCAD not running is normal when nothing is being modelled.
