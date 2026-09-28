@@ -22,9 +22,9 @@ import (
 	"github.com/sairaph/mcp-wizard/cli"
 	"github.com/sairaph/mcp-wizard/harness"
 
-	"github.com/laelhalawani/freecad-mcp/internal/addoninstall"
-	"github.com/laelhalawani/freecad-mcp/internal/domain"
-	"github.com/laelhalawani/freecad-mcp/internal/headless"
+	"github.com/sairaph/freecad-mcp/internal/addoninstall"
+	"github.com/sairaph/freecad-mcp/internal/domain"
+	"github.com/sairaph/freecad-mcp/internal/headless"
 )
 
 func runUninstallAll(ctx context.Context, detector *harness.Detector, cmd cli.Command) int {

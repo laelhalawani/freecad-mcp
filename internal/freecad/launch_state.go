@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/laelhalawani/freecad-mcp/internal/domain"
-	"github.com/laelhalawani/freecad-mcp/internal/headless"
+	"github.com/sairaph/freecad-mcp/internal/domain"
+	"github.com/sairaph/freecad-mcp/internal/headless"
 )
 
 // Launch states. An empty State means this server has not launched FreeCAD.

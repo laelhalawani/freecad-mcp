@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/laelhalawani/freecad-mcp/internal/xmlrpc"
+	"github.com/sairaph/freecad-mcp/internal/xmlrpc"
 )
 
 // Budget defaults. The addon reports its own run budgets through

@@ -18,7 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/laelhalawani/freecad-mcp/internal/headless"
+	"github.com/sairaph/freecad-mcp/internal/headless"
 )
 
 // Target is one FreeCAD user data directory the addon can be installed into.

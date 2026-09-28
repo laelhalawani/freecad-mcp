@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/laelhalawani/freecad-mcp/internal/xmlrpc"
+	"github.com/sairaph/freecad-mcp/internal/xmlrpc"
 )
 
 // Handler answers one method. Returning a *xmlrpc.Fault sends a fault.

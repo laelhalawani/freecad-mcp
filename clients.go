@@ -23,7 +23,7 @@ import (
 	"github.com/tailscale/hujson"
 	"gopkg.in/yaml.v3"
 
-	"github.com/laelhalawani/freecad-mcp/internal/domain"
+	"github.com/sairaph/freecad-mcp/internal/domain"
 )
 
 type entryKind int

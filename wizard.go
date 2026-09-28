@@ -19,7 +19,7 @@ import (
 	"github.com/sairaph/mcp-wizard/harness"
 	"github.com/sairaph/mcp-wizard/secret"
 
-	"github.com/laelhalawani/freecad-mcp/internal/domain"
+	"github.com/sairaph/freecad-mcp/internal/domain"
 )
 
 // exitCancelled is the exit status of a wizard left before anything was

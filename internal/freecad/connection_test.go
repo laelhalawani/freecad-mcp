@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/laelhalawani/freecad-mcp/internal/domain"
-	"github.com/laelhalawani/freecad-mcp/internal/freecad"
-	"github.com/laelhalawani/freecad-mcp/internal/xmlrpc"
-	"github.com/laelhalawani/freecad-mcp/internal/xmlrpc/xmlrpctest"
+	"github.com/sairaph/freecad-mcp/internal/domain"
+	"github.com/sairaph/freecad-mcp/internal/freecad"
+	"github.com/sairaph/freecad-mcp/internal/xmlrpc"
+	"github.com/sairaph/freecad-mcp/internal/xmlrpc/xmlrpctest"
 )
 
 func ptr[T any](v T) *T { return &v }

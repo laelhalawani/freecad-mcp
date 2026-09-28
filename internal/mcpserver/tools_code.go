@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/laelhalawani/freecad-mcp/internal/domain"
-	"github.com/laelhalawani/freecad-mcp/internal/freecad"
-	"github.com/laelhalawani/freecad-mcp/internal/headless"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sairaph/freecad-mcp/internal/domain"
+	"github.com/sairaph/freecad-mcp/internal/freecad"
+	"github.com/sairaph/freecad-mcp/internal/headless"
 	"github.com/sairaph/mcp-wizard/render"
 )
 

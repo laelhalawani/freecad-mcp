@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/laelhalawani/freecad-mcp/addon"
+	"github.com/sairaph/freecad-mcp/addon"
 )
 
 // SettingsFile is the addon's settings file in FreeCAD's user data directory.

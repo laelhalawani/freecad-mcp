@@ -19,7 +19,7 @@ import (
 const (
 	ServerName = "freecad"
 	BinaryName = "freecad-mcp"
-	Owner      = "laelhalawani"
+	Owner      = "sairaph"
 	Repo       = "freecad-mcp"
 )
 

@@ -11,9 +11,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/laelhalawani/freecad-mcp/internal/domain"
-	"github.com/laelhalawani/freecad-mcp/internal/xmlrpc/xmlrpctest"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sairaph/freecad-mcp/internal/domain"
+	"github.com/sairaph/freecad-mcp/internal/xmlrpc/xmlrpctest"
 )
 
 var pngBytes = []byte("\x89PNG\r\n\x1a\nfake")

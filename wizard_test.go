@@ -14,7 +14,7 @@ import (
 	"github.com/sairaph/mcp-wizard/installer"
 	"github.com/sairaph/mcp-wizard/secret"
 
-	"github.com/laelhalawani/freecad-mcp/internal/addoninstall"
+	"github.com/sairaph/freecad-mcp/internal/addoninstall"
 )
 
 // readyHarnessStep returns mcp-wizard's real harness step, wrapped as the

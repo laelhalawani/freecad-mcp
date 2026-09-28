@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/laelhalawani/freecad-mcp/internal/domain"
-	"github.com/laelhalawani/freecad-mcp/internal/freecad"
-	"github.com/laelhalawani/freecad-mcp/internal/xmlrpc"
+	"github.com/sairaph/freecad-mcp/internal/domain"
+	"github.com/sairaph/freecad-mcp/internal/freecad"
+	"github.com/sairaph/freecad-mcp/internal/xmlrpc"
 	"github.com/sairaph/mcp-wizard/render"
 )
 
