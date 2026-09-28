@@ -14,6 +14,7 @@ the `env` block of the `freecad` entry in your AI client's configuration:
 | `FREECAD_MCP_TOKEN` | the stored token (see [below](#3-require-an-auth-token)) | Auth token the RPC server requires, when one is set in FreeCAD. |
 | `FREECAD_MCP_ONLY_TEXT_FEEDBACK` | `false` | `true` omits the optional screenshots from tool replies. |
 | `FREECAD_MCP_FREECADCMD` | auto-detected | Command that starts headless FreeCAD for `execute_code_headless`. |
+| `FREECAD_MCP_FREECAD` | auto-detected | Command that starts FreeCAD's GUI for `start_freecad`, when it is not found on `PATH` or in a standard install location. |
 | `TRANSPORT` | `stdio` | `http` serves MCP over Streamable HTTP instead. |
 | `ADDR` | `127.0.0.1:8080` | Listen address when `TRANSPORT=http`. |
 
@@ -58,6 +59,27 @@ FreeCAD:
 The setting is saved to `freecad_mcp_settings.json` in FreeCAD's user data
 directory and persists across sessions. With it on, the RPC server starts once
 FreeCAD finishes loading.
+
+## Starting FreeCAD from your AI client
+
+The `start_freecad` tool starts FreeCAD's GUI on this machine when nothing
+answers yet. It pings first: if FreeCAD already answers, it reports
+`already_running` and starts nothing. Otherwise it launches FreeCAD detached
+from the MCP server with a startup macro that starts the RPC server on the
+configured port, so the addon's auto-start setting does not matter either way.
+When another FreeCAD window is already open without the RPC server, that
+FreeCAD receives the request instead (`forwarded`) through FreeCAD's own
+single-instance handling.
+
+`start_freecad` sets `FREECAD_MCP_PORT` in the FreeCAD process it launches, so
+that if auto-start is also on, it binds the same port this server expects
+instead of racing the startup macro for the default one. Only a local FreeCAD
+can be started this way: with `FREECAD_MCP_HOST` pointed at another machine,
+start FreeCAD there instead. Set `FREECAD_MCP_FREECAD` when FreeCAD's GUI
+executable is installed somewhere the server does not find automatically;
+`freecad-mcp doctor` shows what it found. After calling `start_freecad`, poll
+`get_rpc_status` every few seconds until it reports `rpc: reachable`; a first
+start can take 15 seconds or more.
 
 ## Text feedback and screenshots
 

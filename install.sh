@@ -5,7 +5,7 @@
 #   curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.sh | sh
 #
 # Environment:
-#   VERSION=v0.2.1           install a specific release instead of the latest
+#   VERSION=v0.3.0           install a specific release instead of the latest
 #   CONFIGURE_ARGS="--yes"   extra flags for the setup wizard
 OWNER="laelhalawani"
 REPO="freecad-mcp"

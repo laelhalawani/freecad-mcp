@@ -42,13 +42,21 @@ type objectInput struct {
 
 type documentInput struct {
 	DocName string `json:"doc_name" jsonschema:"the name of the document"`
+	Compact *bool  `json:"compact,omitempty" jsonschema:"compact rows (name, label, type, state, valid, parent, visible) instead of the full property list of each object; default false"`
 	screenshotOptions
 }
 
+// listObjectsDefaults omits include_screenshot: with compact, the
+// screenshot defaults to off instead of the on every other tool defaults to,
+// so no single JSON literal fits both modes; the tool description states the
+// rule instead.
+var listObjectsDefaults = map[string]string{"compact": "false", "view_name": `"Isometric"`}
+
 type objectFront struct {
-	Document string `yaml:"document"`
-	Object   string `yaml:"object_name"`
-	Type     string `yaml:"object_type,omitempty"`
+	Document    string `yaml:"document"`
+	Object      string `yaml:"object_name"`
+	Type        string `yaml:"object_type,omitempty"`
+	Transaction string `yaml:"transaction,omitempty"`
 }
 
 type objectsFront struct {
@@ -110,8 +118,11 @@ func (s *Server) registerObjectTools() {
 		Name: "list_objects",
 		Description: "List every object in a document with its type and properties. Use it before changing a " +
 			"document to see what exists and which names to pass to get_object, update_object and delete_object. " +
-			"An unknown document gives an empty list; list_documents shows the open ones.",
-		InputSchema: inputSchema[documentInput](screenshotDefaults),
+			"Pass compact true for a short row per object (name, label, type, state, valid, parent, visible) " +
+			"instead of every property; a compact call takes no screenshot unless include_screenshot is passed " +
+			"as true, since the point of compact is a quick, cheap read. An unknown document gives an empty " +
+			"list; list_documents shows the open ones.",
+		InputSchema: inputSchema[documentInput](listObjectsDefaults),
 	}, s.listObjects)
 
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
@@ -152,18 +163,18 @@ func (s *Server) createObject(ctx context.Context, req *mcp.CallToolRequest, in 
 			return s.withNotice(render.ErrorResult(render.Error{
 				Code:    codeFreeCAD,
 				Message: shortMessage(fmt.Sprintf("Object '%s' was created in '%s' but is not valid: %s", name, in.DocName, errorText(res))),
-				Hint: fmt.Sprintf("Fix it with update_object {\"doc_name\": %q, \"obj_name\": %q, \"obj_properties\": {...}}, "+
-					"or remove it with delete_object {\"doc_name\": %q, \"obj_name\": %q}.", in.DocName, name, in.DocName, name),
-				Fields: map[string]any{"object_name": name},
+				Hint:    fixOrRemoveHint(in.DocName, name),
+				Fields:  map[string]any{"object_name": name},
 			})), nil, nil
 		}
 		return s.withNotice(reported("create object", res,
 			fmt.Sprintf("Check obj_type and the property names; call list_objects with {\"doc_name\": %q} to see the document.", in.DocName))), nil, nil
 	}
 	name := str(res, "object_name")
-	out := render.SuccessResult(objectFront{Document: in.DocName, Object: name, Type: in.ObjType},
-		fmt.Sprintf("Object '%s' created successfully.", name))
-	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName))), nil, nil
+	txName, txMerged := transactionFields(res)
+	out := render.SuccessResult(objectFront{Document: in.DocName, Object: name, Type: in.ObjType, Transaction: txName},
+		transactionNote(fmt.Sprintf("Object '%s' created successfully.", name), txName, txMerged))
+	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName), in.DocName)), nil, nil
 }
 
 func (s *Server) updateObject(ctx context.Context, req *mcp.CallToolRequest, in updateObjectInput) (*mcp.CallToolResult, any, error) {
@@ -184,9 +195,10 @@ func (s *Server) updateObject(ctx context.Context, req *mcp.CallToolRequest, in 
 			fmt.Sprintf("Call get_object with {\"doc_name\": %q, \"obj_name\": %q} to see its properties.", in.DocName, in.ObjName))), nil, nil
 	}
 	name := str(res, "object_name")
-	out := render.SuccessResult(objectFront{Document: in.DocName, Object: name},
-		fmt.Sprintf("Object '%s' updated successfully.", name))
-	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName))), nil, nil
+	txName, txMerged := transactionFields(res)
+	out := render.SuccessResult(objectFront{Document: in.DocName, Object: name, Transaction: txName},
+		transactionNote(fmt.Sprintf("Object '%s' updated successfully.", name), txName, txMerged))
+	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName), in.DocName)), nil, nil
 }
 
 func (s *Server) deleteObject(ctx context.Context, _ *mcp.CallToolRequest, in objectInput) (*mcp.CallToolResult, any, error) {
@@ -203,9 +215,10 @@ func (s *Server) deleteObject(ctx context.Context, _ *mcp.CallToolRequest, in ob
 			fmt.Sprintf("Call list_objects with {\"doc_name\": %q} to see the object names.", in.DocName))), nil, nil
 	}
 	name := str(res, "object_name")
-	out := render.SuccessResult(objectFront{Document: in.DocName, Object: name},
-		fmt.Sprintf("Object '%s' deleted successfully.", name))
-	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName))), nil, nil
+	txName, txMerged := transactionFields(res)
+	out := render.SuccessResult(objectFront{Document: in.DocName, Object: name, Transaction: txName},
+		transactionNote(fmt.Sprintf("Object '%s' deleted successfully.", name), txName, txMerged))
+	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName), in.DocName)), nil, nil
 }
 
 func (s *Server) listObjects(ctx context.Context, _ *mcp.CallToolRequest, in documentInput) (*mcp.CallToolResult, any, error) {
@@ -213,7 +226,8 @@ func (s *Server) listObjects(ctx context.Context, _ *mcp.CallToolRequest, in doc
 	if err != nil {
 		return failure("list objects", err, ""), nil, nil
 	}
-	objects, err := conn.GetObjects(ctx, in.DocName)
+	compact := boolOr(in.Compact, false)
+	objects, err := conn.GetObjects(ctx, in.DocName, compact)
 	if err != nil {
 		return s.withNotice(failure("list objects", err, "")), nil, nil
 	}
@@ -226,7 +240,12 @@ func (s *Server) listObjects(ctx context.Context, _ *mcp.CallToolRequest, in doc
 		body += "\nThe document is empty or not open. Call list_documents to see the open documents."
 	}
 	out := render.SuccessResult(objectsFront{Document: in.DocName, Count: count}, body)
-	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName))), nil, nil
+	includeScreenshot := in.IncludeScreenshot
+	if compact && includeScreenshot == nil {
+		off := false
+		includeScreenshot = &off
+	}
+	return s.withNotice(s.screenshot(ctx, conn, out, includeScreenshot, viewString(in.ViewName), in.DocName)), nil, nil
 }
 
 func (s *Server) getObject(ctx context.Context, _ *mcp.CallToolRequest, in objectInput) (*mcp.CallToolResult, any, error) {
@@ -246,5 +265,5 @@ func (s *Server) getObject(ctx context.Context, _ *mcp.CallToolRequest, in objec
 		})), nil, nil
 	}
 	out := render.SuccessResult(objectFront{Document: in.DocName, Object: in.ObjName}, jsonBlock(object))
-	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName))), nil, nil
+	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName), in.DocName)), nil, nil
 }

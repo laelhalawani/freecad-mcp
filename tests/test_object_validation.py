@@ -13,6 +13,8 @@ if str(ADDON_DIR) not in sys.path:
 
 from rpc_server.object_validation import object_validity_error
 
+from test_gui_dispatch import reset_transactions_import
+
 
 OBJECT_FACTORY_PATH = (
     ADDON_DIR / "rpc_server" / "object_factory.py"
@@ -52,7 +54,7 @@ def load_object_factory(
     doc: FakeDocument,
 ) -> Iterator[types.ModuleType]:
     """Load object_factory with minimal FreeCAD/ObjectsFem test doubles."""
-    module_names = ["FreeCAD", "ObjectsFem", "rpc_server.property_mapper"]
+    module_names = ["FreeCAD", "ObjectsFem", "rpc_server.property_mapper", "rpc_server.transactions"]
     missing = object()
     saved = {name: sys.modules.get(name, missing) for name in module_names}
 
@@ -61,10 +63,35 @@ def load_object_factory(
     freecad.DocumentObject = object
     freecad.Console = FakeConsole
     freecad.getDocument = lambda _name: doc
+    # rpc_server.transactions wraps create_object_gui/edit_object_gui in a
+    # FreeCAD transaction; a real FreeCAD always has these, so the fake needs
+    # them.
+    freecad.getActiveTransaction = lambda: None
+    freecad.setActiveTransaction = lambda _name, persist=False: 1
+    freecad.closeActiveTransaction = lambda abort=False, id=0: None
+    # object_factory.active_document reads FreeCAD.ActiveDocument and calls
+    # FreeCAD.setActiveDocument(name); a real FreeCAD always has both, so the
+    # fake needs them too.
+    freecad.ActiveDocument = None
+
+    def _set_active_document(name: str) -> None:
+        # Mirrors Application::setActiveDocument (Application.cpp:1059-1074):
+        # "" only clears the internal pointer, not the Python-visible
+        # FreeCAD.ActiveDocument (it returns before the code that syncs that
+        # attribute); an unknown name raises.
+        if name == "":
+            return
+        elif name == doc.Name:
+            freecad.ActiveDocument = doc
+        else:
+            raise RuntimeError(f"Try to activate unknown document '{name}'")
+
+    freecad.setActiveDocument = _set_active_document
 
     sys.modules["FreeCAD"] = freecad
     sys.modules["ObjectsFem"] = types.ModuleType("ObjectsFem")
     sys.modules.pop("rpc_server.property_mapper", None)
+    reset_transactions_import()
 
     module_name = f"_object_factory_test_{id(doc)}"
     try:
@@ -199,7 +226,12 @@ def test_create_object_accepts_valid_shapeless_object() -> None:
         )
         result = object_factory.create_object_gui("Doc", request)
 
-    assert result == {"success": True, "object_name": "Body"}
+    assert result == {
+        "success": True,
+        "object_name": "Body",
+        "transaction": "MCP: create_object",
+        "transaction_merged": False,
+    }
 
 
 def test_edit_object_returns_failure_with_existing_object_name() -> None:

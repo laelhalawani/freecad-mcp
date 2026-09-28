@@ -2,12 +2,10 @@ import FreeCAD
 import FreeCADGui
 
 import contextlib
-import base64
 import io
 import math
 import os
 import re
-import tempfile
 import threading
 import time
 import uuid
@@ -19,6 +17,7 @@ from xmlrpc.server import resolve_dotted_attribute
 from PySide import QtCore
 
 from rpc_server.commands import register_commands, schedule_toggle_sync
+from rpc_server.errors import CONFLICT, INVALID_INPUT, NOT_FOUND, fail, tool_call
 from rpc_server.fem_executor import run_fem_analysis as _run_fem_analysis
 from rpc_server.gui_dispatch import (
     cleanup_waker,
@@ -29,13 +28,20 @@ from rpc_server.gui_dispatch import (
     request_shutdown,
 )
 from rpc_server.ip_filter import FilteredXMLRPCServer, validate_allowed_ips
+from rpc_server.lookup import require_document
 from rpc_server.object_factory import create_object_gui, edit_object_gui
 from rpc_server.parts_library import get_parts_list, insert_part_from_library
+from rpc_server.paths import home_example
 from rpc_server.property_mapper import Object
 from rpc_server.serialize import serialize_object
 from rpc_server.settings import load_settings, save_settings
 from rpc_server.version import PROTOCOL_VERSION, __version__ as ADDON_VERSION
-from rpc_server.view_manager import save_active_screenshot
+
+# Feature handlers (documents, import, export, mesh tools, ...) live in their
+# own modules. Each FreeCADRPC method below that serves one imports its module
+# entry point on first call and returns its reply, so FreeCAD starts without
+# loading them. The entry points run on this RPC thread and dispatch their own
+# GUI-thread work themselves.
 
 rpc_server_thread = None
 rpc_server_instance = None
@@ -121,9 +127,17 @@ def _commit_async(fn: Callable[[], Any], timeout: float = 120) -> Any:
     """Run an async script's document/view writes on the GUI thread."""
     if not getattr(_async_execution, "active", False):
         raise RuntimeError("commit() is only available inside execute_code_async workers")
-    res = dispatch_to_gui(
-        lambda: (fn(),), timeout=timeout, operation_name="async_commit"
-    )
+
+    def task() -> tuple:
+        from rpc_server.transactions import transaction
+
+        # Same reasoning as execute_code's task(): commit() has no single
+        # target document either (fn() is arbitrary script code), so no
+        # active_document wrap is applied here.
+        with transaction("execute_code_async"):
+            return (fn(),)
+
+    res = dispatch_to_gui(task, timeout=timeout, operation_name="async_commit")
     if isinstance(res, tuple):
         return res[0]
     error = _err(res)
@@ -186,7 +200,7 @@ class FreeCADRPC:
         """Report server and GUI-dispatch health without using the GUI thread."""
         with _ASYNC_JOBS_LOCK:
             running = [j["id"] for j in _ASYNC_JOBS.values() if j.get("state") == "running"]
-        return {
+        status = {
             "success": True,
             "rpc_server": "running",
             "gui_dispatch": get_dispatch_status(),
@@ -196,6 +210,16 @@ class FreeCADRPC:
             "execute_code_timeout": self.EXECUTE_CODE_TIMEOUT,
             "max_execute_code_timeout": self.MAX_EXECUTE_CODE_TIMEOUT,
         }
+        # The document snapshot is kept by an observer, so reading it never
+        # waits for the GUI thread. It adds keys but never replaces these.
+        try:
+            from rpc_server import status_snapshot
+
+            for key, value in status_snapshot.snapshot().items():
+                status.setdefault(key, value)
+        except Exception as e:
+            status["snapshot_error"] = f"{type(e).__name__}: {e}"
+        return status
 
     def get_async_status(self, job_id: str = "") -> dict[str, Any]:
         """Report background jobs without using the GUI thread.
@@ -251,8 +275,8 @@ class FreeCADRPC:
             lambda: self._edit_object_gui(doc_name, obj),
             operation_name="edit_object",
         )
-        if _ok(res):
-            return {"success": True, "object_name": obj.name}
+        if isinstance(res, dict) and res.get("success"):
+            return res
         return _err(res)
 
     def delete_object(self, doc_name: str, obj_name: str):
@@ -260,8 +284,10 @@ class FreeCADRPC:
             lambda: self._delete_object_gui(doc_name, obj_name),
             operation_name="delete_object",
         )
-        if _ok(res):
-            return {"success": True, "object_name": obj_name}
+        if isinstance(res, dict) and res.get("success"):
+            return {"success": True, "object_name": obj_name, **{
+                key: value for key, value in res.items() if key != "success"
+            }}
         return _err(res)
 
 
@@ -419,10 +445,27 @@ class FreeCADRPC:
             timeout_s = min(timeout_s, self.MAX_EXECUTE_CODE_TIMEOUT)
 
         output_buffer = io.StringIO()
+        tx_fields: dict[str, Any] = {}
 
         def task():
+            from rpc_server.transactions import transaction
+
+            # No active_document wrap here: execute_code has no single target
+            # document (the script decides, or touches none at all, or several
+            # at once via FreeCAD.getDocument(...) by name), so there is
+            # nothing we could make active on the script's behalf without
+            # guessing. A script that reads/writes FreeCAD.ActiveDocument
+            # gets whatever document is currently active, unchanged by this
+            # call; a script that names another document explicitly and only
+            # that document ends up transacted may still see FreeCAD open an
+            # empty linked "-> execute_code" transaction in whatever is active
+            # (App/Document.cpp:379-386), exactly as if the user had done the
+            # same edit by hand from the Python console while that other
+            # document was active in the GUI.
             with contextlib.redirect_stdout(output_buffer):
-                exec(code, _EXEC_NAMESPACE)
+                with transaction("execute_code") as tx:
+                    exec(code, _EXEC_NAMESPACE)
+            tx_fields.update(tx.reply_fields())
             return True
 
         res = dispatch_to_gui(
@@ -435,6 +478,7 @@ class FreeCADRPC:
             return {
                 "success": True,
                 "message": "Python code executed successfully.\nOutput: " + output_buffer.getvalue(),
+                **tx_fields,
             }
         # Log the offending code (truncated) to make errors traceable
         code_preview = code if len(code) <= 800 else code[:800] + "\n...(truncated)"
@@ -444,7 +488,12 @@ class FreeCADRPC:
         )
         return _err(res)
 
-    def get_objects(self, doc_name: str) -> list[dict[str, Any]]:
+    def get_objects(self, doc_name: str, compact: bool = False) -> list[dict[str, Any]]:
+        """List a document's objects; ``compact`` gives one short row per object."""
+        if compact:
+            from rpc_server.serialize import list_objects_gui
+
+            return _query_on_gui(lambda: list_objects_gui(doc_name), "get_objects")
         return _query_on_gui(lambda: self._get_objects_gui(doc_name), "get_objects")
 
     def _get_objects_gui(self, doc_name: str) -> list[dict[str, Any]]:
@@ -476,8 +525,10 @@ class FreeCADRPC:
             lambda: self._insert_part_from_library(relative_path),
             operation_name="insert_part_from_library",
         )
-        if _ok(res):
-            return {"success": True, "message": "Part inserted from library."}
+        if isinstance(res, dict) and res.get("success"):
+            return {"success": True, "message": "Part inserted from library.", **{
+                key: value for key, value in res.items() if key != "success"
+            }}
         return _err(res)
 
     def list_documents(self) -> list[str]:
@@ -494,61 +545,154 @@ class FreeCADRPC:
         width: int | None = None,
         height: int | None = None,
         focus_object: str | None = None,
-    ) -> str:
-        """Get a screenshot of the active view as a base64-encoded PNG string.
+        doc_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Capture a 3D view as a base64-encoded PNG (view_manager).
 
-        Returns None when there is no active view or it cannot be captured
-        (e.g., a TechDraw page or a spreadsheet). Any other failure, including
-        a GUI dispatch timeout, raises a Fault that says what went wrong.
+        ``doc_name`` names the document whose 3D view is captured; without it
+        the active view is. The reply carries the image, or a reason when
+        there is no 3D view to capture; any other failure raises a Fault.
         """
+        from rpc_server.view_manager import get_active_screenshot
 
-        def task():
-            try:
-                active_view = FreeCADGui.ActiveDocument.ActiveView
-            except Exception:
-                active_view = None
-            if active_view is None or not hasattr(active_view, "saveImage"):
-                view_type = type(active_view).__name__ if active_view is not None else "None"
-                FreeCAD.Console.PrintWarning(
-                    f"MCP RPC: view type '{view_type}' does not support screenshots\n"
-                )
-                return (None,)
-            # The GUI thread owns the temporary file from creation to removal:
-            # a caller that timed out never deletes it while saveImage writes.
-            fd, tmp_path = tempfile.mkstemp(suffix=".png")
-            os.close(fd)
-            try:
-                saved = save_active_screenshot(tmp_path, view_name, width, height, focus_object)
-                if saved is not True:
-                    return f"could not save the screenshot: {saved}"
-                with open(tmp_path, "rb") as f:
-                    data = f.read()
-            finally:
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
-            if not data:
-                return "could not save the screenshot: FreeCAD wrote an empty image"
-            return (base64.b64encode(data).decode("ascii"),)
+        return get_active_screenshot(view_name, width, height, focus_object, doc_name)
 
-        res = dispatch_to_gui(task, operation_name="get_active_screenshot")
-        if isinstance(res, tuple):
-            return res[0]
-        if isinstance(res, dict):
-            code = res.get("code", "GUI_DISPATCH_FAILED")
-            message = str(res.get("error", res))
-        else:
-            code = "SCREENSHOT_FAILED"
-            message = str(res)
-        FreeCAD.Console.PrintWarning(f"MCP RPC: screenshot failed: {message}\n")
-        raise Fault(1, f"{code}: {message}")
+    # Documents (documents.py, document_save.py)
+
+    def get_documents(self) -> dict[str, Any]:
+        from rpc_server.documents import get_documents
+
+        return get_documents()
+
+    def open_document(self, path, hidden=False, activate=True, timeout=None) -> dict[str, Any]:
+        from rpc_server.documents import open_document
+
+        return open_document(path, hidden, activate, timeout)
+
+    def activate_document(self, doc_name, view_index=None, create_view=False) -> dict[str, Any]:
+        from rpc_server.documents import activate_document
+
+        return activate_document(doc_name, view_index, create_view)
+
+    def save_document(self, doc_name, recompute=True, timeout=None) -> dict[str, Any]:
+        from rpc_server.document_save import save_document
+
+        return save_document(doc_name, recompute, timeout)
+
+    def save_document_as(
+        self, doc_name, path, overwrite=False, copy=False, recompute=True, timeout=None
+    ) -> dict[str, Any]:
+        from rpc_server.document_save import save_document_as
+
+        return save_document_as(doc_name, path, overwrite, copy, recompute, timeout)
+
+    def close_document(self, doc_name, discard_changes=False) -> dict[str, Any]:
+        from rpc_server.document_save import close_document
+
+        return close_document(doc_name, discard_changes)
+
+    # Files (importer.py, exporter.py)
+
+    def import_file(self, path, doc_name=None, options=None, timeout=None) -> dict[str, Any]:
+        from rpc_server.importer import import_file
+
+        return import_file(path, doc_name, options, timeout)
+
+    def export_document(self, doc_name, path, options=None, timeout=None) -> dict[str, Any]:
+        from rpc_server.exporter import export_document
+
+        return export_document(doc_name, path, options, timeout)
+
+    # Checks (recompute.py, printability.py)
+
+    def recompute_document(self, doc_name, timeout=None) -> dict[str, Any]:
+        from rpc_server.recompute import recompute_document
+
+        return recompute_document(doc_name, timeout)
+
+    def check_printability(self, doc_name, object_names=None, options=None, timeout=None) -> dict[str, Any]:
+        from rpc_server.printability import check_printability
+
+        return check_printability(doc_name, object_names, options, timeout)
+
+    # Meshes (mesh_tools.py)
+
+    def analyze_mesh(self, doc_name, obj_name, timeout=None) -> dict[str, Any]:
+        from rpc_server.mesh_tools import analyze_mesh
+
+        return analyze_mesh(doc_name, obj_name, timeout)
+
+    def repair_mesh(self, doc_name, obj_name, steps=None, options=None, timeout=None) -> dict[str, Any]:
+        from rpc_server.mesh_tools import repair_mesh
+
+        return repair_mesh(doc_name, obj_name, steps, options, timeout)
+
+    def mesh_to_solid(self, doc_name, obj_name, options=None, timeout=None) -> dict[str, Any]:
+        from rpc_server.mesh_tools import mesh_to_solid
+
+        return mesh_to_solid(doc_name, obj_name, options, timeout)
+
+    def solid_to_mesh(self, doc_name, obj_name, options=None, timeout=None) -> dict[str, Any]:
+        from rpc_server.mesh_tools import solid_to_mesh
+
+        return solid_to_mesh(doc_name, obj_name, options, timeout)
+
+    # Undo and redo (undo.py)
+
+    def undo(self, doc_name, steps=1) -> dict[str, Any]:
+        from rpc_server.undo import undo
+
+        return undo(doc_name, steps)
+
+    def redo(self, doc_name, steps=1) -> dict[str, Any]:
+        from rpc_server.undo import redo
+
+        return redo(doc_name, steps)
+
+    # Spreadsheets (spreadsheet.py)
+
+    def get_spreadsheet_cells(self, doc_name, sheet_name, cells=None) -> dict[str, Any]:
+        from rpc_server.spreadsheet import get_spreadsheet_cells
+
+        return get_spreadsheet_cells(doc_name, sheet_name, cells)
+
+    def update_spreadsheet_cells(self, doc_name, sheet_name, cells, recompute=True) -> dict[str, Any]:
+        from rpc_server.spreadsheet import update_spreadsheet_cells
+
+        return update_spreadsheet_cells(doc_name, sheet_name, cells, recompute)
+
+    # Inspection (measure.py, selection.py)
+
+    def measure(self, doc_name, kind, refs) -> dict[str, Any]:
+        from rpc_server.measure import measure
+
+        return measure(doc_name, kind, refs)
+
+    def get_selection(self, doc_name=None) -> dict[str, Any]:
+        from rpc_server.selection import get_selection
+
+        return get_selection(doc_name)
 
     def _create_document_gui(self, name):
-        doc = FreeCAD.newDocument(name)
-        doc.recompute()
+        from rpc_server.transactions import transaction
+
+        # No active_document wrap needed here (unlike create_object/
+        # edit_object/delete_object/run_fem_analysis): FreeCAD.newDocument
+        # makes the new document the Application's active document itself,
+        # synchronously, before returning and before any property of it can
+        # be changed (App/Application.cpp:505-517, the "temporary" restore
+        # branch there does not apply since we do not pass temp=True). So by
+        # the time doc.recompute() below can open the per-document
+        # transaction, doc already IS the active document and no linked "->"
+        # transaction can be opened elsewhere. Also, unlike those other
+        # tools, create_document's whole point is to give the caller a new,
+        # current document to work in, so leaving it active (rather than
+        # restoring whatever was active before) is intentional.
+        with transaction("create_document") as tx:
+            doc = FreeCAD.newDocument(name)
+            doc.recompute()
         FreeCAD.Console.PrintMessage(f"Document '{doc.Name}' created via RPC.\n")
-        return {"success": True, "document_name": doc.Name}
+        return {"success": True, "document_name": doc.Name, **tx.reply_fields()}
 
     def _create_object_gui(self, doc_name, obj: Object):
         return create_object_gui(doc_name, obj)
@@ -560,6 +704,8 @@ class FreeCADRPC:
         return _run_fem_analysis(doc_name, analysis_name)
 
     def _delete_object_gui(self, doc_name: str, obj_name: str):
+        from rpc_server.transactions import active_document, transaction
+
         try:
             doc = FreeCAD.getDocument(doc_name)
         except Exception:
@@ -567,26 +713,42 @@ class FreeCADRPC:
             return f"Document '{doc_name}' not found.\n"
 
         try:
-            doc.removeObject(obj_name)
-            doc.recompute()
+            # active_document (transactions.py) holds doc active for the
+            # transaction's whole life, else FreeCAD can open an empty linked
+            # "-> delete_object" transaction in whatever document the GUI has
+            # focused (App/Document.cpp:379-386).
+            with active_document(doc), transaction("delete_object") as tx:
+                doc.removeObject(obj_name)
+                doc.recompute()
             FreeCAD.Console.PrintMessage(f"Object '{obj_name}' deleted via RPC.\n")
-            return True
+            return {"success": True, **tx.reply_fields()}
         except Exception as e:
             return str(e)
 
 
     def _reload_document_gui(self, doc_name: str):
-        if doc_name not in FreeCAD.listDocuments():
-            return f"Document '{doc_name}' is not loaded."
-        doc = FreeCAD.getDocument(doc_name)
+        doc, error = require_document(doc_name)
+        if error is not None:
+            return error
         file_path = doc.FileName
         if not file_path:
-            return (
+            suggested_path = home_example(f"{doc_name}.FCStd")
+            return fail(
+                CONFLICT,
                 f"Document '{doc_name}' has no file on disk "
-                "(unsaved scratch document); nothing to reload from."
+                "(unsaved scratch document); nothing to reload from.",
+                "Call "
+                + tool_call("save_document_as", {"doc_name": doc_name, "path": suggested_path})
+                + " to save it first.",
             )
         if not os.path.exists(file_path):
-            return f"File for '{doc_name}' not found at {file_path!r}."
+            return fail(
+                NOT_FOUND,
+                f"File for '{doc_name}' not found at {file_path!r}.",
+                "Call "
+                + tool_call("save_document_as", {"doc_name": doc_name, "path": file_path, "overwrite": True})
+                + " to write it there again, or check the path.",
+            )
         # Close, then reopen from the same file. FreeCAD names the reopened
         # document after the file (de-duplicated against open documents), so
         # report the name it actually received.
@@ -600,20 +762,38 @@ class FreeCADRPC:
 
     def _insert_part_from_library(self, relative_path):
         try:
-            insert_part_from_library(relative_path)
-            return True
+            tx_fields = insert_part_from_library(relative_path)
+            return {"success": True, **(tx_fields or {})}
+        except FileNotFoundError as e:
+            return fail(
+                NOT_FOUND,
+                str(e),
+                "Call " + tool_call("list_parts", {}) + " to see the available parts.",
+            )
+        except ValueError as e:
+            return fail(
+                INVALID_INPUT,
+                str(e),
+                "Call " + tool_call("list_parts", {}) + " to see the available parts.",
+            )
         except Exception as e:
             return str(e)
 
-    def _save_active_screenshot(
-        self,
-        save_path: str,
-        view_name: str = "Isometric",
-        width: int | None = None,
-        height: int | None = None,
-        focus_object: str | None = None,
-    ):
-        return save_active_screenshot(save_path, view_name, width, height, focus_object)
+
+def _status_snapshot_hook(action: str) -> None:
+    """Install or remove the document observer behind get_rpc_status.
+
+    A failure is reported on the Console and never stops the server from
+    starting or stopping: get_rpc_status then reports the snapshot error.
+    """
+    try:
+        from rpc_server import status_snapshot
+
+        getattr(status_snapshot, action)()
+    except Exception as e:
+        FreeCAD.Console.PrintWarning(
+            f"MCP RPC: document snapshot {action} failed: {type(e).__name__}: {e}\n"
+        )
 
 
 def start_rpc_server(port: int = 9875) -> str:
@@ -674,6 +854,7 @@ def start_rpc_server(port: int = 9875) -> str:
 
     rpc_server_instance = server
     rpc_server_thread = thread
+    _status_snapshot_hook("install")
     bound_host, bound_port = server.server_address
     msg = f"RPC Server started at {bound_host}:{bound_port} (PID {os.getpid()})."
     if remote_enabled:
@@ -696,6 +877,7 @@ def stop_rpc_server():
 
     request_shutdown()
     cleanup_waker()
+    _status_snapshot_hook("remove")
 
     def _shutdown_and_close():
         # shutdown() only stops the accept loop; in-flight requests run in

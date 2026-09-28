@@ -27,7 +27,13 @@ def rpc_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.ModuleType]:
         freecad = dispatch.FreeCAD
         freecad.Console.PrintMessage = lambda _message: None
         freecad.Console.PrintWarning = lambda _message: None
+        # Name, Label, FileName and Temporary are read by status_snapshot.py
+        # (through start_rpc_server) the way App/Document.pyi describes them.
         document = types.SimpleNamespace(
+            Name="Doc",
+            Label="Doc",
+            FileName="",
+            Temporary=False,
             Objects=[types.SimpleNamespace(Name="Box")],
             getObject=lambda name: types.SimpleNamespace(Name=name) if name == "Box" else None,
         )
@@ -39,6 +45,30 @@ def rpc_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.ModuleType]:
 
         freecad.getDocument = get_document
         freecad.listDocuments = lambda: {"Doc": document}
+        freecad.ActiveDocument = document
+
+        def _set_active_document(name: str) -> None:
+            # Mirrors Application::setActiveDocument (Application.cpp:1059-1074):
+            # "" only clears the internal pointer, not the Python-visible
+            # FreeCAD.ActiveDocument (it returns before the code that syncs
+            # that attribute); an unknown name raises. rpc_server.transactions
+            # .active_document (delete_object and others) calls this.
+            if name == "":
+                return
+            elif name == document.Name:
+                freecad.ActiveDocument = document
+            else:
+                raise RuntimeError(f"Try to activate unknown document '{name}'")
+
+        freecad.setActiveDocument = _set_active_document
+        # status_snapshot.install() (start_rpc_server) reads these; real shapes
+        # are Application::Version() (major, minor, point, revision, repository
+        # URL, revision date, always present; branch and hash only when set,
+        # App/ApplicationPy.cpp:602-632) and addDocumentObserver/
+        # removeDocumentObserver (App/ApplicationPy.cpp:196).
+        freecad.Version = lambda: ["1", "1", "3", "", "", ""]
+        freecad.addDocumentObserver = lambda _observer: None
+        freecad.removeDocumentObserver = lambda _observer: None
         stubs = {
             "gui_dispatch": dispatch,
             "commands": types.SimpleNamespace(
@@ -46,15 +76,29 @@ def rpc_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.ModuleType]:
             ),
             "fem_executor": types.SimpleNamespace(run_fem_analysis=lambda *_args: None),
             "object_factory": types.SimpleNamespace(
-                create_object_gui=lambda *_args: None, edit_object_gui=lambda *_args: None
+                create_object_gui=lambda *_args: None, edit_object_gui=lambda *_args: None,
             ),
             "property_mapper": types.SimpleNamespace(Object=object),
             "parts_library": types.SimpleNamespace(
                 get_parts_list=lambda: [], insert_part_from_library=lambda _path: None
             ),
-            "serialize": types.SimpleNamespace(serialize_object=lambda obj: {"Name": obj.Name}),
+            "serialize": types.SimpleNamespace(
+                serialize_object=lambda obj: {"Name": obj.Name},
+                list_objects_gui=lambda _doc_name: [],
+            ),
             "settings": types.SimpleNamespace(load_settings=lambda: {}, save_settings=lambda _: None),
-            "view_manager": types.SimpleNamespace(save_active_screenshot=lambda *_args: True),
+            "view_manager": types.SimpleNamespace(
+                # No test here reads this reply; it only has to be shaped like
+                # the real one so a test that starts to would see the real
+                # keys. The hint is copied verbatim from view_manager.py's
+                # _no_document_reply (the "no_document" reason this stub uses).
+                get_active_screenshot=lambda *_args: {
+                    "success": False, "code": "unavailable",
+                    "error": "no 3D view in this fixture", "reason": "no_document",
+                    "hint": 'Call create_document with {"name": "MyDocument"} or '
+                    'open_document with {"path": "C:/path/to/file.FCStd"}, then call get_view again.',
+                },
+            ),
         }
         with monkeypatch.context() as patch:
             for name, stub in stubs.items():

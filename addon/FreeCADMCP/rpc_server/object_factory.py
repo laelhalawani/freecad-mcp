@@ -11,13 +11,12 @@ factory here (``Part::Tube`` and the Draft shapes), and
 object after recompute and report the actual object name.
 """
 
-from contextlib import contextmanager
-
 import FreeCAD
 import ObjectsFem
 
 from rpc_server.property_mapper import Object, set_object_property
 from rpc_server.object_validation import object_validity_error
+from rpc_server.transactions import active_document, transaction
 
 
 def _create_fem_mesh(doc: FreeCAD.Document, obj: Object):
@@ -83,26 +82,6 @@ def _create_fem_object(doc: FreeCAD.Document, obj: Object):
     if obj.type != "Fem::AnalysisPython" and obj.analysis:
         getattr(doc, obj.analysis).addObject(res)
     return res
-
-
-@contextmanager
-def _active_document(doc: FreeCAD.Document):
-    """Make ``doc`` the active document for the duration of the block.
-
-    The Draft factories create into ``FreeCAD.ActiveDocument`` rather than a
-    document passed in, so without this an RPC call naming one document can
-    drop geometry into whichever one the GUI happens to have focused.
-    """
-    previous = FreeCAD.ActiveDocument
-    FreeCAD.setActiveDocument(doc.Name)
-    try:
-        yield
-    finally:
-        if previous is not None:
-            try:
-                FreeCAD.setActiveDocument(previous.Name)
-            except Exception:
-                pass
 
 
 def _require(properties: dict, key: str, obj_type: str):
@@ -179,9 +158,9 @@ def _make_draft_wire(doc, name, properties):
 #: Types implemented in Python rather than C++, so absent from FreeCAD's type
 #: registry and rejected by ``doc.addObject``. Each entry adapts the real
 #: factory to a uniform ``(doc, name, properties) -> DocumentObject`` call.
-#: The signatures genuinely differ -- addTube takes the document and name,
-#: the Draft factories take geometry and neither -- so this cannot collapse
-#: into a (module, function) lookup the way the Fem:: branch does.
+#: The signatures genuinely differ: addTube takes the document and name,
+#: while the Draft factories take geometry and neither, so this cannot
+#: collapse into a (module, function) lookup the way the Fem:: branch does.
 _PYTHON_FACTORIES = {
     "Part::Tube": _make_tube,
     "Draft::Circle": _make_draft_circle,
@@ -193,7 +172,7 @@ _PYTHON_FACTORIES = {
 
 def _create_python_object(doc: FreeCAD.Document, obj: Object):
     """Create a Python-implemented feature via its factory."""
-    with _active_document(doc):
+    with active_document(doc):
         res = _PYTHON_FACTORIES[obj.type](doc, obj.name, obj.properties)
     if res is None:
         raise ValueError(f"The factory for '{obj.type}' returned no object.")
@@ -268,22 +247,31 @@ def create_object_gui(doc_name: str, obj: Object):
         FreeCAD.Console.PrintError(f"Document '{doc_name}' not found.\n")
         return f"Document '{doc_name}' not found.\n"
     try:
-        if obj.type == "Fem::FemMeshGmsh":
-            if not obj.analysis:
-                return (
-                    "Fem::FemMeshGmsh requires an 'analysis_name' naming the "
-                    "Fem::AnalysisPython container to add the mesh to."
-                )
-            created = _create_fem_mesh(doc, obj)
-        elif obj.type.startswith("Fem::"):
-            created = _create_fem_object(doc, obj)
-        elif obj.type in _PYTHON_FACTORIES:
-            created = _create_python_object(doc, obj)
-        else:
-            created = _create_generic_object(doc, obj)
+        # active_document holds doc active for as long as its transaction can
+        # be open, so FreeCAD attaches the transaction to doc itself instead
+        # of opening an empty linked one in whatever document the GUI has
+        # focused (transactions.active_document docstring).
+        with active_document(doc), transaction("create_object") as tx:
+            if obj.type == "Fem::FemMeshGmsh":
+                if not obj.analysis:
+                    return (
+                        "Fem::FemMeshGmsh requires an 'analysis_name' naming the "
+                        "Fem::AnalysisPython container to add the mesh to."
+                    )
+                created = _create_fem_mesh(doc, obj)
+            elif obj.type.startswith("Fem::"):
+                created = _create_fem_object(doc, obj)
+            elif obj.type in _PYTHON_FACTORIES:
+                created = _create_python_object(doc, obj)
+            else:
+                created = _create_generic_object(doc, obj)
 
-        doc.recompute()
-        problem = object_validity_error(created)
+            doc.recompute()
+            problem = object_validity_error(created)
+        # The transaction commits above regardless of problem, so an object
+        # that failed to compute stays in the document; undo removes it, or
+        # the caller can fix it with update_object or remove it with
+        # delete_object.
         if problem:
             FreeCAD.Console.PrintError(problem + "\n")
             return {
@@ -291,7 +279,7 @@ def create_object_gui(doc_name: str, obj: Object):
                 "object_name": created.Name,
                 "error": problem,
             }
-        return {"success": True, "object_name": created.Name}
+        return {"success": True, "object_name": created.Name, **tx.reply_fields()}
     except Exception as e:
         return str(e)
 
@@ -312,9 +300,14 @@ def edit_object_gui(doc_name: str, obj: Object):
         return f"Object '{obj.name}' not found in document '{doc_name}'.\n"
 
     try:
-        set_object_property(doc, obj_ins, obj.properties)
-        doc.recompute()
-        problem = object_validity_error(obj_ins)
+        # See create_object_gui: hold doc active for the transaction's whole
+        # life so FreeCAD does not open an empty linked transaction elsewhere.
+        with active_document(doc), transaction("update_object") as tx:
+            set_object_property(doc, obj_ins, obj.properties)
+            doc.recompute()
+            problem = object_validity_error(obj_ins)
+        # Commits above regardless of problem, so a property change that left
+        # the object invalid stays applied; undo reverts it.
         if problem:
             FreeCAD.Console.PrintError(problem + "\n")
             return {
@@ -323,6 +316,6 @@ def edit_object_gui(doc_name: str, obj: Object):
                 "error": problem,
             }
         FreeCAD.Console.PrintMessage(f"Object '{obj_ins.Name}' updated via RPC.\n")
-        return True
+        return {"success": True, "object_name": obj_ins.Name, **tx.reply_fields()}
     except Exception as e:
         return str(e)

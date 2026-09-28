@@ -5,13 +5,11 @@ import unittest
 from pathlib import Path
 
 
-SERIALIZE_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "addon"
-    / "FreeCADMCP"
-    / "rpc_server"
-    / "serialize.py"
-)
+ADDON_DIR = Path(__file__).resolve().parents[1] / "addon" / "FreeCADMCP"
+if str(ADDON_DIR) not in sys.path:
+    sys.path.insert(0, str(ADDON_DIR))
+
+SERIALIZE_PATH = ADDON_DIR / "rpc_server" / "serialize.py"
 
 
 class FakeVector:

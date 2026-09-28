@@ -5,7 +5,7 @@
 #   irm https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.ps1 | iex
 #
 # To pass parameters (a specific release, or flags for the wizard):
-#   & ([scriptblock]::Create((irm <url>))) -Version v0.2.1 -ConfigureArgs "--yes"
+#   & ([scriptblock]::Create((irm <url>))) -Version v0.3.0 -ConfigureArgs "--yes"
 #
 # The whole script is one script block: with `irm ... | iex` it runs in the
 # caller's own session, and this keeps its variables, functions and

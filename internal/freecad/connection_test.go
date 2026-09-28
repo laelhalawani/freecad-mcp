@@ -216,9 +216,9 @@ func TestScreenshotSendsNilForOmittedArguments(t *testing.T) {
 		"get_active_screenshot": func([]any) (any, error) { return nil, nil },
 	})
 	c := connect(srv)
-	shot, err := c.GetActiveScreenshot(context.Background(), "Top", nil, ptr(200), nil)
-	if err != nil || shot != "" {
-		t.Fatalf("screenshot = %q, %v", shot, err)
+	shot, err := c.GetActiveScreenshot(context.Background(), "Top", nil, ptr(200), nil, "")
+	if err != nil || shot.Image != "" {
+		t.Fatalf("screenshot = %+v, %v", shot, err)
 	}
 	if got := srv.CallsTo("get_active_screenshot")[0].Params; !reflect.DeepEqual(got, []any{"Top", nil, int64(200), nil}) {
 		t.Fatalf("sent %#v", got)

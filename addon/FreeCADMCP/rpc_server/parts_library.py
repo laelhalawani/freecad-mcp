@@ -3,6 +3,8 @@ import os
 import FreeCAD
 import FreeCADGui
 
+from rpc_server.transactions import transaction
+
 
 def insert_part_from_library(relative_path):
     parts_lib_path = os.path.join(FreeCAD.getUserAppDataDir(), "Mod", "parts_library")
@@ -22,7 +24,15 @@ def insert_part_from_library(relative_path):
     if FreeCADGui.ActiveDocument is None:
         FreeCAD.newDocument()
 
-    FreeCADGui.ActiveDocument.mergeProject(part_path)
+    # No active_document wrap needed (contrast transactions.active_document):
+    # this always merges into FreeCADGui.ActiveDocument itself, so the document
+    # being mutated and the Application's active document (what
+    # Document::_openTransaction compares, App/Document.cpp:379-386) are the
+    # same object by construction; there is no "other" document whose undo
+    # stack could receive a spurious linked transaction.
+    with transaction("insert_part_from_library") as tx:
+        FreeCADGui.ActiveDocument.mergeProject(part_path)
+    return tx.reply_fields()
 
 
 def get_parts_list() -> list[str]:

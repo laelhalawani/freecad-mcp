@@ -98,15 +98,22 @@ dispatch as stuck.
 | --- | --- | --- | --- |
 | `execute_code` | 90 seconds (or `timeout`) | 90 seconds (or `timeout`) | At least `2 * timeout + 30` seconds; 210 seconds by default |
 | `run_fem_analysis` | Requested `timeout` (1 to 604800 seconds, default 600) | Requested `timeout` | At least `2 * timeout + 30` seconds |
+| `import_file`, `export_document`, `check_printability`, `repair_mesh`, `mesh_to_solid`, `solid_to_mesh` | 300 seconds (or `timeout`) | 300 seconds (or `timeout`) | At least `2 * timeout + 30` seconds; 630 seconds by default |
+| `open_document`, `save_document`, `save_document_as`, `recompute_document`, `analyze_mesh` | 120 seconds (or `timeout`) | 120 seconds (or `timeout`) | At least `2 * timeout + 30` seconds; 270 seconds by default |
 
-A GUI task cannot be cancelled once it has started, so a slower `execute_code`
-call reports a timeout while the task keeps running, and its result is discarded
-even though the work completes. Pass `timeout` (more than 0 and at most 1800
-seconds) for work that genuinely has to run on the GUI thread and takes
-longer, such as importing or exporting a large STEP assembly; the MCP server
-widens its reply timeout to match. Values outside that range are rejected
-before the MCP server contacts FreeCAD. Without `timeout` the 90-second default applies. For
-heavy pure-geometry work that touches neither the document nor the GUI, prefer
+Every other tool, including `undo`, `redo`, `measure`, `get_selection`,
+`get_spreadsheet_cells` and `update_spreadsheet_cells`, uses a fixed 60-second
+budget and takes no `timeout` argument.
+
+A GUI task cannot be cancelled once it has started, so a slower call reports a
+timeout while the task keeps running, and its result is discarded even though
+the work completes. Pass `timeout` (more than 0 and at most 1800 seconds) on a
+tool that accepts it for work that genuinely has to run on the GUI thread and
+takes longer, such as importing or exporting a large STEP assembly or checking
+printability on a dense mesh; the MCP server widens its reply timeout to
+match. Values outside that range are rejected before the MCP server contacts
+FreeCAD. Without `timeout` the tool's own default above applies. For heavy
+pure-geometry work that touches neither the document nor the GUI, prefer
 `execute_code_async`.
 
 The MCP server's timeout covers both budgets plus a 30-second margin. MCP hosts
@@ -125,8 +132,9 @@ Use `get_rpc_status` from a separate RPC client to identify the operation that
 is still running. The RPC server handles connections concurrently, so
 diagnostics do not wait for another request to finish. Document queries
 (`get_object`, `list_objects`, and `list_documents`) run on the GUI thread
-alongside modelling operations and report an RPC fault if dispatch times out or
-is stuck.
+alongside modelling operations. `list_documents` reports an `unavailable`
+error with a hint to check `get_rpc_status` if dispatch times out or is stuck;
+`get_object` and `list_objects` still report an RPC fault in that case.
 
 FreeCAD GUI work cannot be force-cancelled safely. If status does not return to
 `healthy` after the operation finishes, restart FreeCAD.

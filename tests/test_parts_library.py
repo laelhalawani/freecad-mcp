@@ -7,6 +7,8 @@ from typing import Iterator
 
 import pytest
 
+from test_gui_dispatch import reset_transactions_import
+
 ADDON_DIR = Path(__file__).resolve().parents[1] / "addon" / "FreeCADMCP"
 PARTS_LIBRARY_PATH = ADDON_DIR / "rpc_server" / "parts_library.py"
 if str(ADDON_DIR) not in sys.path:
@@ -23,13 +25,18 @@ class FakeDocument:
 
 @contextmanager
 def load_parts_library(app_data_dir: str) -> Iterator[tuple[types.ModuleType, FakeDocument]]:
-    module_names = ["FreeCAD", "FreeCADGui"]
+    module_names = ["FreeCAD", "FreeCADGui", "rpc_server.transactions"]
     missing = object()
     saved = {name: sys.modules.get(name, missing) for name in module_names}
 
     freecad = types.ModuleType("FreeCAD")
     freecad.getUserAppDataDir = lambda: app_data_dir
     freecad.newDocument = lambda: None
+    # rpc_server.transactions wraps mergeProject in a FreeCAD transaction; a
+    # real FreeCAD always has these, so the fake needs them too.
+    freecad.getActiveTransaction = lambda: None
+    freecad.setActiveTransaction = lambda _name, persist=False: 1
+    freecad.closeActiveTransaction = lambda abort=False, id=0: None
 
     active_document = FakeDocument()
     freecad_gui = types.ModuleType("FreeCADGui")
@@ -37,6 +44,7 @@ def load_parts_library(app_data_dir: str) -> Iterator[tuple[types.ModuleType, Fa
 
     sys.modules["FreeCAD"] = freecad
     sys.modules["FreeCADGui"] = freecad_gui
+    reset_transactions_import()
 
     module_name = f"_parts_library_test_{id(app_data_dir)}"
     try:
