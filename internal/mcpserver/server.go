@@ -9,8 +9,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/laelhalawani/freecad-mcp/internal/freecad"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sairaph/freecad-mcp/internal/freecad"
 )
 
 // Server wraps the MCP server and the FreeCAD connection.

@@ -1,4 +1,4 @@
-module github.com/laelhalawani/freecad-mcp
+module github.com/sairaph/freecad-mcp
 
 go 1.27.1
 

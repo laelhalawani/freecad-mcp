@@ -22,10 +22,10 @@ import (
 	"github.com/sairaph/mcp-wizard/flow"
 	"github.com/sairaph/mcp-wizard/tui"
 
-	"github.com/laelhalawani/freecad-mcp/internal/addoninstall"
-	"github.com/laelhalawani/freecad-mcp/internal/domain"
-	"github.com/laelhalawani/freecad-mcp/internal/freecad"
-	"github.com/laelhalawani/freecad-mcp/internal/headless"
+	"github.com/sairaph/freecad-mcp/internal/addoninstall"
+	"github.com/sairaph/freecad-mcp/internal/domain"
+	"github.com/sairaph/freecad-mcp/internal/freecad"
+	"github.com/sairaph/freecad-mcp/internal/headless"
 )
 
 // serverSettings reads the MCP server's settings: the environment first,

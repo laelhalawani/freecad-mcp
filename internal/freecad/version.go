@@ -3,7 +3,7 @@ package freecad
 import (
 	"fmt"
 
-	"github.com/laelhalawani/freecad-mcp/internal/domain"
+	"github.com/sairaph/freecad-mcp/internal/domain"
 )
 
 const (

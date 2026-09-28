@@ -2,12 +2,12 @@
 # Installs freecad-mcp from GitHub releases and runs its setup wizard.
 # Cancelling the wizard undoes everything this script changed.
 #
-#   curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/sairaph/freecad-mcp/releases/latest/download/install.sh | sh
 #
 # Environment:
 #   VERSION=v0.3.0           install a specific release instead of the latest
 #   CONFIGURE_ARGS="--yes"   extra flags for the setup wizard
-OWNER="laelhalawani"
+OWNER="sairaph"
 REPO="freecad-mcp"
 BIN="freecad-mcp"
 VERSION="${VERSION:-latest}"

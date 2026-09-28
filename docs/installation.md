@@ -17,13 +17,13 @@ Install [FreeCAD](https://www.freecad.org/downloads.php) first, then run:
 Windows (PowerShell):
 
 ```powershell
-irm https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.ps1 | iex
+irm https://github.com/sairaph/freecad-mcp/releases/latest/download/install.ps1 | iex
 ```
 
 macOS / Linux:
 
 ```sh
-curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/sairaph/freecad-mcp/releases/latest/download/install.sh | sh
 ```
 
 The script downloads the binary for your platform, verifies it against the
@@ -71,11 +71,11 @@ To install a specific release instead of the latest, pass `-Version`
 (PowerShell) or set `VERSION` (sh):
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/laelhalawani/freecad-mcp/releases/download/v0.3.0/install.ps1))) -Version v0.3.0
+& ([scriptblock]::Create((irm https://github.com/sairaph/freecad-mcp/releases/download/v0.3.0/install.ps1))) -Version v0.3.0
 ```
 
 ```sh
-curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/download/v0.3.0/install.sh | VERSION=v0.3.0 sh
+curl -fsSL https://github.com/sairaph/freecad-mcp/releases/download/v0.3.0/install.sh | VERSION=v0.3.0 sh
 ```
 
 ### Unattended install
@@ -101,11 +101,11 @@ To pass these through the install script, which with `--yes`, `--all`,
 `--clients` or `--token` also works without a terminal (in CI, Docker or a provisioning script):
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.ps1))) -ConfigureArgs "--yes --clients cursor"
+& ([scriptblock]::Create((irm https://github.com/sairaph/freecad-mcp/releases/latest/download/install.ps1))) -ConfigureArgs "--yes --clients cursor"
 ```
 
 ```sh
-curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.sh | CONFIGURE_ARGS="--yes --clients cursor" sh
+curl -fsSL https://github.com/sairaph/freecad-mcp/releases/latest/download/install.sh | CONFIGURE_ARGS="--yes --clients cursor" sh
 ```
 
 The flags are split at spaces; for a value that contains one, give PowerShell

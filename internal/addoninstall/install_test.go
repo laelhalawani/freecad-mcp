@@ -12,7 +12,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/laelhalawani/freecad-mcp/internal/domain"
+	"github.com/sairaph/freecad-mcp/internal/domain"
 )
 
 func TestEmbeddedAddonMatchesTheServer(t *testing.T) {

@@ -23,13 +23,13 @@ Python, and the binary installs it for you.
 Windows (PowerShell):
 
 ```powershell
-irm https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.ps1 | iex
+irm https://github.com/sairaph/freecad-mcp/releases/latest/download/install.ps1 | iex
 ```
 
 macOS / Linux:
 
 ```sh
-curl -fsSL https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/sairaph/freecad-mcp/releases/latest/download/install.sh | sh
 ```
 
 The installer downloads `freecad-mcp`, verifies its SHA256 checksum, puts it on
@@ -72,8 +72,8 @@ setup and troubleshooting.
 
 ## Contributors
 
-<a href="https://github.com/laelhalawani/freecad-mcp/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=laelhalawani/freecad-mcp" />
+<a href="https://github.com/sairaph/freecad-mcp/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=sairaph/freecad-mcp" />
 </a>
 
 Made with [contrib.rocks](https://contrib.rocks).

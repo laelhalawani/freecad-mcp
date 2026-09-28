@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/laelhalawani/freecad-mcp/internal/domain"
-	"github.com/laelhalawani/freecad-mcp/internal/freecad"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sairaph/freecad-mcp/internal/domain"
+	"github.com/sairaph/freecad-mcp/internal/freecad"
 	"github.com/sairaph/mcp-wizard/render"
 )
 

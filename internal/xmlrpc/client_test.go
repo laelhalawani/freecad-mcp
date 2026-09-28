@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/laelhalawani/freecad-mcp/internal/xmlrpc"
-	"github.com/laelhalawani/freecad-mcp/internal/xmlrpc/xmlrpctest"
+	"github.com/sairaph/freecad-mcp/internal/xmlrpc"
+	"github.com/sairaph/freecad-mcp/internal/xmlrpc/xmlrpctest"
 )
 
 func TestClientSendsTheTokenWithoutExposingIt(t *testing.T) {

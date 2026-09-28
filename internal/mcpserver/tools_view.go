@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/laelhalawani/freecad-mcp/internal/xmlrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sairaph/freecad-mcp/internal/xmlrpc"
 	"github.com/sairaph/mcp-wizard/render"
 )
 

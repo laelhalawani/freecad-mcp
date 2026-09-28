@@ -2,7 +2,7 @@
 # Cancelling the wizard undoes everything this script changed, and so does
 # Ctrl+C or an unexpected error before the wizard runs.
 #
-#   irm https://github.com/laelhalawani/freecad-mcp/releases/latest/download/install.ps1 | iex
+#   irm https://github.com/sairaph/freecad-mcp/releases/latest/download/install.ps1 | iex
 #
 # To pass parameters (a specific release, or flags for the wizard):
 #   & ([scriptblock]::Create((irm <url>))) -Version v0.3.0 -ConfigureArgs "--yes"
@@ -19,7 +19,7 @@
 & {
   [CmdletBinding(PositionalBinding = $false)]
   param(
-    [string]$Owner = "laelhalawani",
+    [string]$Owner = "sairaph",
     [string]$Repo = "freecad-mcp",
     [string]$Bin = "freecad-mcp",
     [string]$Version = "latest",
