@@ -71,9 +71,7 @@ def rpc_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.ModuleType]:
         freecad.removeDocumentObserver = lambda _observer: None
         stubs = {
             "gui_dispatch": dispatch,
-            "commands": types.SimpleNamespace(
-                register_commands=lambda: None, schedule_toggle_sync=lambda: None
-            ),
+            "commands": types.SimpleNamespace(register_commands=lambda: None),
             "fem_executor": types.SimpleNamespace(run_fem_analysis=lambda *_args: None),
             "object_factory": types.SimpleNamespace(
                 create_object_gui=lambda *_args: None, edit_object_gui=lambda *_args: None,
@@ -86,7 +84,11 @@ def rpc_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.ModuleType]:
                 serialize_object=lambda obj: {"Name": obj.Name},
                 list_objects_gui=lambda _doc_name: [],
             ),
-            "settings": types.SimpleNamespace(load_settings=lambda: {}, save_settings=lambda _: None),
+            "settings": types.SimpleNamespace(
+                load_settings=lambda: {}, save_settings=lambda _: None,
+                on_change=lambda _callback: None, poll=lambda: None,
+                unreadable=lambda: False, load_settings_or_raise=lambda: {},
+            ),
             "view_manager": types.SimpleNamespace(
                 # No test here reads this reply; it only has to be shaped like
                 # the real one so a test that starts to would see the real
@@ -492,6 +494,62 @@ def test_running_job_survives_completed_history_limit(rpc_module: types.ModuleTy
     assert len(rpc.get_async_status()["jobs"]) == 20
     # The oldest-started job just finished; completion order retains it.
     assert rpc.get_async_status(first)["success"] is True
+
+
+def test_get_async_status_is_exempt_and_sees_only_its_own_session(
+    rpc_module: types.ModuleType,
+) -> None:
+    """Live check L6: with the session lock on, get_async_status is exempt
+    (never claims, never refused) even while another session holds it, and
+    each session only ever sees the jobs it started itself. Calls go through
+    _dispatch, as SimpleXMLRPCServer does, since session_lock.guard wraps
+    only there, not a direct method call on FreeCADRPC."""
+    from rpc_server import request_context, session_lock
+
+    rpc = rpc_module.FreeCADRPC()
+    release = threading.Event()
+    rpc_module.FreeCAD.test_release = release
+    session_lock.configure(True, session_lock.DEFAULT_TIMEOUT_S)
+    job_id = None
+    try:
+        request_context.set("session-a", "Agent A", None)
+        job_id = rpc._dispatch("execute_code_async", ("FreeCAD.test_release.wait(5)",))["job_id"]
+        assert session_lock.snapshot()["holder"] == "Agent A"
+
+        request_context.set("session-b", "Agent B", None)
+        # A non-exempt call from another session is refused while session-a
+        # holds the lock...
+        with pytest.raises(Fault) as excinfo:
+            rpc._dispatch("execute_code", ("x = 1",))
+        assert excinfo.value.faultCode == session_lock.FAULT_IN_USE
+        # ...but get_async_status is exempt: it runs regardless, and it sees
+        # none of session-a's jobs.
+        assert rpc._dispatch("get_async_status", ())["jobs"] == []
+        assert rpc._dispatch("get_async_status", (job_id,)) == {
+            "success": False, "error": f"unknown async job: {job_id}",
+        }
+
+        # The holder's own session sees it while it runs.
+        request_context.set("session-a", "Agent A", None)
+        assert [j["id"] for j in rpc._dispatch("get_async_status", ())["jobs"]] == [job_id]
+        assert rpc._dispatch("get_async_status", (job_id,))["job"]["state"] == "running"
+    finally:
+        release.set()
+        if job_id is not None:
+            deadline = time.monotonic() + 2
+            while rpc.get_async_status(job_id)["job"]["state"] == "running":
+                assert time.monotonic() < deadline
+                time.sleep(0.005)
+
+    # Finished, the job stays session-filtered too.
+    request_context.set("session-b", "Agent B", None)
+    try:
+        assert rpc._dispatch("get_async_status", (job_id,)) == {
+            "success": False, "error": f"unknown async job: {job_id}",
+        }
+    finally:
+        session_lock.configure(False, session_lock.DEFAULT_TIMEOUT_S)
+        request_context.clear()
 
 
 def test_concurrent_jobs_have_unique_ids_at_fixed_clock(

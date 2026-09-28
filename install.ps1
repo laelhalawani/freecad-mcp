@@ -321,6 +321,32 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
     $code = $null
     $startError = $null
     $stage = "configure"
+    # The one-line command a user runs to reach this script, shown by the
+    # wizard's "Install FreeCAD first" screen for a re-run once FreeCAD is
+    # installed.
+    # Carries $ConfigureArgs into the re-run command so a flag such as
+    # --dry-run is not silently dropped from the exact command shown to
+    # re-run after installing FreeCAD; re-quoted as the single-string form
+    # this script itself accepts and re-splits on whitespace, since
+    # -ConfigureArgs cannot be spliced into a one-line copy-pasted command
+    # as a PowerShell array literal. `irm ... | iex` has no -ConfigureArgs
+    # parameter of its own, so any extra arguments always need the
+    # scriptblock form, even when $Version is "latest".
+    $installCommand = if ($ConfigureArgs.Count -gt 0) {
+      $joined = ($ConfigureArgs -join ' ') -replace '"', '`"'
+      $url = if ($Version -eq "latest") {
+        "https://github.com/$Owner/$Repo/releases/latest/download/install.ps1"
+      } else {
+        "https://github.com/$Owner/$Repo/releases/download/$Version/install.ps1"
+      }
+      $versionArg = if ($Version -eq "latest") { "" } else { " -Version $Version" }
+      "& ([scriptblock]::Create((irm $url)))$versionArg -ConfigureArgs `"$joined`""
+    } elseif ($Version -eq "latest") {
+      "irm https://github.com/$Owner/$Repo/releases/latest/download/install.ps1 | iex"
+    } else {
+      "& ([scriptblock]::Create((irm https://github.com/$Owner/$Repo/releases/download/$Version/install.ps1))) -Version $Version"
+    }
+    $env:FREECAD_MCP_INSTALL_COMMAND = $installCommand
     try {
       & $target configure @ConfigureArgs
       $code = $LASTEXITCODE
@@ -330,6 +356,10 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
     } catch {
       # The program ran; its exit code decides what happened.
       $code = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 1 }
+    } finally {
+      # With `irm ... | iex` this whole block runs in the caller's own
+      # session: the variable must not linger there once configure read it.
+      Remove-Item Env:\FREECAD_MCP_INSTALL_COMMAND -ErrorAction SilentlyContinue
     }
 
     if ($startError -or $code -eq $exitCancelled) {

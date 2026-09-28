@@ -98,7 +98,7 @@ func TestExecuteCodeArguments(t *testing.T) {
 
 func TestAddonWithoutGetRPCStatusIsReportedAsOld(t *testing.T) {
 	srv := xmlrpctest.New(t, map[string]xmlrpctest.Handler{"ping": func([]any) (any, error) { return true, nil }})
-	w := connect(srv).CheckAddonVersion(context.Background(), "1.0.0")
+	w, _ := connect(srv).CheckAddonVersion(context.Background(), "1.0.0")
 	if !strings.Contains(w, "no get_rpc_status") || !strings.Contains(w, "Update the addon") {
 		t.Fatalf("warning = %q", w)
 	}
@@ -106,7 +106,7 @@ func TestAddonWithoutGetRPCStatusIsReportedAsOld(t *testing.T) {
 
 func TestAddonWithoutVersionFieldsIsReportedAsOld(t *testing.T) {
 	srv := statusServer(t, map[string]any{"success": true, "rpc_server": "running"})
-	w := connect(srv).CheckAddonVersion(context.Background(), "1.0.0")
+	w, _ := connect(srv).CheckAddonVersion(context.Background(), "1.0.0")
 	if !strings.Contains(w, "does not report a version") || !strings.Contains(w, "Update the addon") {
 		t.Fatalf("warning = %q", w)
 	}
@@ -119,7 +119,7 @@ func TestFailingGetRPCStatusIsNotAnOldAddon(t *testing.T) {
 		},
 	})
 	c := connect(srv)
-	if w := c.CheckAddonVersion(context.Background(), "1.0.0"); w != "" {
+	if w, _ := c.CheckAddonVersion(context.Background(), "1.0.0"); w != "" {
 		t.Fatalf("warning = %q", w)
 	}
 	if c.ExecuteCodeTimeout != 90 {
@@ -130,7 +130,7 @@ func TestFailingGetRPCStatusIsNotAnOldAddon(t *testing.T) {
 func TestProtocolMismatchNamesTheSideToUpdate(t *testing.T) {
 	for protocol, fix := range map[int]string{domain.ProtocolVersion - 1: "Update the addon", domain.ProtocolVersion + 1: "Update the MCP server"} {
 		srv := statusServer(t, matchingStatus(map[string]any{"addon_version": "9.9.9", "protocol_version": protocol}))
-		w := connect(srv).CheckAddonVersion(context.Background(), "1.0.0")
+		w, _ := connect(srv).CheckAddonVersion(context.Background(), "1.0.0")
 		want := "FreeCAD addon 9.9.9 (protocol " + strconv.Itoa(protocol) + ") does not match"
 		if !strings.Contains(w, want) || !strings.Contains(w, fix) {
 			t.Errorf("protocol %d: warning = %q", protocol, w)
@@ -156,7 +156,7 @@ func TestMatchingAddonGivesNoWarning(t *testing.T) {
 func TestClientAdoptsTheAddonsBudgets(t *testing.T) {
 	srv := statusServer(t, matchingStatus(map[string]any{"execute_code_timeout": 45, "max_execute_code_timeout": 600}))
 	c := connect(srv)
-	if w := c.CheckAddonVersion(context.Background(), "1.0.0"); w != "" {
+	if w, _ := c.CheckAddonVersion(context.Background(), "1.0.0"); w != "" {
 		t.Fatalf("warning = %q", w)
 	}
 	if c.ExecuteCodeTimeout != 45 || c.MaxExecuteCodeTimeout != 600 {
@@ -188,7 +188,7 @@ func TestClientAdoptsABudgetUpToItsOwnCeiling(t *testing.T) {
 
 func TestUnreachableAddonDoesNotBlockTheCheck(t *testing.T) {
 	c := freecad.NewConnection("127.0.0.1", 9, "", 500*time.Millisecond)
-	if w := c.CheckAddonVersion(context.Background(), "1.0.0"); w != "" {
+	if w, _ := c.CheckAddonVersion(context.Background(), "1.0.0"); w != "" {
 		t.Fatalf("warning = %q", w)
 	}
 }
@@ -203,7 +203,7 @@ func TestHungAddonCannotHoldUpTheCheck(t *testing.T) {
 	c := freecad.NewConnection(srv.Host, srv.Port, "", 150*time.Second)
 	c.VersionCheckTimeout = 200 * time.Millisecond
 	start := time.Now()
-	if w := c.CheckAddonVersion(context.Background(), "1.0.0"); w != "" {
+	if w, _ := c.CheckAddonVersion(context.Background(), "1.0.0"); w != "" {
 		t.Fatalf("warning = %q", w)
 	}
 	if elapsed := time.Since(start); elapsed > 900*time.Millisecond {

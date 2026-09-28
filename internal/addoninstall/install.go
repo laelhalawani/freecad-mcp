@@ -171,44 +171,7 @@ func Uninstall(t Target) (bool, error) {
 // SetAutoStart turns the addon's "start the RPC server with FreeCAD" setting
 // on or off, keeping every other setting.
 func SetAutoStart(t Target, on bool) error {
-	file := filepath.Join(t.UserDataDir, SettingsFile)
-	settings := map[string]any{}
-	// The file holds the addon's auth token, so a rewrite keeps its
-	// permissions; a new file is readable by its owner only.
-	mode := os.FileMode(0o600)
-	data, err := os.ReadFile(file)
-	switch {
-	case err == nil:
-		if err := json.Unmarshal(data, &settings); err != nil {
-			return fmt.Errorf("%s is not valid JSON; fix or delete it: %w", file, err)
-		}
-		if settings == nil { // the file held JSON null
-			settings = map[string]any{}
-		}
-		if info, err := os.Stat(file); err == nil {
-			mode = info.Mode().Perm()
-		}
-	case !errors.Is(err, os.ErrNotExist):
-		return err
-	}
-	settings["auto_start_rpc"] = on
-	out, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(t.UserDataDir, 0o755); err != nil {
-		return err
-	}
-	tmp := file + ".tmp-" + suffix()
-	if err := writeSynced(tmp, out, mode); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, file); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
+	return UpdateSettings(t, map[string]any{KeyAutoStart: on})
 }
 
 func writeSynced(path string, data []byte, mode os.FileMode) error {

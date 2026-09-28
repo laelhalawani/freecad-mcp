@@ -1,6 +1,6 @@
 # Configuration
 
-[Back to README](../README.md) · [Installation](installation.md) · [Tools](tools.md)
+[Back to README](../README.md) · [Installation](installation.md) · [Tools](tools.md) · [Remote access](remote-access.md)
 
 ## Environment variables
 
@@ -9,9 +9,9 @@ the `env` block of the `freecad` entry in your AI client's configuration:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `FREECAD_MCP_HOST` | `localhost` | Host of the FreeCAD RPC server; an IPv4/IPv6 address or host name. |
-| `FREECAD_MCP_PORT` | `9875` | Port of the FreeCAD RPC server. |
-| `FREECAD_MCP_TOKEN` | the stored token (see [below](#3-require-an-auth-token)) | Auth token the RPC server requires, when one is set in FreeCAD. |
+| `FREECAD_MCP_HOST` | `localhost` | Host of the FreeCAD RPC server, or of a shared computer's listener; an IPv4/IPv6 address or host name. |
+| `FREECAD_MCP_PORT` | `9875` for a loopback host, `9876` for any other | Port of the FreeCAD RPC server (9875) or of a shared computer's listener (9876); see [remote access](remote-access.md). |
+| `FREECAD_MCP_TOKEN` | the stored password (see [remote access](remote-access.md)) | The password FreeCAD's RPC server (or a shared computer's listener) requires, when one is set. |
 | `FREECAD_MCP_ONLY_TEXT_FEEDBACK` | `false` | `true` omits the optional screenshots from tool replies. |
 | `FREECAD_MCP_FREECADCMD` | auto-detected | Command that starts headless FreeCAD for `execute_code_headless`. |
 | `FREECAD_MCP_FREECAD` | auto-detected | Command that starts FreeCAD's GUI for `start_freecad`, when it is not found on `PATH` or in a standard install location. |
@@ -73,13 +73,16 @@ single-instance handling.
 
 `start_freecad` sets `FREECAD_MCP_PORT` in the FreeCAD process it launches, so
 that if auto-start is also on, it binds the same port this server expects
-instead of racing the startup macro for the default one. Only a local FreeCAD
-can be started this way: with `FREECAD_MCP_HOST` pointed at another machine,
-start FreeCAD there instead. Set `FREECAD_MCP_FREECAD` when FreeCAD's GUI
-executable is installed somewhere the server does not find automatically;
-`freecad-mcp doctor` shows what it found. After calling `start_freecad`, poll
-`get_rpc_status` every few seconds until it reports `rpc: reachable`; a first
-start can take 15 seconds or more.
+instead of racing the startup macro for the default one. Set
+`FREECAD_MCP_FREECAD` when FreeCAD's GUI executable is installed somewhere the
+server does not find automatically; `freecad-mcp doctor` shows what it found.
+After calling `start_freecad`, poll `get_rpc_status` every few seconds until
+it reports `rpc: reachable`; a first start can take 15 seconds or more.
+
+With `FREECAD_MCP_HOST` pointed at a computer sharing FreeCAD (see
+[remote access](remote-access.md)), `start_freecad` works the same way but
+starts FreeCAD on that computer through its listener, using the FreeCAD
+command it detected there when "Share this PC" was turned on.
 
 ## Text feedback and screenshots
 
@@ -91,85 +94,22 @@ and `view_name`. The environment variable takes precedence over
 `include_screenshot`. See [screenshot options](tools.md#screenshot-options) for
 the applicable tools and the explicit `get_view` tool.
 
-## Remote connections
+## Remote access
 
-By default, the RPC server listens on `localhost` and does not accept remote
-connections. To control FreeCAD from another machine on your network, configure
-both the addon and the MCP client.
+By default, FreeCAD MCP only talks to FreeCAD on the same machine. To control
+FreeCAD running on another computer, or to let other computers control
+FreeCAD running on this one, see [remote access](remote-access.md): turning
+"Share this PC" on there, the listener it starts (port 9876 by default,
+alongside the addon's own loopback port 9875), the allowed IP list and
+password, an SSH tunnel alternative, and the multi-agent session lock that
+comes on with it.
 
-Unless you [set an auth token](#3-require-an-auth-token), the RPC server has no
-authentication: with remote connections off, any program running on the
-machine, under any user, can call it, `execute_code` included. It never
-encrypts traffic. Any program that can reach the
-port from an allowed address can call every tool, including `execute_code`,
-which runs arbitrary Python inside FreeCAD with your user's permissions. Set a
-token whenever remote connections are on, allow only machines you trust, keep
-the list as narrow as possible, and prefer an [SSH tunnel](#alternative-ssh-tunnel)
-on networks you do not control. Whatever the settings, the server refuses
-requests sent by web browsers, so a web page cannot call it.
-
-### 1. Enable remote connections in FreeCAD
-
-In the **FreeCAD MCP** toolbar:
-
-1. Check **Remote Connections**. On the next server restart, the RPC server binds
-   to `0.0.0.0` (all interfaces). It only accepts connections from the IP addresses
-   or CIDR subnets configured in **Allowed IPs**, which defaults to `127.0.0.1`.
-   The list applies to remote connections only: with them off, the server
-   accepts local connections whatever it holds.
-2. Click **Configure Allowed IPs** and enter a comma-separated list of allowed
-   client IP addresses or CIDR subnets, for example:
-
-   ```text
-   192.168.1.100, 10.0.0.0/24
-   ```
-
-   Invalid entries are rejected with an error dialog.
-3. Restart the RPC server after changing these settings.
-
-### 2. Point the MCP server at the remote host
-
-Set `FREECAD_MCP_HOST` to the IP address or host name of the machine running
-FreeCAD, as in the [example above](#environment-variables). The value is
-validated on startup.
-
-`FREECAD_MCP_HOST` selects the GUI RPC host. [Headless execution](execution.md#headless-execution)
-runs on the machine hosting the MCP server, so its file paths must be accessible
-there.
-
-### 3. Require an auth token
-
-In the **FreeCAD MCP** toolbar, click **Set Auth Token** and enter a long random
-value. Restart the RPC server. From then on, it answers only requests that carry
-the token. Clear the field to turn authentication off again.
-
-Give the MCP server the same token in one of two ways:
-
-- `freecad-mcp login --token <the token set in FreeCAD>` stores it in
-  `~/.freecad-mcp/credentials.json` (readable only by you), so it never appears
-  in any AI client's configuration file. The setup wizard offers the same step.
-- `FREECAD_MCP_TOKEN` in the client entry's `env` block, which takes precedence
-  over a stored token.
-
-Without `FREECAD_MCP_TOKEN`, the MCP server looks for a stored token first in
-the project it runs in (`<project>/.freecad-mcp/`, where `freecad-mcp add`
-stores one), then in the one `freecad-mcp login` stores. The token is only
-ever sent to FreeCAD's RPC server: `freecad-mcp mcp --remote <url>` is refused.
-
-`freecad-mcp doctor` and `freecad-mcp check-connection` report a rejected
-token. The token travels unencrypted, so on a network you do not control, use
-the SSH tunnel below instead.
-
-### Alternative: SSH tunnel
-
-To reach FreeCAD on another machine without opening the port to the network,
-leave **Remote Connections** off and forward the port over SSH from the machine
-that runs the MCP server:
-
-```bash
-ssh -N -L 9875:localhost:9875 user@freecad-host
-```
-
-Keep `FREECAD_MCP_HOST` at its default, `localhost`. With remote connections
-off, the RPC server only answers requests addressed to `localhost` or a
-loopback address such as `127.0.0.1`.
+Connect and `freecad-mcp connect` save the host and port of a shared FreeCAD
+in their own store, not in these variables; `FREECAD_MCP_HOST` and
+`FREECAD_MCP_PORT` (above) override what was saved when you set them
+directly, and the port shown in the table is the addon's own default, not
+what gets saved for a shared FreeCAD (usually 9876). Whichever way FreeCAD is
+reached, [headless execution](execution.md#headless-execution) always runs on
+the machine hosting the MCP server, so its file paths must be accessible
+there, unlike every other tool's paths, which are on the machine running
+FreeCAD.

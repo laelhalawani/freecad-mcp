@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from socketserver import ThreadingMixIn
 import sys
+import tempfile
 import threading
 import time
 import types
@@ -24,11 +25,20 @@ def filtered_server_class() -> type:
 
     # ip_filter logs rejected connections through FreeCAD.Console and keeps its
     # own reference after import, so the stub is withdrawn again right away.
+    # rpc_server.settings does the same with FreeCAD.getUserAppDataDir
+    # (poll_settings, called for every request from parse_request below): it
+    # is imported transitively here too, and keeps whatever FreeCAD this
+    # stub was at that time for the rest of the process, so the stub needs
+    # a real answer for it now, not only Console (stage 7: an
+    # AttributeError there otherwise breaks every request past this import,
+    # for the rest of the test session).
     saved = sys.modules.get("FreeCAD")
     stub = types.ModuleType("FreeCAD")
     stub.Console = types.SimpleNamespace(
         PrintWarning=lambda _message: None, PrintError=lambda _message: None
     )
+    _user_app_data_dir = tempfile.mkdtemp(prefix="freecad-mcp-test-")
+    stub.getUserAppDataDir = lambda: _user_app_data_dir
     sys.modules["FreeCAD"] = stub
     try:
         sys.modules.pop("rpc_server.ip_filter", None)

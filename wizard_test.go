@@ -3,8 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,7 +12,6 @@ import (
 	"github.com/sairaph/mcp-wizard/flow"
 	"github.com/sairaph/mcp-wizard/harness"
 	"github.com/sairaph/mcp-wizard/installer"
-	"github.com/sairaph/mcp-wizard/secret"
 
 	"github.com/sairaph/freecad-mcp/internal/addoninstall"
 )
@@ -184,37 +183,6 @@ func (quitStep) Update(tea.Msg, *AppState) (flow.Directive, tea.Cmd) {
 	return flow.Quit, nil
 }
 
-func TestDeferredStoreWritesOnlyOnFlush(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "credentials.json")
-	store := &deferredStore{inner: secret.NewFileStore(path)}
-	sess := secret.NewSession()
-	sess.Set("token", "s3cret")
-	if err := store.Save(context.Background(), sess); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("Save wrote the credentials file before flush: %v", err)
-	}
-	if err := store.flush(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	got, ok, err := secret.NewFileStore(path).Load(context.Background())
-	if err != nil || !ok || got.GetString("token") != "s3cret" {
-		t.Fatalf("after flush: %v %v %v", got, ok, err)
-	}
-}
-
-func TestDeferredStoreFlushWithoutTokenWritesNothing(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "credentials.json")
-	store := &deferredStore{inner: secret.NewFileStore(path)}
-	if err := store.flush(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("a skipped token step wrote a file: %v", err)
-	}
-}
-
 func TestClassifyWizard(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -241,79 +209,22 @@ func TestClassifyWizard(t *testing.T) {
 	}
 }
 
-func TestRevisitingTheLoginStepStartsClean(t *testing.T) {
-	store := &deferredStore{inner: secret.NewFileStore(filepath.Join(t.TempDir(), "c.json"))}
-	sess := secret.NewSession()
-	sess.Set("token", "from-first-visit")
-	store.Save(context.Background(), sess)
-	state := &AppState{}
-	state.Login.Skipped = true
-	step := loginFresh{installer.LoginStep(context.Background(), installer.LoginConfig{ID: "t", Store: store}, loginState), store}
-	step.Init(state)
-	if store.pending != nil || state.Login.Skipped {
-		t.Fatalf("second visit kept pending=%v skipped=%v", store.pending, state.Login.Skipped)
-	}
+// noListenerRestart replaces the listener restart finishWizard runs, so a
+// test never restarts a real listener registered on this machine.
+func noListenerRestart(t *testing.T) {
+	t.Helper()
+	old := restartListener
+	restartListener = func(context.Context, io.Writer) int { return 0 }
+	t.Cleanup(func() { restartListener = old })
 }
 
-func TestGoingBackPassesALoginStepThatSkipsItself(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "c.json")
-	sess := secret.NewSession()
-	sess.Set("token", "stored")
-	if err := secret.NewFileStore(path).Save(context.Background(), sess); err != nil {
-		t.Fatal(err)
-	}
-	store := &deferredStore{inner: secret.NewFileStore(path)}
-	login := installer.LoginConfig{ID: "t", Store: store, Stages: []installer.LoginStage{{Field: installer.LoginField{Name: "token"}}}}
-	step := loginFresh{installer.LoginStep(context.Background(), login, loginState), store}
-
-	arrive := func(state *AppState) flow.Directive {
-		cmd := step.Init(state)
-		if cmd == nil {
-			t.Fatal("with a stored token the login step did not skip itself")
-		}
-		d, _ := step.Update(cmd(), state)
-		return d
-	}
-	if d := arrive(&AppState{}); d != flow.Skip {
-		t.Fatalf("moving forward: %v, want Skip", d)
-	}
-	state := &AppState{Retreating: true} // esc on the addon step
-	if d := arrive(state); d != flow.Back {
-		t.Fatalf("moving back: %v, want Back, or the client list cannot be reached", d)
-	}
-	if d := arrive(state); d != flow.Skip {
-		t.Fatalf("moving forward again: %v, want Skip", d)
-	}
-}
-
-func TestSkippedTokenIsNotSaved(t *testing.T) {
-	credPath := filepath.Join(t.TempDir(), "credentials.json")
-	store := &deferredStore{inner: secret.NewFileStore(credPath)}
-	sess := secret.NewSession()
-	sess.Set("token", "typed-then-skipped")
-	store.Save(context.Background(), sess)
-
-	state := &AppState{}
-	state.Login.Skipped = true // went back and chose "Skip for now"
-	var out bytes.Buffer
-	finishWizard(context.Background(), &out, state, store, false, 0)
-	if _, err := os.Stat(credPath); !os.IsNotExist(err) {
-		t.Fatalf("a skipped token was saved: %v", err)
-	}
-}
-
-func TestFinishWizardInstallsTheAddonAndSavesTheToken(t *testing.T) {
+func TestFinishWizardInstallsTheAddon(t *testing.T) {
+	noListenerRestart(t)
 	dataDir := t.TempDir()
-	credPath := filepath.Join(t.TempDir(), "credentials.json")
-	store := &deferredStore{inner: secret.NewFileStore(credPath)}
-	sess := secret.NewSession()
-	sess.Set("token", "abc")
-	store.Save(context.Background(), sess)
-
 	state := &AppState{}
 	state.Addon = addonState{Targets: []addoninstall.Target{{UserDataDir: dataDir}}, AutoStart: true}
 	var out bytes.Buffer
-	code := finishWizard(context.Background(), &out, state, store, false, 0)
+	code := finishWizard(context.Background(), &out, state, false, 0)
 	if code != 0 {
 		t.Fatalf("code %d:\n%s", code, out.String())
 	}
@@ -324,28 +235,17 @@ func TestFinishWizardInstallsTheAddonAndSavesTheToken(t *testing.T) {
 	if !addoninstall.AutoStart(target) {
 		t.Fatal("auto-start not turned on")
 	}
-	if _, err := os.Stat(credPath); err != nil {
-		t.Fatalf("token not saved: %v", err)
-	}
 }
 
 func TestFinishWizardDryRunWritesNothing(t *testing.T) {
+	noListenerRestart(t)
 	dataDir := t.TempDir()
-	credPath := filepath.Join(t.TempDir(), "credentials.json")
-	store := &deferredStore{inner: secret.NewFileStore(credPath)}
-	sess := secret.NewSession()
-	sess.Set("token", "abc")
-	store.Save(context.Background(), sess)
-
 	state := &AppState{}
 	state.Addon = addonState{Targets: []addoninstall.Target{{UserDataDir: dataDir}}, AutoStart: true}
 	var out bytes.Buffer
-	finishWizard(context.Background(), &out, state, store, true, 0)
+	finishWizard(context.Background(), &out, state, true, 0)
 	if entries, _ := os.ReadDir(dataDir); len(entries) != 0 {
 		t.Fatalf("dry run wrote into the FreeCAD data directory: %v", entries)
-	}
-	if _, err := os.Stat(credPath); !os.IsNotExist(err) {
-		t.Fatalf("dry run saved the token: %v", err)
 	}
 	if !strings.Contains(out.String(), "would install the FreeCAD addon") {
 		t.Fatalf("output:\n%s", out.String())

@@ -44,7 +44,7 @@ func (s *Server) registerExportTools() {
 	schema = withRange(schema, 0.5, 90, "angular_deflection_deg")
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "export_document",
-		Description: exportDocumentDescription,
+		Description: exportDocumentDescription + "\n\n" + filePathsNote,
 		InputSchema: withPositiveMax(schema, "timeout", freecad.DefaultMaxExecuteCodeTime),
 	}, s.exportDocument)
 }
@@ -108,15 +108,15 @@ func exportOptionsMap(in exportDocumentInput) map[string]any {
 
 func (s *Server) exportDocument(ctx context.Context, _ *mcp.CallToolRequest, in exportDocumentInput) (*mcp.CallToolResult, any, error) {
 	if err := freecad.CheckTimeout(in.Timeout); err != nil {
-		return failure("export document", err, ""), nil, nil
+		return failure(ctx, "export document", err, ""), nil, nil
 	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("export document", err, ""), nil, nil
+		return failure(ctx, "export document", err, ""), nil, nil
 	}
 	res, err := conn.ExportDocument(ctx, in.DocName, in.Path, exportOptionsMap(in), in.Timeout)
 	if err != nil {
-		return s.withNotice(timedFailure("export document", err, largerTimeout("export_document"))), nil, nil
+		return s.withNotice(timedFailure(ctx, "export document", err, largerTimeout("export_document"))), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("export document", res,

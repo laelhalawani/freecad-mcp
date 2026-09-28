@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sairaph/mcp-wizard/command"
@@ -24,18 +23,18 @@ import (
 
 	"github.com/sairaph/freecad-mcp/internal/addoninstall"
 	"github.com/sairaph/freecad-mcp/internal/domain"
-	"github.com/sairaph/freecad-mcp/internal/freecad"
 	"github.com/sairaph/freecad-mcp/internal/headless"
 )
 
 // serverSettings reads the MCP server's settings: the environment first,
-// then the token stored with `login`.
+// then the credential store (the password, and the host and port of FreeCAD
+// on another computer).
 func serverSettings(ctx context.Context) (domain.Settings, error) {
-	token, err := loadCredential(ctx, domain.TokenKey)
+	token, host, port, err := loadCredentials(ctx)
 	if err != nil {
-		return domain.Settings{}, fmt.Errorf("read the stored token: %w", err)
+		return domain.Settings{}, fmt.Errorf("read the stored credentials: %w", err)
 	}
-	return domain.SettingsFromEnv(token)
+	return domain.SettingsFromEnv(token, host, port)
 }
 
 // freecadCommand is the freecadcmd override from the environment, if any.
@@ -121,6 +120,7 @@ func registerFreeCADCommands(r *command.Registry) {
 			return connectionReport(ctx, os.Stdout)
 		},
 	})
+	registerRemoteCommands(r)
 }
 
 // autoStartChoice is what an install does with the addon's "start the RPC
@@ -365,43 +365,6 @@ func installAddonUnattended(ctx context.Context, dryRun bool) int {
 	return installAddonReport(ctx, os.Stdout, targets, dryRun)
 }
 
-// connectionReport checks the RPC server the MCP server would use.
-func connectionReport(ctx context.Context, w io.Writer) int {
-	settings, err := serverSettings(ctx)
-	if err != nil {
-		fmt.Fprintf(w, "  [fail] %v\n", err)
-		return 1
-	}
-	// 10 s, not less: right after FreeCAD starts its GUI thread is still busy
-	// with startup Python, and a shorter bound was seen to time out here
-	// while the same ping succeeded a moment later.
-	conn := freecad.NewConnection(settings.Host, settings.Port, settings.Token, 10*time.Second)
-	defer conn.Close()
-	ok, err := conn.Ping(ctx)
-	if err != nil || !ok {
-		fmt.Fprintf(w, "  [fail] FreeCAD RPC server at %s: %v\n", conn.URL(), rpcProblem(err))
-		return 1
-	}
-	fmt.Fprintf(w, "  [ok]   FreeCAD RPC server at %s answers\n", conn.URL())
-	if warning := conn.CheckAddonVersion(ctx, version); warning != "" {
-		fmt.Fprintf(w, "  [warn] %s\n", warning)
-		return 0
-	}
-	fmt.Fprintln(w, "  [ok]   the addon matches this server")
-	return 0
-}
-
-func rpcProblem(err error) string {
-	if err == nil {
-		return "it did not answer ping"
-	}
-	msg := err.Error()
-	if strings.Contains(msg, "401") {
-		return "the addon requires an auth token; run `" + domain.BinaryName + " login --token <token>`"
-	}
-	return msg + " (is FreeCAD running with the RPC server started?)"
-}
-
 // --- Doctor checks ---
 
 // executableCheck is doctor.ExecutableCheck, except on Windows: there Go
@@ -520,7 +483,12 @@ func (c addonCheck) Run(ctx context.Context) doctor.Result {
 				t.AddonDir(), got, protocol, want, wantProtocol)
 		default:
 			auto := "manual start"
-			if addoninstall.AutoStart(t) {
+			if on, set := addoninstall.AutoStartSetting(t); !set {
+				// The settings file is missing or unreadable right now
+				// (live check L4): say so plainly, rather than guessing
+				// "manual start" from a file this could not actually read.
+				auto = "auto-start unknown: its settings file could not be read"
+			} else if on {
 				auto = "auto-start on"
 			}
 			found = append(found, fmt.Sprintf("%s %s (%s)", got, t.AddonDir(), auto))
@@ -546,30 +514,6 @@ func (c addonCheck) Run(ctx context.Context) doctor.Result {
 	return doctor.Result{Name: c.Name(), Status: doctor.OK, Detail: strings.Join(found, "; ")}
 }
 
-type rpcCheck struct{}
-
-func (rpcCheck) Name() string { return "FreeCAD RPC server" }
-
-func (c rpcCheck) Run(ctx context.Context) doctor.Result {
-	settings, err := serverSettings(ctx)
-	if err != nil {
-		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: err.Error()}
-	}
-	// 10 s: see connectionReport's comment on the same bound.
-	conn := freecad.NewConnection(settings.Host, settings.Port, settings.Token, 10*time.Second)
-	defer conn.Close()
-	conn.VersionCheckTimeout = 10 * time.Second
-	ok, err := conn.Ping(ctx)
-	if err != nil || !ok {
-		// FreeCAD not running is normal when nothing is being modelled.
-		return doctor.Result{Name: c.Name(), Status: doctor.Warn, Detail: fmt.Sprintf("%s: %s", conn.URL(), rpcProblem(err))}
-	}
-	if warning := conn.CheckAddonVersion(ctx, version); warning != "" {
-		return doctor.Result{Name: c.Name(), Status: doctor.Warn, Detail: warning}
-	}
-	return doctor.Result{Name: c.Name(), Status: doctor.OK, Detail: conn.URL() + " answers; versions match"}
-}
-
 // --- Install wizard step ---
 //
 // The step only records the choice. The wizard installs the addon after the
@@ -588,6 +532,9 @@ type addonState struct {
 	Phase     addonPhase
 	Targets   []addoninstall.Target
 	AutoStart bool
+	// NotFoundCursor is the cursor row of the addonNotFound choice (0:
+	// install FreeCAD first, 1: use FreeCAD on another computer).
+	NotFoundCursor int
 }
 
 type addonLocatedMsg struct {
@@ -627,7 +574,7 @@ func (s *addonStep) Hints(state *AppState) []struct{ Key, Label string } {
 	case addonChoosing:
 		return []struct{ Key, Label string }{{"space", "toggle"}, {"enter", "continue"}, {"esc", "back"}, {"q", "cancel"}}
 	case addonNotFound:
-		return []struct{ Key, Label string }{{"enter", "continue"}, {"esc", "back"}, {"q", "cancel"}}
+		return []struct{ Key, Label string }{{"↑↓", "move"}, {"enter", "select"}, {"esc", "back"}, {"q", "cancel"}}
 	}
 	return nil
 }
@@ -666,10 +613,28 @@ func (s *addonStep) Update(msg tea.Msg, state *AppState) (flow.Directive, tea.Cm
 			if a.Phase == addonChoosing {
 				a.AutoStart = !a.AutoStart
 			}
+		case "up", "k":
+			if a.Phase == addonNotFound && a.NotFoundCursor > 0 {
+				a.NotFoundCursor--
+			}
+		case "down", "j":
+			if a.Phase == addonNotFound && a.NotFoundCursor < 1 {
+				a.NotFoundCursor++
+			}
 		case "esc":
 			state.Retreating = true
 			return flow.Back, nil
 		case "enter":
+			if a.Phase == addonNotFound {
+				if a.NotFoundCursor == 0 {
+					// "Install FreeCAD on this computer first" ends the
+					// wizard; runWizard prints installFirstText itself once
+					// the terminal UI has closed, so it stays on screen.
+					state.Connect.InstallFirst = true
+					return flow.Quit, nil
+				}
+				// "Use FreeCAD on another computer": connectSteps runs next.
+			}
 			return flow.Next, nil
 		}
 	}
@@ -709,9 +674,20 @@ func (s *addonStep) View(state *AppState) string {
 			tui.Hint{Key: "space", Label: "toggle"}, tui.Hint{Key: "enter", Label: "continue"},
 			tui.Hint{Key: "esc", Label: "back"}, tui.Hint{Key: "q", Label: "cancel"})))
 	case addonNotFound:
-		b.WriteString(freecadNotFound + "\n\n  The AI clients can still be registered now.\n")
+		// Exact wording shown to the user; kept as is rather than paraphrased.
+		b.WriteString("  FreeCAD was not found on this computer.\n\n")
+		styles := theme.Styles()
+		options := []string{"Install FreeCAD on this computer first", "Use FreeCAD on another computer"}
+		for i, opt := range options {
+			prefix := "  "
+			if i == a.NotFoundCursor {
+				prefix = styles.Cursor.Render(">") + " "
+			}
+			b.WriteString("  " + prefix + opt + "\n")
+		}
 		b.WriteString(tui.Footer(theme, tui.Hints(theme,
-			tui.Hint{Key: "enter", Label: "continue"}, tui.Hint{Key: "esc", Label: "back"}, tui.Hint{Key: "q", Label: "cancel"})))
+			tui.Hint{Key: "↑↓", Label: "move"}, tui.Hint{Key: "enter", Label: "select"},
+			tui.Hint{Key: "esc", Label: "back"}, tui.Hint{Key: "q", Label: "cancel"})))
 	}
 	return tui.Section(theme, s.Title(state), b.String())
 }

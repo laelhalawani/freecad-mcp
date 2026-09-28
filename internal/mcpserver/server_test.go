@@ -296,6 +296,14 @@ func TestWarningIsShownOnceInTheNextToolReply(t *testing.T) {
 
 func TestFreeCADNotRunningIsUnavailable(t *testing.T) {
 	// Reserve a port, then free it: nothing listens there until "FreeCAD starts".
+	// This is necessarily a random, non-9875 port (an ephemeral one, so the
+	// test never collides with a real addon or listener on this machine);
+	// a loopback host on any port but the addon's own default (9875) looks
+	// like a freecad-mcp listener, never the local addon, whether or not
+	// anything actually answers there (looksLikeListener, contract 3's
+	// probe rule: this is also how an SSH tunnel to 127.0.0.1:9876 is told
+	// apart from the addon), so this is "the listener could not be
+	// reached", not "make sure the addon is running".
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -307,7 +315,8 @@ func TestFreeCADNotRunningIsUnavailable(t *testing.T) {
 	cs := session(t, domain.Settings{Host: host, Port: port})
 	res := call(t, cs, "list_documents", nil)
 	text := strings.Join(texts(res), "\n")
-	if !res.IsError || !strings.Contains(text, "code: unavailable") || !strings.Contains(text, "Make sure the FreeCAD addon is running") {
+	if !res.IsError || !strings.Contains(text, "code: unavailable") ||
+		!strings.Contains(text, "freecad-mcp listener on "+host+" could not be reached") {
 		t.Fatalf("reply while FreeCAD is down = %v", text)
 	}
 }
@@ -341,7 +350,7 @@ func TestRejectedTokenIsExplained(t *testing.T) {
 	cs := session(t, domain.Settings{Host: fc.Host, Port: fc.Port, Token: "wrong-token"})
 	res := call(t, cs, "list_documents", nil)
 	text := strings.Join(texts(res), "\n")
-	if !res.IsError || !strings.Contains(text, "code: authentication") || !strings.Contains(text, "auth token") ||
+	if !res.IsError || !strings.Contains(text, "code: authentication") || !strings.Contains(text, "asks for a password") ||
 		!strings.Contains(text, domain.EnvToken) || strings.Contains(text, "wrong-token") ||
 		strings.Contains(text, "Make sure the FreeCAD addon is running") {
 		t.Fatalf("reply = %v", text)

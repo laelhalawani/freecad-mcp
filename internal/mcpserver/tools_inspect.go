@@ -82,7 +82,7 @@ func refsDescription(refs []measureRef) string {
 func (s *Server) measure(ctx context.Context, _ *mcp.CallToolRequest, in measureInput) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("measure", err, ""), nil, nil
+		return failure(ctx, "measure", err, ""), nil, nil
 	}
 	refs := make([]map[string]any, len(in.Refs))
 	for i, r := range in.Refs {
@@ -94,7 +94,7 @@ func (s *Server) measure(ctx context.Context, _ *mcp.CallToolRequest, in measure
 	}
 	res, err := conn.Measure(ctx, in.DocName, in.Kind, refs)
 	if err != nil {
-		return s.withNotice(failure("measure", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "measure", err, "")), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("measure", res,
@@ -120,7 +120,7 @@ func (s *Server) measure(ctx context.Context, _ *mcp.CallToolRequest, in measure
 func (s *Server) getSelection(ctx context.Context, _ *mcp.CallToolRequest, in getSelectionInput) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("get selection", err, ""), nil, nil
+		return failure(ctx, "get selection", err, ""), nil, nil
 	}
 	doc := ""
 	if in.DocName != nil {
@@ -128,7 +128,7 @@ func (s *Server) getSelection(ctx context.Context, _ *mcp.CallToolRequest, in ge
 	}
 	res, err := conn.GetSelection(ctx, doc)
 	if err != nil {
-		return s.withNotice(failure("get selection", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "get selection", err, "")), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("get selection", res, "")), nil, nil

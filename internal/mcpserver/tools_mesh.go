@@ -153,15 +153,15 @@ func solidWord(isSolid bool) string {
 
 func (s *Server) analyzeMesh(ctx context.Context, _ *mcp.CallToolRequest, in analyzeMeshInput) (*mcp.CallToolResult, any, error) {
 	if err := freecad.CheckTimeout(in.Timeout); err != nil {
-		return failure("analyze mesh", err, ""), nil, nil
+		return failure(ctx, "analyze mesh", err, ""), nil, nil
 	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("analyze mesh", err, ""), nil, nil
+		return failure(ctx, "analyze mesh", err, ""), nil, nil
 	}
 	res, err := conn.AnalyzeMesh(ctx, in.DocName, in.ObjName, in.Timeout)
 	if err != nil {
-		return s.withNotice(timedFailure("analyze mesh", err, largerTimeout("analyze_mesh"))), nil, nil
+		return s.withNotice(timedFailure(ctx, "analyze mesh", err, largerTimeout("analyze_mesh"))), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("analyze mesh", res,
@@ -200,11 +200,11 @@ func (s *Server) analyzeMesh(ctx context.Context, _ *mcp.CallToolRequest, in ana
 
 func (s *Server) repairMesh(ctx context.Context, _ *mcp.CallToolRequest, in repairMeshInput) (*mcp.CallToolResult, any, error) {
 	if err := freecad.CheckTimeout(in.Timeout); err != nil {
-		return failure("repair mesh", err, ""), nil, nil
+		return failure(ctx, "repair mesh", err, ""), nil, nil
 	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("repair mesh", err, ""), nil, nil
+		return failure(ctx, "repair mesh", err, ""), nil, nil
 	}
 	options := map[string]any{}
 	if in.FillHolesMaxEdges != nil {
@@ -212,7 +212,7 @@ func (s *Server) repairMesh(ctx context.Context, _ *mcp.CallToolRequest, in repa
 	}
 	res, err := conn.RepairMesh(ctx, in.DocName, in.ObjName, in.Steps, options, in.Timeout)
 	if err != nil {
-		return s.withNotice(timedFailure("repair mesh", err, largerTimeout("repair_mesh"))), nil, nil
+		return s.withNotice(timedFailure(ctx, "repair mesh", err, largerTimeout("repair_mesh"))), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("repair mesh", res,
@@ -257,11 +257,11 @@ func (s *Server) repairMesh(ctx context.Context, _ *mcp.CallToolRequest, in repa
 
 func (s *Server) meshToSolid(ctx context.Context, _ *mcp.CallToolRequest, in meshToSolidInput) (*mcp.CallToolResult, any, error) {
 	if err := freecad.CheckTimeout(in.Timeout); err != nil {
-		return failure("convert mesh to solid", err, ""), nil, nil
+		return failure(ctx, "convert mesh to solid", err, ""), nil, nil
 	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("convert mesh to solid", err, ""), nil, nil
+		return failure(ctx, "convert mesh to solid", err, ""), nil, nil
 	}
 	options := map[string]any{}
 	if in.ResultName != nil {
@@ -278,7 +278,7 @@ func (s *Server) meshToSolid(ctx context.Context, _ *mcp.CallToolRequest, in mes
 	}
 	res, err := conn.MeshToSolid(ctx, in.DocName, in.ObjName, options, in.Timeout)
 	if err != nil {
-		return s.withNotice(timedFailure("convert mesh to solid", err, largerTimeout("mesh_to_solid"))), nil, nil
+		return s.withNotice(timedFailure(ctx, "convert mesh to solid", err, largerTimeout("mesh_to_solid"))), nil, nil
 	}
 	if !succeeded(res) {
 		hint := fmt.Sprintf("Call analyze_mesh with {\"doc_name\": %q, \"obj_name\": %q} to see its defects.", in.DocName, in.ObjName)
@@ -318,11 +318,11 @@ func (s *Server) meshToSolid(ctx context.Context, _ *mcp.CallToolRequest, in mes
 
 func (s *Server) solidToMesh(ctx context.Context, _ *mcp.CallToolRequest, in solidToMeshInput) (*mcp.CallToolResult, any, error) {
 	if err := freecad.CheckTimeout(in.Timeout); err != nil {
-		return failure("convert solid to mesh", err, ""), nil, nil
+		return failure(ctx, "convert solid to mesh", err, ""), nil, nil
 	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("convert solid to mesh", err, ""), nil, nil
+		return failure(ctx, "convert solid to mesh", err, ""), nil, nil
 	}
 	options := map[string]any{}
 	if in.ResultName != nil {
@@ -342,7 +342,7 @@ func (s *Server) solidToMesh(ctx context.Context, _ *mcp.CallToolRequest, in sol
 	}
 	res, err := conn.SolidToMesh(ctx, in.DocName, in.ObjName, options, in.Timeout)
 	if err != nil {
-		return s.withNotice(timedFailure("convert solid to mesh", err, largerTimeout("solid_to_mesh"))), nil, nil
+		return s.withNotice(timedFailure(ctx, "convert solid to mesh", err, largerTimeout("solid_to_mesh"))), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("convert solid to mesh", res,

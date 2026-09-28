@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"os"
 	"time"
 
+	"github.com/sairaph/freecad-mcp/internal/domain"
 	"github.com/sairaph/freecad-mcp/internal/xmlrpc"
 )
 
@@ -41,15 +43,24 @@ type Connection struct {
 	MaxExecuteCodeTimeout float64
 	RPCTimeoutMargin      float64
 	VersionCheckTimeout   time.Duration
+
+	// OnLock, when set, is told the addon's X-FreeCAD-MCP-Lock header ("on"
+	// or "off") of every reply that carries one. Set it before the first call.
+	OnLock func(on bool)
+	// OnHeaders, when set, sees the headers of every HTTP reply, whatever its
+	// status (a listener's X-FreeCAD-MCP-Listener). Set it before the first
+	// call.
+	OnHeaders func(h http.Header)
 }
 
-// NewConnection returns a connection to the addon at host:port. timeout is
-// the default wait for a reply; long calls widen it to cover their budgets.
+// NewConnection returns a connection to the addon at host:port (or to a
+// listener that forwards to it). timeout is the default wait for a reply;
+// long calls widen it to cover their budgets.
 func NewConnection(host string, port int, token string, timeout time.Duration) *Connection {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	return &Connection{
+	c := &Connection{
 		rpc:                   xmlrpc.NewClient(host, port, token),
 		timeout:               timeout,
 		ExecuteCodeTimeout:    DefaultExecuteCodeTimeout,
@@ -57,6 +68,21 @@ func NewConnection(host string, port int, token string, timeout time.Duration) *
 		RPCTimeoutMargin:      DefaultRPCTimeoutMargin,
 		VersionCheckTimeout:   DefaultVersionCheckTimeout,
 	}
+	c.rpc.OnReply = func(h http.Header) {
+		if c.OnHeaders != nil {
+			c.OnHeaders(h)
+		}
+		if c.OnLock == nil {
+			return
+		}
+		switch h.Get(domain.HeaderLock) {
+		case "on":
+			c.OnLock(true)
+		case "off":
+			c.OnLock(false)
+		}
+	}
+	return c
 }
 
 // URL returns the addon endpoint without credentials.
@@ -65,8 +91,15 @@ func (c *Connection) URL() string { return c.rpc.URL() }
 // Close releases pooled connections.
 func (c *Connection) Close() { c.rpc.CloseIdle() }
 
+// call invokes method. The session headers come from ctx (see WithSession);
+// a session lock refusal comes back as *SessionInUseError or
+// *SessionReleasedError (see sessionFault).
 func (c *Connection) call(ctx context.Context, timeout time.Duration, method string, params ...any) (any, error) {
-	return c.rpc.Call(ctx, timeout, method, params...)
+	v, err := c.rpc.Call(ctx, timeout, method, params...)
+	if err != nil {
+		return nil, sessionFault(err)
+	}
+	return v, nil
 }
 
 func (c *Connection) callMap(ctx context.Context, timeout time.Duration, method string, params ...any) (map[string]any, error) {
@@ -151,21 +184,22 @@ func IsBudget(v any, ceiling float64) (float64, bool) {
 // CheckAddonVersion compares the addon's version with this server's and
 // adopts the run budgets the addon reports. It returns a warning for an old
 // or mismatched addon, and "" otherwise, including when the addon cannot be
-// asked.
-func (c *Connection) CheckAddonVersion(ctx context.Context, serverVersion string) string {
+// asked, together with the addon's get_rpc_status reply (nil when there is
+// none), which also carries the session lock state.
+func (c *Connection) CheckAddonVersion(ctx context.Context, serverVersion string) (string, map[string]any) {
 	v, err := c.call(ctx, c.VersionCheckTimeout, "get_rpc_status")
 	if err != nil {
 		var fault *xmlrpc.Fault
 		if errors.As(err, &fault) && fault.MissingMethod() {
-			return AddonVersionWarning(nil, serverVersion)
+			return AddonVersionWarning(nil, serverVersion), nil
 		}
 		// Stdout carries the MCP protocol, so diagnostics go to stderr.
 		fmt.Fprintf(os.Stderr, "freecad-mcp: could not check the FreeCAD addon version: %v\n", err)
-		return ""
+		return "", nil
 	}
 	status, ok := v.(map[string]any)
 	if !ok {
-		return AddonVersionWarning(map[string]any{}, serverVersion)
+		return AddonVersionWarning(map[string]any{}, serverVersion), nil
 	}
 	// Socket timeouts derive from these budgets, so this client's own ceiling
 	// bounds how long an addon's report can make it wait.
@@ -176,7 +210,7 @@ func (c *Connection) CheckAddonVersion(ctx context.Context, serverVersion string
 	if f, ok := IsBudget(status["max_execute_code_timeout"], ceiling); ok {
 		c.MaxExecuteCodeTimeout = f
 	}
-	return AddonVersionWarning(status, serverVersion)
+	return AddonVersionWarning(status, serverVersion), status
 }
 
 // ErrInvalidTimeout rejects a timeout that is not a positive finite number.

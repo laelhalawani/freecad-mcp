@@ -68,7 +68,7 @@ func (s *Server) undoOrRedo(ctx context.Context, in undoInput, which string) (*m
 	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure(which, err, ""), nil, nil
+		return failure(ctx, which, err, ""), nil, nil
 	}
 	var res map[string]any
 	if which == "undo" {
@@ -77,7 +77,7 @@ func (s *Server) undoOrRedo(ctx context.Context, in undoInput, which string) (*m
 		res, err = conn.Redo(ctx, in.DocName, steps)
 	}
 	if err != nil {
-		return s.withNotice(failure(which, err, "")), nil, nil
+		return s.withNotice(failure(ctx, which, err, "")), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode(which, res, "")), nil, nil

@@ -3,11 +3,10 @@ package main
 // `uninstall --all` removes what `install` and the install scripts put on
 // the machine: the user-level AI client registrations, the FreeCAD addon
 // from every FreeCAD data folder that holds it and its settings file from
-// every FreeCAD data folder that has one, the stored
-// token, the cache, and the binary the install script placed together with
-// its PATH entry. What `add` wrote into a project stays: its client entries
-// (`uninstall --scope project` removes those, per project) and the token in
-// <project>/.freecad-mcp/.
+// every FreeCAD data folder that has one, the stored password, the listener
+// and its files, the cache, and the binary the install script placed
+// together with its PATH entry. What `add` wrote into a project stays: its
+// client entries (`uninstall --scope project` removes those, per project).
 
 import (
 	"context"
@@ -23,6 +22,7 @@ import (
 	"github.com/sairaph/mcp-wizard/harness"
 
 	"github.com/sairaph/freecad-mcp/internal/addoninstall"
+	"github.com/sairaph/freecad-mcp/internal/autostart"
 	"github.com/sairaph/freecad-mcp/internal/domain"
 	"github.com/sairaph/freecad-mcp/internal/headless"
 )
@@ -39,7 +39,7 @@ func runUninstallAll(ctx context.Context, detector *harness.Detector, cmd cli.Co
 
 	fmt.Fprintln(w, "\n  FreeCAD addon")
 	// The addon folder goes wherever the addon is installed. Its settings
-	// file, which can hold the auth token, goes from every FreeCAD data
+	// file, which can hold the password, goes from every FreeCAD data
 	// folder that has one: uninstall-addon keeps it when it removes the
 	// addon, so it can outlive the addon folder.
 	found := addoninstall.LocateAll(ctx, freecadCommand())
@@ -52,8 +52,17 @@ func runUninstallAll(ctx context.Context, detector *harness.Detector, cmd cli.Co
 	}
 	code = max(code, removePaths(w, paths, verb, cmd.DryRun))
 
-	fmt.Fprintln(w, "\n  Stored token and cache")
-	paths = []string{domain.CredentialPath()}
+	fmt.Fprintln(w, "\n  Listener")
+	code = max(code, stopListener(w, cmd.DryRun))
+
+	fmt.Fprintln(w, "\n  Stored password and cache")
+	paths = []string{
+		domain.CredentialPath(),
+		domain.ListenerLockPath(),
+		domain.ListenerLogPath(),
+		domain.ListenerLogPath() + ".1",
+		domain.ListenerStdoutPath(),
+	}
 	if cache, err := headless.CacheDir(); err == nil {
 		paths = append(paths, cache)
 	}
@@ -81,6 +90,31 @@ func removeProgram(w io.Writer, clientsFailed, dryRun bool) int {
 		return 1
 	}
 	return removeInstalledBinary(w, dryRun)
+}
+
+// stopListener stops and unregisters the listener through the OS mechanism
+// (autostart.Unregister, which stops it first and never errors when nothing
+// is registered), reporting the outcome.
+func stopListener(w io.Writer, dryRun bool) int {
+	state, err := autostart.Status()
+	if err != nil {
+		listenerRegistrationCheckFailedLine(w, err)
+		return 1
+	}
+	if !state.Registered {
+		fmt.Fprintln(w, "  nothing to remove")
+		return 0
+	}
+	if dryRun {
+		fmt.Fprintln(w, "  [ok]   would stop and unregister the listener")
+		return 0
+	}
+	if err := autostart.Unregister(); err != nil {
+		fmt.Fprintf(w, "  [fail] stop and unregister the listener: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(w, "  [ok]   stopped and unregistered the listener")
+	return 0
 }
 
 // removePaths removes each existing path and says so when none exists.

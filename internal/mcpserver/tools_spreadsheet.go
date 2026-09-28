@@ -74,11 +74,11 @@ func (s *Server) registerSpreadsheetTools() {
 func (s *Server) getSpreadsheetCells(ctx context.Context, _ *mcp.CallToolRequest, in getSpreadsheetCellsInput) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("get spreadsheet cells", err, ""), nil, nil
+		return failure(ctx, "get spreadsheet cells", err, ""), nil, nil
 	}
 	res, err := conn.GetSpreadsheetCells(ctx, in.DocName, in.SheetName, in.Cells)
 	if err != nil {
-		return s.withNotice(failure("get spreadsheet cells", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "get spreadsheet cells", err, "")), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("get spreadsheet cells", res, "")), nil, nil
@@ -109,7 +109,7 @@ func (s *Server) getSpreadsheetCells(ctx context.Context, _ *mcp.CallToolRequest
 func (s *Server) updateSpreadsheetCells(ctx context.Context, _ *mcp.CallToolRequest, in updateSpreadsheetCellsInput) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("update spreadsheet cells", err, ""), nil, nil
+		return failure(ctx, "update spreadsheet cells", err, ""), nil, nil
 	}
 	cells := make([]map[string]any, len(in.Cells))
 	for i, c := range in.Cells {
@@ -125,7 +125,7 @@ func (s *Server) updateSpreadsheetCells(ctx context.Context, _ *mcp.CallToolRequ
 
 	res, err := conn.UpdateSpreadsheetCells(ctx, in.DocName, in.SheetName, cells, boolOr(in.Recompute, true))
 	if err != nil {
-		return s.withNotice(failure("update spreadsheet cells", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "update spreadsheet cells", err, "")), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("update spreadsheet cells", res, "")), nil, nil

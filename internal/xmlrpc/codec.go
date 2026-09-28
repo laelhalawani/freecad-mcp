@@ -48,6 +48,20 @@ func (f *Fault) MissingMethod() bool {
 	return missingMethodRe.MatchString(f.String)
 }
 
+// settingsUnreadablePrefix is the start of the fault rpc_server.py's
+// _dispatch raises for every call, ping included, while the addon settings
+// file cannot be read or parsed (contract 6.1): "FreeCAD MCP settings could
+// not be read; save them again with freecad-mcp > Share this PC".
+const settingsUnreadablePrefix = "FreeCAD MCP settings could not be read"
+
+// SettingsUnreadable reports whether the fault is the addon's settings file
+// being unreadable. Unlike a call-specific failure, this means FreeCAD is
+// up and every call is refused the same way (never that FreeCAD is not
+// running), until the file is fixed and saved again.
+func (f *Fault) SettingsUnreadable() bool {
+	return strings.HasPrefix(f.String, settingsUnreadablePrefix)
+}
+
 // EncodeCall renders a methodCall document.
 func EncodeCall(method string, params ...any) ([]byte, error) {
 	var b bytes.Buffer

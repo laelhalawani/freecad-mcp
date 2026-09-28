@@ -22,6 +22,11 @@ import (
 // codeFreeCAD marks a failure FreeCAD reported for a well-formed request.
 const codeFreeCAD = "freecad_error"
 
+// codeIdentityMismatch marks the refusal every call meets while the
+// connector's identity check finds that a loopback host is answered by
+// another computer, not this one (identityMismatchError, live check L11).
+const codeIdentityMismatch = "identity_mismatch"
+
 // maxOutputBytes bounds the output one reply carries (printed output, object
 // listings, tracebacks), so the reply stays under render.MaxBytes with room
 // for its front matter, hints and a screenshot.
@@ -38,14 +43,24 @@ const maxMessageBytes = 2 << 10
 const (
 	statusHint = "Call get_rpc_status to see whether FreeCAD's RPC server is healthy and whether a GUI " +
 		"operation is stuck; it answers even while the GUI thread is busy."
-	authHint = "Run `" + domain.BinaryName + " login --token <token>` with the token set with 'Set Auth Token' " +
-		"in FreeCAD, or set " + domain.EnvToken + " in the AI client's config for this server."
+	authHint = "FreeCAD asks for a password. On the computer running FreeCAD it is set in `" + domain.BinaryName +
+		"` > Share this PC, which also stores it for the agents there (restart the AI client to use a changed " +
+		"one). From another computer, use `" + domain.BinaryName + "` > Connect to FreeCAD on another computer, " +
+		"or save it with `" + domain.BinaryName + " connect --host <host> --password-stdin`, or set " +
+		domain.EnvToken + " in the AI client's config for this server."
 	timeoutHint = "FreeCAD did not answer in time. Call get_rpc_status to see whether a GUI operation is " +
 		"stuck; it answers even while the GUI thread is busy."
 	invalidTimeoutHint = "Pass timeout as a positive number of seconds, or omit it for the default."
 	decodeHint         = "FreeCAD's reply could not be read. Call get_rpc_status to check the addon; run `" +
 		domain.BinaryName + " doctor` to compare the addon and server versions."
 	cancelledHint = "The call was cancelled before FreeCAD answered; send it again to retry."
+	// settingsUnreadableHint is the hint for a fault whose text already says
+	// the addon settings file could not be read (xmlrpc.Fault.SettingsUnreadable):
+	// the message alone has the "save them again" advice, but the default
+	// fault hint ("check the arguments and retry") would be actively
+	// misleading here, since retrying with different arguments never helps.
+	settingsUnreadableHint = "This is not about this call's own arguments: every call is refused the same way " +
+		"until the settings file is fixed. " + statusHint
 )
 
 // toolError is an error that already carries its structured form.
@@ -54,8 +69,19 @@ type toolError struct{ e render.Error }
 func (t *toolError) Error() string { return t.e.Message }
 
 // failure builds an error result for err, which occurred while doing what.
-// hint, when not empty, replaces the hint of err's class.
-func failure(what string, err error, hint string) *mcp.CallToolResult {
+// hint, when not empty, replaces the hint of err's class. ctx is this call's
+// own context, read only to tell the caller's own label apart from another
+// session's for a SESSION_IN_USE refusal (sessionFailure).
+func failure(ctx context.Context, what string, err error, hint string) *mcp.CallToolResult {
+	// The session lock's refusals and a listener reporting FreeCAD down have
+	// fixed texts and hints, whatever the caller's hint (session.go,
+	// connection.go).
+	if res := sessionFailure(ctx, err); res != nil {
+		return res
+	}
+	if res := listenerDownFailure(err); res != nil {
+		return res
+	}
 	var te *toolError
 	if errors.As(err, &te) {
 		return render.ErrorResult(te.e)
@@ -74,15 +100,18 @@ func failure(what string, err error, hint string) *mcp.CallToolResult {
 	case errors.As(err, &fault):
 		e.Code = codeFreeCAD
 		e.Hint = "FreeCAD reported this error while handling the call. Check the arguments and retry. " + statusHint
-		if fault.MissingMethod() {
+		switch {
+		case fault.MissingMethod():
 			e.Hint = "The FreeCAD addon is older than this server. Run `" + domain.BinaryName + " install-addon` and restart FreeCAD."
+		case fault.SettingsUnreadable():
+			e.Hint = settingsUnreadableHint
 		}
 	case errors.As(err, &perr):
 		// The same rejection connector.get, probe and start_freecad already
 		// classify this way (protocolRejectedError): FreeCAD answered but
 		// refused the request, so this is not a generic failure with a
 		// "Failed to <what>" prefix, just the rejection itself.
-		e = protocolRejectedError(perr)
+		e = protocolRejectedError("", perr)
 	case errors.Is(err, context.Canceled):
 		e.Code = render.CodeUnavailable
 		e.Message = fmt.Sprintf("Failed to %s: the request was cancelled", what)
@@ -119,11 +148,11 @@ func isTimeout(err error) bool {
 
 // timedFailure is failure for a tool that takes a timeout: when FreeCAD did
 // not answer in time, the hint also says how to allow more time (larger).
-func timedFailure(what string, err error, larger string) *mcp.CallToolResult {
+func timedFailure(ctx context.Context, what string, err error, larger string) *mcp.CallToolResult {
 	if !errors.Is(err, context.Canceled) && isTimeout(err) {
-		return failure(what, err, timeoutHint+" "+larger)
+		return failure(ctx, what, err, timeoutHint+" "+larger)
 	}
-	return failure(what, err, "")
+	return failure(ctx, what, err, "")
 }
 
 // reported builds an error result for a failure FreeCAD reported in a reply.

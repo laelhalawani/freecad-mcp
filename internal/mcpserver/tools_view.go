@@ -76,7 +76,7 @@ func (s *Server) registerViewTools() {
 func (s *Server) getView(ctx context.Context, _ *mcp.CallToolRequest, in getViewInput) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("get view", err, ""), nil, nil
+		return failure(ctx, "get view", err, ""), nil, nil
 	}
 	docName := ""
 	if in.DocName != nil {
@@ -91,7 +91,7 @@ func (s *Server) getView(ctx context.Context, _ *mcp.CallToolRequest, in getView
 			hint = "Make sure a 3D view of a document is active in FreeCAD, then call get_view again; " +
 				"call get_rpc_status if FreeCAD seems stuck."
 		}
-		return s.withNotice(failure("get view", err, hint)), nil, nil
+		return s.withNotice(failure(ctx, "get view", err, hint)), nil, nil
 	}
 	img, ok := imageContent(shot.Image)
 	if !ok && shot.Reason != "" {
@@ -144,11 +144,11 @@ func (s *Server) getView(ctx context.Context, _ *mcp.CallToolRequest, in getView
 func (s *Server) insertPartFromLibrary(ctx context.Context, _ *mcp.CallToolRequest, in partInput) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("insert part from library", err, ""), nil, nil
+		return failure(ctx, "insert part from library", err, ""), nil, nil
 	}
 	res, err := conn.InsertPartFromLibrary(ctx, in.RelativePath)
 	if err != nil {
-		return s.withNotice(failure("insert part from library", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "insert part from library", err, "")), nil, nil
 	}
 	if !succeeded(res) {
 		// _insert_part_from_library's own except FileNotFoundError/ValueError
@@ -171,11 +171,11 @@ func (s *Server) insertPartFromLibrary(ctx context.Context, _ *mcp.CallToolReque
 func (s *Server) listParts(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("list parts", err, ""), nil, nil
+		return failure(ctx, "list parts", err, ""), nil, nil
 	}
 	parts, err := conn.GetPartsList(ctx)
 	if err != nil {
-		return s.withNotice(failure("list parts", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "list parts", err, "")), nil, nil
 	}
 	list, _ := parts.([]any)
 	if len(list) == 0 {

@@ -2,10 +2,13 @@ import FreeCAD
 import FreeCADGui
 
 import contextlib
+import errno
 import io
 import math
 import os
 import re
+import socket
+import sys
 import threading
 import time
 import uuid
@@ -16,7 +19,8 @@ from xmlrpc.server import resolve_dotted_attribute
 
 from PySide import QtCore
 
-from rpc_server.commands import register_commands, schedule_toggle_sync
+from rpc_server import request_context, session_lock
+from rpc_server.commands import register_commands
 from rpc_server.errors import CONFLICT, INVALID_INPUT, NOT_FOUND, fail, tool_call
 from rpc_server.fem_executor import run_fem_analysis as _run_fem_analysis
 from rpc_server.gui_dispatch import (
@@ -27,14 +31,14 @@ from rpc_server.gui_dispatch import (
     process_gui_tasks,
     request_shutdown,
 )
-from rpc_server.ip_filter import FilteredXMLRPCServer, validate_allowed_ips
+from rpc_server.ip_filter import FilteredXMLRPCServer
 from rpc_server.lookup import require_document
 from rpc_server.object_factory import create_object_gui, edit_object_gui
 from rpc_server.parts_library import get_parts_list, insert_part_from_library
 from rpc_server.paths import home_example
 from rpc_server.property_mapper import Object
 from rpc_server.serialize import serialize_object
-from rpc_server.settings import load_settings, save_settings
+from rpc_server.settings import load_settings, on_change, poll as poll_settings, save_settings, unreadable as settings_unreadable
 from rpc_server.version import PROTOCOL_VERSION, __version__ as ADDON_VERSION
 
 # Feature handlers (documents, import, export, mesh tools, ...) live in their
@@ -47,8 +51,23 @@ rpc_server_thread = None
 rpc_server_instance = None
 _stop_thread = None  # drains shutdown off the GUI thread; see stop_rpc_server
 
-# Clients accepted while remote connections are off.
+# The only clients the RPC server accepts. It always binds 127.0.0.1: other
+# devices reach it through the freecad-mcp listener, which enforces the
+# allowed IPs of remote access and connects from loopback.
 LOOPBACK_ALLOWED_IPS = "127.0.0.1,::1"
+
+# start_rpc_server's bind failure names the port specifically only for these:
+# EADDRINUSE (every OS), and, on Windows, WSAEADDRINUSE (10048, the plain
+# "already in use") and WSAEACCES (10013, what a SO_EXCLUSIVEADDRUSE
+# conflict raises instead, ip_filter.py's FilteredXMLRPCServer.server_bind).
+# The WSA* names exist in the errno module only on Windows, hence getattr.
+_PORT_IN_USE_ERRNOS = frozenset(
+    code for code in (
+        errno.EADDRINUSE,
+        getattr(errno, "WSAEADDRINUSE", None),
+        getattr(errno, "WSAEACCES", None),
+    ) if code is not None
+)
 
 # Persistent namespace for execute_code / execute_code_async. A dedicated dict
 # (instead of this module's globals()) keeps user code from shadowing server
@@ -82,6 +101,14 @@ def _record_job(job_id: str, **fields: Any) -> None:
         ]
         for key in finished[:max(0, len(finished) - _ASYNC_JOBS_KEEP)]:
             del _ASYNC_JOBS[key]
+
+
+def _public_job(job: dict[str, Any]) -> dict[str, Any]:
+    """job as get_async_status hands it to a client: without "session", the
+    internal session id used only to filter jobs above, which must not be
+    seen by another agent the same way a session id never appears anywhere
+    else in a reply (live check, remaining nits)."""
+    return {key: value for key, value in job.items() if key != "session"}
 
 
 # XML 1.0 allows tab, line feed, carriage return and the characters from
@@ -162,6 +189,19 @@ def _query_on_gui(task: Callable[[], Any], operation: str) -> Any:
     raise Fault(1, f"{code}: {error['error']}")
 
 
+def _running_in_wsl() -> bool:
+    """Report whether this FreeCAD runs inside WSL (Windows Subsystem for
+    Linux): /proc/version, the same file the kernel itself exposes, names
+    "microsoft" on a WSL kernel (both WSL1 and WSL2), and nowhere else.
+    False (never raises) on any other platform or if it cannot be read.
+    """
+    try:
+        with open("/proc/version", "r") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
 class FreeCADRPC:
     """RPC server for FreeCAD"""
     EXECUTE_CODE_TIMEOUT = 90  # GUI-thread execution; use execute_code_async for heavy OCCT ops
@@ -178,7 +218,22 @@ class FreeCADRPC:
         refuses them, so helpers such as this one and ``_create_object_gui``
         cannot be called over RPC. Faults use the default wording, with
         characters XML 1.0 forbids escaped (see ``_xml_safe``).
+
+        Every call first picks up a changed settings file (a new password or
+        lock setting) and runs inside the session lock's guard, which refuses
+        other sessions while one holds FreeCAD (session_lock.py).
+
+        While the settings file cannot be read or parsed, every call is
+        refused with a clear fault instead of running with the password or
+        the session lock silently reset to "none" (settings.py poll()).
         """
+        poll_settings()
+        if settings_unreadable():
+            raise Fault(
+                1,
+                "FreeCAD MCP settings could not be read; save them again with "
+                "freecad-mcp > Share this PC",
+            )
         try:
             func = resolve_dotted_attribute(self, method, False)
         except AttributeError:
@@ -186,7 +241,8 @@ class FreeCADRPC:
         if func is None or not callable(func):
             raise Exception(f'method "{method}" is not supported')
         try:
-            result = func(*params)
+            with session_lock.guard(method):
+                result = func(*params)
         except Fault as fault:
             raise Fault(fault.faultCode, _xml_safe(str(fault.faultString))) from None
         except Exception as e:
@@ -200,6 +256,10 @@ class FreeCADRPC:
         """Report server and GUI-dispatch health without using the GUI thread."""
         with _ASYNC_JOBS_LOCK:
             running = [j["id"] for j in _ASYNC_JOBS.values() if j.get("state") == "running"]
+        try:
+            hostname = socket.gethostname()
+        except Exception:
+            hostname = ""
         status = {
             "success": True,
             "rpc_server": "running",
@@ -209,6 +269,16 @@ class FreeCADRPC:
             "protocol_version": PROTOCOL_VERSION,
             "execute_code_timeout": self.EXECUTE_CODE_TIMEOUT,
             "max_execute_code_timeout": self.MAX_EXECUTE_CODE_TIMEOUT,
+            # The computer FreeCAD actually runs on, so a client that reached
+            # it through "localhost" can tell whether that name was answered
+            # by this machine or, for example, WSL's own localhost port
+            # forwarding capturing it instead (live check L11). hostname alone
+            # is not reliable for that: WSL takes the Windows computer name by
+            # default, so both sides can report the same one (live-fixes
+            # review M1); platform and wsl are a second, independent signal.
+            "hostname": hostname,
+            "platform": sys.platform,
+            "wsl": _running_in_wsl(),
         }
         # The document snapshot is kept by an observer, so reading it never
         # waits for the GUI thread. It adds keys but never replaces these.
@@ -219,7 +289,25 @@ class FreeCADRPC:
                 status.setdefault(key, value)
         except Exception as e:
             status["snapshot_error"] = f"{type(e).__name__}: {e}"
+        # The session lock as the calling session sees it: who holds FreeCAD,
+        # idle time and when it frees. Never refused (session_lock.EXEMPT).
+        try:
+            status["session"] = session_lock.status()
+        except Exception as e:
+            status["session"] = {"enabled": False, "error": f"{type(e).__name__}: {e}"}
         return status
+
+    # Session lock (session_lock.py, app_close.py)
+
+    def release_session(self) -> dict[str, Any]:
+        """Free the session lock the calling session holds."""
+        return session_lock.release()
+
+    def close_freecad(self, discard_changes=False) -> dict[str, Any]:
+        """Close every document and quit FreeCAD, freeing the session lock."""
+        from rpc_server.app_close import close_freecad
+
+        return close_freecad(discard_changes)
 
     def get_async_status(self, job_id: str = "") -> dict[str, Any]:
         """Report background jobs without using the GUI thread.
@@ -227,14 +315,29 @@ class FreeCADRPC:
         With ``job_id`` returns that job (state ``running``/``done``/``failed``,
         error and traceback when failed). Without it returns all running jobs
         and up to 20 recently finished jobs. History resets when FreeCAD exits.
+
+        While remote access is on, this only ever sees jobs the calling
+        session itself started: get_async_status is exempt from the session
+        lock (it must work for the holder even while another agent's call is
+        refused), but that would otherwise let any agent read another's job,
+        including the first part of its code and, on failure, its error and
+        traceback, which can hold paths and data (live-fixes review L3). A
+        job or job_id belonging to someone else reads exactly like one that
+        never existed, not a permission error, so this call never confirms
+        or denies another session's activity.
         """
+        caller = request_context.get().session or session_lock.ANONYMOUS
+        restricted = session_lock.snapshot().get("enabled") is True
         with _ASYNC_JOBS_LOCK:
             if job_id:
                 job = _ASYNC_JOBS.get(job_id)
-                if job is None:
+                if job is None or (restricted and job.get("session") != caller):
                     return {"success": False, "error": f"unknown async job: {job_id}"}
-                return {"success": True, "job": dict(job)}
-            return {"success": True, "jobs": [dict(j) for j in _ASYNC_JOBS.values()]}
+                return {"success": True, "job": _public_job(job)}
+            jobs = _ASYNC_JOBS.values()
+            if restricted:
+                jobs = (j for j in jobs if j.get("session") == caller)
+            return {"success": True, "jobs": [_public_job(j) for j in jobs]}
 
     def create_document(self, name="New_Document"):
         # The GUI handler reports the document's ACTUAL name: FreeCAD
@@ -306,12 +409,24 @@ class FreeCADRPC:
             return res
         return _err(res)
 
+    # A ceiling on run_fem_analysis's own timeout, the same idea as
+    # MAX_EXECUTE_CODE_TIMEOUT: an unbounded value would let a caller hold
+    # the session lock (through this call's own in-flight count) far past
+    # what the busy wording promises other agents ("it frees 30 min after
+    # that agent's last call"), for a solve nobody can cancel once started.
+    MAX_FEM_ANALYSIS_TIMEOUT = 3600
+
     def run_fem_analysis(self, doc_name: str, analysis_name: str, timeout: int = 600) -> dict[str, Any]:
         """Run the CalculiX solver on an existing Fem::FemAnalysis and return summary results."""
         try:
             timeout_s = int(timeout)
         except (TypeError, ValueError):
             return {"success": False, "error": f"invalid timeout: {timeout!r}"}
+        if timeout_s > self.MAX_FEM_ANALYSIS_TIMEOUT:
+            return {
+                "success": False,
+                "error": f"timeout must be at most {self.MAX_FEM_ANALYSIS_TIMEOUT} seconds",
+            }
         res = dispatch_to_gui(
             lambda: self._run_fem_analysis_gui(doc_name, analysis_name),
             timeout=timeout_s,
@@ -361,6 +476,12 @@ class FreeCADRPC:
         # the task that set it finishes. Progress is read via get_async_status.
         job_id = f"job-{uuid.uuid4().hex}"
         code_preview = code if len(code) <= 200 else code[:200] + "…"
+        # Captured on the RPC thread, before the worker thread starts: that
+        # thread's own request_context is unset (its own new thread, no
+        # request ever ran on it), so without this, commit()'s dispatch_to_gui
+        # calls (which run on this worker thread) would attribute a timed-out
+        # GUI task to "anonymous" instead of the session that started the job.
+        caller_ctx = request_context.get()
 
         def worker() -> None:
             # NOTE: we do NOT redirect sys.stdout here. contextlib.redirect_stdout
@@ -369,6 +490,7 @@ class FreeCADRPC:
             # via FreeCAD.Console (which is thread-safe) instead.
             # Execute against the live dictionary. Merging a snapshot on exit
             # would restore stale values and lose deletions/concurrent writes.
+            request_context.set(caller_ctx.session, caller_ctx.client, caller_ctx.ip)
             _async_execution.active = True
             outcome: dict[str, Any] = {"state": "done"}
             try:
@@ -387,6 +509,7 @@ class FreeCADRPC:
                 # Publish the result before best-effort logging, so a failing
                 # log call cannot hide the script's outcome from the client.
                 _record_job(job_id, finished=time.time(), **outcome)
+                session_lock.job_finished(job_id)
                 try:
                     if outcome["state"] == "done":
                         FreeCAD.Console.PrintMessage("Async code execution completed.\n")
@@ -397,7 +520,15 @@ class FreeCADRPC:
                 except Exception:
                     pass
 
-        _record_job(job_id, state="running", started=time.time(), code=code_preview)
+        # session is recorded on the job itself, not only in session_lock's
+        # own _job_sessions (which is dropped once the job finishes), so
+        # get_async_status can still tell whose job a *finished* one was
+        # too (live-fixes review L3).
+        _record_job(job_id, state="running", started=time.time(), code=code_preview,
+                    session=caller_ctx.session or session_lock.ANONYMOUS)
+        # A running job keeps its session's lock busy until it ends, so the
+        # lock cannot expire while the job still writes through commit().
+        session_lock.job_started(job_id)
         try:
             threading.Thread(target=worker, daemon=True).start()
         except Exception as e:
@@ -407,6 +538,7 @@ class FreeCADRPC:
                 job_id, state="failed", finished=time.time(), error=error,
                 traceback=_tb.format_exc().rstrip(),
             )
+            session_lock.job_finished(job_id)
             return {"success": False, "job_id": job_id, "error": error}
         return {
             "success": True,
@@ -780,20 +912,42 @@ class FreeCADRPC:
             return str(e)
 
 
-def _status_snapshot_hook(action: str) -> None:
-    """Install or remove the document observer behind get_rpc_status.
+def _module_hook(module: str, action: str) -> None:
+    """Run ``action`` (install or remove) of a module that follows the server.
 
-    A failure is reported on the Console and never stops the server from
-    starting or stopping: get_rpc_status then reports the snapshot error.
+    status_snapshot keeps the document snapshot behind get_rpc_status, and
+    session_widget the status-bar widget. A failure is reported on the
+    Console and never stops the server from starting or stopping.
     """
     try:
-        from rpc_server import status_snapshot
+        import importlib
 
-        getattr(status_snapshot, action)()
+        getattr(importlib.import_module(f"rpc_server.{module}"), action)()
     except Exception as e:
         FreeCAD.Console.PrintWarning(
-            f"MCP RPC: document snapshot {action} failed: {type(e).__name__}: {e}\n"
+            f"MCP RPC: {module} {action} failed: {type(e).__name__}: {e}\n"
         )
+
+
+def _session_timeout_s(settings: dict[str, Any]) -> float:
+    """The session lock's idle timeout in seconds from the settings (session_lock clamps it)."""
+    try:
+        return float(settings.get("session_timeout_minutes", 30)) * 60
+    except (TypeError, ValueError):
+        return float(session_lock.DEFAULT_TIMEOUT_S)
+
+
+def _apply_settings(settings: dict[str, Any]) -> None:
+    """Apply settings that change while the server runs: the password and the lock.
+
+    Runs when the server starts and whenever the settings file changes
+    (settings.on_change), so a password or lock change made in freecad-mcp
+    takes effect without restarting the RPC server.
+    """
+    server = rpc_server_instance
+    if server is not None:
+        server.auth_token = str(settings.get("auth_token", "") or "")
+    session_lock.configure(bool(settings.get("remote_enabled", False)), _session_timeout_s(settings))
 
 
 def start_rpc_server(port: int = 9875) -> str:
@@ -812,32 +966,41 @@ def start_rpc_server(port: int = 9875) -> str:
                     "try again in a few seconds.")
 
     settings = load_settings()
-    remote_enabled = settings.get("remote_enabled", False)
-    auth_token = settings.get("auth_token", "")
+    auth_token = str(settings.get("auth_token", "") or "")
 
-    if remote_enabled:
-        host = "0.0.0.0"
-        allowed_ips = settings.get("allowed_ips", "127.0.0.1")
-        if not auth_token:
+    # Loopback only, whether or not remote access is on: other devices go
+    # through the freecad-mcp listener (freecad-mcp > Share this PC).
+    try:
+        server = FilteredXMLRPCServer(
+            ("127.0.0.1", port),
+            allowed_ips_str=LOOPBACK_ALLOWED_IPS,
+            auth_token=auth_token,
+            allow_none=True,
+            logRequests=False,
+        )
+    except OSError as e:
+        # Both callers (StartRPCServerCommand, InitGui's auto-start) already
+        # catch and report whatever this raises, and a caller relies on this
+        # still raising rather than returning a value on failure (stage 7:
+        # test_busy_port_does_not_publish_running_state), so this only adds a
+        # clearer line to the Report View first, for the one cause worth
+        # naming specifically, then always re-raises.
+        if e.errno in _PORT_IN_USE_ERRNOS:
+            # Most likely another program already holds this port: on
+            # Windows, FilteredXMLRPCServer.server_bind's SO_EXCLUSIVEADDRUSE
+            # (ip_filter.py) makes this exclusive, so WSL's own localhost
+            # port forwarding for the same port cannot share it either
+            # (final live check). The RPC server stays off; the listener (or
+            # a direct client) then reports FreeCAD as not reachable the
+            # same way it does whenever the addon never started its RPC
+            # server at all.
             FreeCAD.Console.PrintWarning(
-                "MCP RPC: remote connections are enabled WITHOUT an auth token. "
-                "Anyone on an allowed IP can execute code in FreeCAD. "
-                "Set a token via 'Set Auth Token' in the FreeCAD MCP menu.\n"
+                f"MCP RPC: port {port} is in use by another program, for example "
+                "WSL port forwarding; see the remote access guide.\n"
             )
-    else:
-        host = "127.0.0.1"
-        # The stored allowlist applies to remote connections only. A LAN-only
-        # list such as 192.168.1.0/24 would otherwise reject every client of
-        # the loopback-bound server.
-        allowed_ips = LOOPBACK_ALLOWED_IPS
-
-    server = FilteredXMLRPCServer(
-        (host, port),
-        allowed_ips_str=allowed_ips,
-        auth_token=auth_token,
-        allow_none=True,
-        logRequests=False,
-    )
+        else:
+            FreeCAD.Console.PrintWarning(f"MCP RPC: could not start the RPC server on port {port}: {e}\n")
+        raise
     try:
         server.register_instance(FreeCADRPC())
         init_waker()
@@ -854,13 +1017,18 @@ def start_rpc_server(port: int = 9875) -> str:
 
     rpc_server_instance = server
     rpc_server_thread = thread
-    _status_snapshot_hook("install")
+    # Apply the real settings through the same path as every later change
+    # (poll -> on_change -> _apply_settings), so a settings file that cannot
+    # be read or parsed at this moment is caught the same way: every call is
+    # refused (_dispatch) rather than starting with the password or the
+    # session lock silently reset to "none".
+    poll_settings()
+    _module_hook("status_snapshot", "install")
+    _module_hook("session_widget", "install")
     bound_host, bound_port = server.server_address
     msg = f"RPC Server started at {bound_host}:{bound_port} (PID {os.getpid()})."
-    if remote_enabled:
-        msg += f" Allowed IPs: {allowed_ips}"
     if auth_token:
-        msg += " Auth token required."
+        msg += " Password required."
     return msg
 
 
@@ -877,7 +1045,8 @@ def stop_rpc_server():
 
     request_shutdown()
     cleanup_waker()
-    _status_snapshot_hook("remove")
+    _module_hook("status_snapshot", "remove")
+    _module_hook("session_widget", "remove")
 
     def _shutdown_and_close():
         # shutdown() only stops the accept loop; in-flight requests run in
@@ -904,4 +1073,4 @@ def stop_rpc_server():
 
 
 register_commands()
-schedule_toggle_sync()
+on_change(_apply_settings)

@@ -39,15 +39,15 @@ func (s *Server) registerRecomputeTools() {
 
 func (s *Server) recomputeDocument(ctx context.Context, _ *mcp.CallToolRequest, in recomputeDocumentInput) (*mcp.CallToolResult, any, error) {
 	if err := freecad.CheckTimeout(in.Timeout); err != nil {
-		return failure("recompute document", err, ""), nil, nil
+		return failure(ctx, "recompute document", err, ""), nil, nil
 	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("recompute document", err, ""), nil, nil
+		return failure(ctx, "recompute document", err, ""), nil, nil
 	}
 	res, err := conn.RecomputeDocument(ctx, in.DocName, in.Timeout)
 	if err != nil {
-		return s.withNotice(timedFailure("recompute document", err, largerTimeout("recompute_document"))), nil, nil
+		return s.withNotice(timedFailure(ctx, "recompute document", err, largerTimeout("recompute_document"))), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("recompute document", res,

@@ -1,17 +1,27 @@
 # Tools
 
-[Back to README](../README.md) · [Installation](installation.md) · [Configuration](configuration.md) · [Code execution](execution.md)
+[Back to README](../README.md) · [Installation](installation.md) · [Configuration](configuration.md) · [Code execution](execution.md) · [Remote access](remote-access.md)
 
-FreeCAD MCP exposes 37 tools, grouped below by task. Every tool that changes a
-document records its change as one named transaction, next to edits made by
-hand in FreeCAD, so `undo` and `redo` cover it. Placements use degrees: a
-`Rotation`'s `Angle` is given to `create_object` and `update_object` in
-degrees, and `get_object` and `list_objects` report it in degrees.
+FreeCAD MCP exposes 39 tools, grouped below by task; two of them,
+`release_session` and `close_freecad`, are listed only while
+[remote access](remote-access.md) is on, since they manage the multi-agent
+session lock that comes with it. Every tool that changes a document records
+its change as one named transaction, next to edits made by hand in FreeCAD,
+so `undo` and `redo` cover it. Placements use degrees: a `Rotation`'s `Angle`
+is given to `create_object` and `update_object` in degrees, and `get_object`
+and `list_objects` report it in degrees.
 
 Most tools take a `doc_name`, the internal name `list_documents` shows (not
 necessarily the document's label), and many take `obj_name` the same way from
 `list_objects`. A tool that changes a document reports objects left invalid
 by the change and how to fix or remove them.
+
+Every path a tool takes is on the computer running FreeCAD; with
+[remote access](remote-access.md) that is another computer than the one
+running the AI client or the MCP server, and no file is transferred over
+this connection: see [file paths](remote-access.md#file-paths).
+`execute_code_headless` is the exception: its script runs on the computer
+hosting the MCP server, so its paths are on that computer instead.
 
 - [Document lifecycle](#document-lifecycle)
 - [Objects](#objects)
@@ -532,7 +542,7 @@ summary results.
 
 - `doc_name` (string, required)
 - `analysis_name` (string, required): the `Fem::AnalysisPython` object.
-- `timeout` (integer, optional, default 600, 1 to 604800 seconds, a week).
+- `timeout` (integer, optional, default 600, 1 to 3600 seconds, an hour).
 - `include_screenshot`, `view_name`: see [screenshot options](#screenshot-options).
 
 Prerequisites in the document, all created with `create_object`:
@@ -767,15 +777,19 @@ build the shape with `create_object` instead in that case.
 
 ### `start_freecad`
 
-Start FreeCAD's GUI with the MCP addon's RPC server on this machine, when it
-is not running yet.
+Start FreeCAD's GUI, with the MCP addon's RPC server, on the machine that
+runs FreeCAD, when it is not running yet: the local machine, or, with
+[remote access](remote-access.md) on, the computer sharing FreeCAD, through
+its listener.
 
 - `file` (string, optional): absolute path of an `.FCStd` file to open once
-  FreeCAD has started.
+  FreeCAD has started, on the machine that runs FreeCAD.
 
 The tool first checks whether FreeCAD already answers; if so it reports state
-`already_running` and launches nothing. Otherwise it starts FreeCAD detached
-from this server with a startup macro that starts the RPC server on the
+`already_running` and launches nothing, unless another agent holds it, in
+which case it returns the "in use" error instead (see
+[multi-agent rules](remote-access.md#multi-agent-rules)). Otherwise it starts
+FreeCAD detached, with a startup macro that starts the RPC server on the
 configured port, so the addon's auto-start setting does not matter. When
 another FreeCAD window is already open without the RPC server, that FreeCAD
 receives the request instead (state `forwarded`). For a FreeCAD that already
@@ -786,9 +800,10 @@ returns at once: call `get_rpc_status` every few seconds until it reports
 `rpc: reachable`, then continue with `list_documents`. A second call while a
 launch is already starting reuses it instead of starting FreeCAD again, and
 says so. Set `FREECAD_MCP_FREECAD` in the client's config when FreeCAD is
-installed somewhere the server does not find. Only a local FreeCAD can be
-started; with `FREECAD_MCP_HOST` set to another machine, start FreeCAD there
-instead.
+installed somewhere the server does not find. With remote access on, the
+client's config has no effect there instead: set `FREECAD_MCP_FREECAD` on
+the FreeCAD computer itself before turning on Share this PC, or turn Share
+this PC on again after setting it, so freecad-mcp detects it there.
 
 ### `get_rpc_status`
 
@@ -805,7 +820,54 @@ carries the process id, elapsed time since `start_freecad`, exit code and
 launch log tail known so far, plus the documents last seen before FreeCAD
 stopped answering.
 
+With [remote access](remote-access.md) on, the reply also carries
+`session_lock` (`off`, `free`, `yours` or `other`; `unknown` while FreeCAD is
+down and remote access is known to be on regardless, since its actual state
+cannot be read without FreeCAD; left out entirely when that is not knowable
+either, because FreeCAD has not answered at all yet) and, while it is held,
+`session_holder`, `session_idle_seconds` and `session_frees_in_seconds`: who
+holds FreeCAD, or that this agent does, how long they have been idle, and
+when the claim frees on its own. See
+[multi-agent rules](remote-access.md#multi-agent-rules) for what claims it
+and how `release_session` and `close_freecad` manage it.
+While reachable, the reply also names the computer FreeCAD actually runs on
+("FreeCAD is running on \<hostname\> and its RPC server answered"). When this
+MCP server is configured to reach FreeCAD through `localhost` but another
+computer answers there instead, every call, not only this one, is refused
+until the setup is fixed: see
+[WSL and Windows on the same computer](remote-access.md#wsl-and-windows-on-the-same-computer)
+for why that happens and how to fix it.
+
 This is the tool to poll after `start_freecad` until it reports `rpc:
-reachable`, and to call whenever another tool times out or FreeCAD's state is
-unclear. Once it reports running, use `list_documents` for the full
-per-document detail.
+reachable`, and to call whenever another tool times out, fails because
+FreeCAD is in use by another agent, or FreeCAD's state is unclear. Once it
+reports running, use `list_documents` for the full per-document detail.
+
+### `release_session`
+
+Free the FreeCAD session this agent holds, so another agent can use FreeCAD
+at once instead of waiting for the idle timeout. Listed only while
+[remote access](remote-access.md) is on. Takes no arguments.
+
+With remote access on, an agent's first call to FreeCAD, other than
+`start_freecad` and `get_rpc_status`, claims FreeCAD for that agent until it
+has been idle for the configured timeout; `get_rpc_status` shows who holds it
+and when it frees. This only frees this agent's own session: documents stay
+open and unsaved changes stay unsaved, so call `save_document` first. When a
+job this agent started (`execute_code_async`, or a GUI operation that outlived
+its own timeout) is still running, the session stays held until that job
+ends, then frees on its own.
+
+### `close_freecad`
+
+Quit FreeCAD on the computer that runs it and free the session, for example
+at the end of a work session. Listed only while
+[remote access](remote-access.md) is on.
+
+- `discard_changes` (boolean, optional, default false): quit even when
+  documents have unsaved changes, losing them.
+
+Refused while there are unsaved changes and `discard_changes` is not true
+(save them first with `save_document` or `save_document_as`), or while a
+task panel or command is open in FreeCAD. FreeCAD closes a moment after the
+reply; `start_freecad` opens it again.

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -140,9 +141,49 @@ func installedIn(targets []Target) []Target {
 	return out
 }
 
+// askFreeCADCache memoizes AskFreeCAD's successful results for the rest of
+// this process's run, per distinct command (joined with a separator no
+// argument can itself contain): spawning FreeCAD only to ask it one
+// question costs several seconds (headless Python startup), which a caller
+// that only needs to know where the addon's settings file is, not
+// necessarily to ask FreeCAD again, should not have to pay a second time
+// when something earlier in the same run already did (live check N9:
+// `connect`'s "use this computer instead" took 8 s over a local credential
+// file edit). A found directory cannot change while this process runs, so
+// caching that is always correct, not only a fast path; a "" result (not
+// found yet, or this particular ask cut short by ctx) is never cached, since
+// FreeCAD can be installed, or simply take longer to answer, later in the
+// same run: listen.go's retry loop locates again on every attempt expressly
+// so a FreeCAD installed since this process started is picked up without a
+// restart, which a cached "" would otherwise defeat (live-fixes review L1).
+var (
+	askFreeCADCacheMu sync.Mutex
+	askFreeCADCache   = map[string]string{}
+)
+
 // AskFreeCAD runs freecadcmd to print FreeCAD.getUserAppDataDir(). It
 // returns "" when FreeCAD cannot be found or asked.
 func AskFreeCAD(ctx context.Context, command []string) string {
+	key := strings.Join(command, "\x00")
+	askFreeCADCacheMu.Lock()
+	if dir, ok := askFreeCADCache[key]; ok {
+		askFreeCADCacheMu.Unlock()
+		return dir
+	}
+	askFreeCADCacheMu.Unlock()
+
+	dir := askFreeCADUncached(ctx, command)
+	if dir == "" {
+		return dir
+	}
+
+	askFreeCADCacheMu.Lock()
+	askFreeCADCache[key] = dir
+	askFreeCADCacheMu.Unlock()
+	return dir
+}
+
+func askFreeCADUncached(ctx context.Context, command []string) string {
 	if len(command) == 0 {
 		command = headless.Detect(ctx)
 	}

@@ -49,11 +49,11 @@ func TestSettingsFromEnv(t *testing.T) {
 	for _, k := range []string{EnvHost, EnvPort, EnvToken, EnvOnlyTextFeedback, EnvFreecadCmd, EnvFreecadGUI} {
 		t.Setenv(k, "")
 	}
-	s, err := SettingsFromEnv(" stored ")
+	s, err := SettingsFromEnv(" stored ", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Host != "localhost" || s.Port != DefaultRPCPort || s.Token != "stored" || s.OnlyTextFeedback || s.FreecadCmd != nil {
+	if s.Host != "127.0.0.1" || s.Port != DefaultRPCPort || s.Token != "stored" || s.OnlyTextFeedback || s.FreecadCmd != nil {
 		t.Fatalf("defaults = %+v", s)
 	}
 
@@ -62,7 +62,7 @@ func TestSettingsFromEnv(t *testing.T) {
 	t.Setenv(EnvToken, "from-env")
 	t.Setenv(EnvOnlyTextFeedback, "true")
 	t.Setenv(EnvFreecadCmd, "flatpak run --command=freecadcmd org.freecad.FreeCAD")
-	s, err = SettingsFromEnv("stored")
+	s, err = SettingsFromEnv("stored", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,9 +73,30 @@ func TestSettingsFromEnv(t *testing.T) {
 	for k, v := range map[string]string{EnvHost: "not a host", EnvPort: "0", EnvOnlyTextFeedback: "maybe"} {
 		t.Run(k, func(t *testing.T) {
 			t.Setenv(k, v)
-			if _, err := SettingsFromEnv(""); err == nil {
+			if _, err := SettingsFromEnv("", "", ""); err == nil {
 				t.Fatalf("%s=%q accepted", k, v)
 			}
 		})
+	}
+}
+
+// TestSettingsFromEnvResolvesLocalhostToLoopback covers the live-fixes
+// review N2 fix: "localhost" and "localhost." (a trailing dot, an absolute
+// DNS name IsLoopbackHost already accepts) both resolve to 127.0.0.1
+// itself, never left as the name, which can resolve to ::1 first and be
+// captured by something else bound there (WSL's own port forwarding).
+func TestSettingsFromEnvResolvesLocalhostToLoopback(t *testing.T) {
+	for _, k := range []string{EnvHost, EnvPort, EnvToken, EnvOnlyTextFeedback, EnvFreecadCmd, EnvFreecadGUI} {
+		t.Setenv(k, "")
+	}
+	for _, host := range []string{"localhost", "localhost.", "LOCALHOST", "LocalHost."} {
+		t.Setenv(EnvHost, host)
+		s, err := SettingsFromEnv("", "", "")
+		if err != nil {
+			t.Fatalf("%q: %v", host, err)
+		}
+		if s.Host != "127.0.0.1" {
+			t.Errorf("%q resolved to %q, want 127.0.0.1", host, s.Host)
+		}
 	}
 }
