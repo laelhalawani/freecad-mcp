@@ -15,7 +15,7 @@ import (
 type femInput struct {
 	DocName      string `json:"doc_name" jsonschema:"the name of the FreeCAD document"`
 	AnalysisName string `json:"analysis_name" jsonschema:"the name of the Fem::AnalysisPython object"`
-	Timeout      *int   `json:"timeout,omitempty" jsonschema:"seconds to wait for the solver, from 1 to 604800 (a week); default 600"`
+	Timeout      *int   `json:"timeout,omitempty" jsonschema:"seconds to wait for the solver, from 1 to 3600 (an hour); default 600"`
 	screenshotOptions
 }
 
@@ -29,6 +29,20 @@ type statusFront struct {
 	LogFile        *string `yaml:"log_file,omitempty"`
 	ActiveDocument *string `yaml:"active_document,omitempty"`
 	DocumentCount  *int    `yaml:"document_count,omitempty"`
+	// Hostname is the computer FreeCAD actually runs on (its own
+	// os.Hostname()), whenever the reply carries one (live check L11).
+	Hostname *string `yaml:"hostname,omitempty"`
+
+	// The session lock fields, filled from sessionFront's fields (kept as
+	// plain fields rather than an embedded sessionFields so this struct never
+	// depends on how that one is declared). SessionLock is omitempty: left
+	// out entirely, not "off", on the direct path when FreeCAD has never
+	// answered since this process started, so whether remote access is even
+	// on is not knowable at all (live-fixes review, remaining nits).
+	SessionLock           string `yaml:"session_lock,omitempty"`
+	SessionHolder         string `yaml:"session_holder,omitempty"`
+	SessionIdleSeconds    *int   `yaml:"session_idle_seconds,omitempty"`
+	SessionFreesInSeconds *int   `yaml:"session_frees_in_seconds,omitempty"`
 }
 
 type femFront struct {
@@ -40,9 +54,11 @@ type femFront struct {
 	Transaction     string   `yaml:"transaction,omitempty"`
 }
 
-// maxFEMTimeout bounds the solver wait (a week), so the reply timeout derived
-// from it cannot overflow.
-const maxFEMTimeout = 7 * 24 * 3600
+// maxFEMTimeout bounds the solver wait, matching the addon's own cap
+// (rpc_server.py MAX_FEM_ANALYSIS_TIMEOUT): a caller that follows this
+// schema's maximum must never get the addon's bare "timeout must be at
+// most 3600 seconds" instead of this tool's own, better-explained error.
+const maxFEMTimeout = 3600
 
 const femDescription = `Run the CalculiX solver on an existing FEM analysis container and return summary results.
 
@@ -91,6 +107,12 @@ func (s *Server) getRPCStatus(ctx context.Context, _ *mcp.CallToolRequest, _ str
 	if pr.rejected != nil {
 		return s.withNotice(render.ErrorResult(*pr.rejected)), nil, nil
 	}
+	if pr.identityMismatch != "" {
+		// Another computer answers this loopback host (live check L11):
+		// refused the same way any other call is, not shown as a footnote
+		// under an otherwise successful reply.
+		return s.withNotice(render.ErrorResult(identityMismatchError(pr.identityMismatch))), nil, nil
+	}
 	if pr.oldAddon {
 		return s.withNotice(render.ErrorResult(render.Error{
 			Code:    codeFreeCAD,
@@ -101,6 +123,18 @@ func (s *Server) getRPCStatus(ctx context.Context, _ *mcp.CallToolRequest, _ str
 
 	front := statusFront{}
 	var sections []string
+	// remoteEnabledDown is set when remote access is known to be on while
+	// FreeCAD itself is down (a listener's own settings say so independent
+	// of the addon, live check L7; or, on the direct path, the last
+	// successful get_rpc_status did): session_lock is then "unknown"
+	// instead of sessionFront's own "off" default, since its actual state
+	// (held or free) cannot be read right now, only that it is not simply
+	// off. sessionKnown is false only on the direct path with no last
+	// successful reading at all (never connected since this process
+	// started): session_lock is then left out of the reply entirely,
+	// rather than guessing "off" (live-fixes review, remaining nits).
+	remoteEnabledDown := false
+	sessionKnown := true
 
 	switch {
 	case pr.fault != "":
@@ -133,26 +167,97 @@ func (s *Server) getRPCStatus(ctx context.Context, _ *mcp.CallToolRequest, _ str
 			n := len(docs)
 			front.DocumentCount = &n
 		}
-		sections = append(sections, "FreeCAD is running and its RPC server answered.", jsonBlock(pr.status))
+		hostname, _ := pr.status["hostname"].(string)
+		if hostname != "" {
+			front.Hostname = &hostname
+		}
+		summary := "FreeCAD is running and its RPC server answered."
+		if hostname != "" {
+			summary = fmt.Sprintf("FreeCAD is running on %s and its RPC server answered.", hostname)
+		}
+		sections = append(sections, summary, jsonBlock(pr.status))
 	default:
-		ls := s.launcher.State()
-		everAnswered := s.fc.everAnswered(ls)
-		fillDownState(&front, ls, pr.timedOut, everAnswered)
-		sections = append(sections, nextStepFor(front.Freecad, ls, s.config.FreeCAD.Host, everAnswered))
-		if ls.LogPath != "" {
-			if tail := s.launcher.LogTail(4 << 10); tail != "" {
-				sections = append(sections, fmt.Sprintf("Last launch log (`%s`):", ls.LogPath), textBlock(tail))
+		host := s.config.FreeCAD.Host
+		if s.fc.isListener(ctx) {
+			// This server never launched FreeCAD itself here: the listener on
+			// host did, so its own launch state (not the local launcher, which
+			// knows nothing about it) is what down-state and the log tail come
+			// from.
+			var ls freecad.LaunchState
+			if lst, lerr := s.fc.listenerStatus(ctx); lerr == nil {
+				ls = lst.FreeCAD.LaunchState(time.Now())
+				everAnswered := s.fc.everAnswered(ls)
+				fillDownState(&front, ls, false, everAnswered)
+				remoteEnabledDown = lst.RemoteEnabled
+				sections = append(sections, nextStepForRemote(front.Freecad, ls, host, everAnswered))
+				if lst.FreeCAD.LogTail != "" {
+					sections = append(sections, fmt.Sprintf("Last launch log (`%s` on %s):", ls.LogPath, host), textBlock(lst.FreeCAD.LogTail))
+				}
+			} else {
+				front.Freecad = "not_running"
+				front.RPC = "unreachable"
+				sections = append(sections,
+					fmt.Sprintf("The freecad-mcp listener on %s could not be reached (%v).", host, lerr),
+					fmt.Sprintf("Check that \"Share this PC\" is set up and its listener runs on %s, and that this "+
+						"computer's IP address is in its allowed list; run `%s doctor` to check the setup.",
+						host, domain.BinaryName))
+			}
+			if docs, active, ok := s.fc.lastKnownDocuments(ls); ok {
+				sections = append(sections, lastKnownDocumentsBlock(docs, active))
+			}
+		} else {
+			ls := s.launcher.State()
+			everAnswered := s.fc.everAnswered(ls)
+			fillDownState(&front, ls, pr.timedOut, everAnswered)
+			if enabled, known := s.fc.lastKnownRemoteEnabled(); known {
+				remoteEnabledDown = enabled
+			} else {
+				sessionKnown = false
+			}
+			sections = append(sections, nextStepFor(front.Freecad, ls, host, everAnswered))
+			if ls.LogPath != "" {
+				if tail := s.launcher.LogTail(4 << 10); tail != "" {
+					sections = append(sections, fmt.Sprintf("Last launch log (`%s`):", ls.LogPath), textBlock(tail))
+				}
+			}
+			// Documents go in the body only, clearly labelled as a past reading:
+			// active_document and document_count in the front matter would read
+			// as current state, which they are not while freecad is not running.
+			// lastKnownDocuments itself compares when that reading was taken
+			// against ls.StartedAt, so a new launch never shows a previous
+			// process's documents as this one's.
+			if docs, active, ok := s.fc.lastKnownDocuments(ls); ok {
+				sections = append(sections, lastKnownDocumentsBlock(docs, active))
 			}
 		}
-		// Documents go in the body only, clearly labelled as a past reading:
-		// active_document and document_count in the front matter would read
-		// as current state, which they are not while freecad is not running.
-		// lastKnownDocuments itself compares when that reading was taken
-		// against ls.StartedAt, so a new launch never shows a previous
-		// process's documents as this one's.
-		if docs, active, ok := s.fc.lastKnownDocuments(ls); ok {
-			sections = append(sections, lastKnownDocumentsBlock(docs, active))
-		}
+	}
+
+	// The session lock fields and sentence: always filled (sessionFront falls
+	// back to the lock reading as off when status carries no session key, for
+	// example while FreeCAD is down), the sentence appended only next to the
+	// reachable report it explains.
+	sf, sessionText := sessionFront(ctx, pr.status)
+	front.SessionLock = sf.SessionLock
+	front.SessionHolder = sf.SessionHolder
+	front.SessionIdleSeconds = sf.SessionIdleSeconds
+	front.SessionFreesInSeconds = sf.SessionFreesInSeconds
+	switch {
+	case remoteEnabledDown:
+		// sessionFront read no session key (FreeCAD is down) and so called
+		// it "off"; the listener's own settings, or the last successful
+		// reading on the direct path, say otherwise, just not what state it
+		// is actually in right now.
+		front.SessionLock = "unknown"
+	case !sessionKnown:
+		// The direct path, and FreeCAD has never answered since this
+		// process started: there is no listener to ask instead and no last
+		// reading to fall back on, so whether remote access is even on is
+		// not knowable at all. Left out of the reply (SessionLock is
+		// omitempty) rather than guessing "off".
+		front.SessionLock = ""
+	}
+	if pr.reachable && pr.fault == "" && sessionText != "" {
+		sections = append(sections, sessionText)
 	}
 
 	return s.withNotice(render.SuccessResult(front, strings.Join(sections, "\n\n"))), nil, nil
@@ -253,6 +358,38 @@ func nextStepFor(state string, ls freecad.LaunchState, host string, everAnswered
 	}
 }
 
+// nextStepForRemote is nextStepFor for FreeCAD behind a listener on host: it
+// names host throughout, and, unlike nextStepFor, never tells the caller to
+// start FreeCAD there themselves, since start_freecad reaches it through the
+// listener.
+func nextStepForRemote(state string, ls freecad.LaunchState, host string, everAnswered bool) string {
+	switch state {
+	case "starting":
+		return fmt.Sprintf("FreeCAD is starting on %s. Call get_rpc_status with {} again in a few seconds; it "+
+			"usually reaches rpc: reachable within 15 to 30 seconds of start_freecad.", host)
+	case "unresponsive":
+		return fmt.Sprintf("FreeCAD is running on %s but its RPC server has not answered for a while. Check the "+
+			"FreeCAD window there for a dialog blocking it (a save prompt, an importer's options dialog); if it "+
+			"stays unresponsive, close FreeCAD on %s and call start_freecad again. Run `%s doctor` to check the setup.",
+			host, host, domain.BinaryName)
+	case "exited":
+		return fmt.Sprintf("The FreeCAD process on %s has exited. Call start_freecad with {} to launch it again there.", host)
+	default: // not_running
+		if ls.State == freecad.LaunchForwarded {
+			if everAnswered {
+				return fmt.Sprintf("start_freecad forwarded this to a FreeCAD window already open on %s; its RPC "+
+					"server did answer for a while but has since stopped, most likely because that window was "+
+					"closed. Call start_freecad with {} to launch a fresh one there.", host)
+			}
+			return fmt.Sprintf("start_freecad forwarded this to a FreeCAD window already open on %s, but its RPC "+
+				"server never answered. Check that window's Report View on %s, then call start_freecad with {} again.",
+				host, host)
+		}
+		return fmt.Sprintf("FreeCAD is not running on %s. Call start_freecad with {} to launch it there, then "+
+			"get_rpc_status with {} to check on it.", host)
+	}
+}
+
 // lastKnownDocumentsBlock renders the documents get_rpc_status last saw while
 // FreeCAD was reachable, for a reply made while it is down.
 func lastKnownDocumentsBlock(docs []map[string]any, active string) string {
@@ -311,13 +448,13 @@ func (s *Server) runFEMAnalysis(ctx context.Context, _ *mcp.CallToolRequest, in 
 	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("run FEM analysis", err, ""), nil, nil
+		return failure(ctx, "run FEM analysis", err, ""), nil, nil
 	}
 	larger := fmt.Sprintf("For a long analysis, call run_fem_analysis again with a larger timeout (this run allowed %d seconds, at most %d).",
 		timeout, maxFEMTimeout)
 	res, err := conn.RunFEMAnalysis(ctx, in.DocName, in.AnalysisName, timeout)
 	if err != nil {
-		return s.withNotice(timedFailure("run FEM analysis", err, larger)), nil, nil
+		return s.withNotice(timedFailure(ctx, "run FEM analysis", err, larger)), nil, nil
 	}
 	if !succeeded(res) {
 		// fem_executor's own not_found/invalid_input checks (an unknown

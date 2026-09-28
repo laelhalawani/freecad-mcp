@@ -9,6 +9,8 @@ import base64
 import hmac
 import ipaddress
 import re
+import socket
+import sys
 import time
 from email.message import Message
 from socketserver import ThreadingMixIn
@@ -16,8 +18,45 @@ from xmlrpc.server import SimpleXMLRPCRequestHandler, SimpleXMLRPCServer
 
 import FreeCAD
 
+from rpc_server import request_context, session_lock
+from rpc_server.settings import poll as poll_settings
+
 
 _XML_MEDIA_TYPES = frozenset({"text/xml", "application/xml"})
+
+# Headers identifying the calling MCP server session. The listener forwards
+# both and adds none of its own.
+_HEADER_SESSION = "X-FreeCAD-MCP-Session"
+_HEADER_CLIENT = "X-FreeCAD-MCP-Client"
+_HEADER_LOCK = "X-FreeCAD-MCP-Lock"
+
+_SESSION_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+def _valid_session(value: str | None) -> str | None:
+    """The session header, or None when absent or not 1 to 128 chars of [A-Za-z0-9._:-]."""
+    if value is None:
+        return None
+    value = value.strip()
+    return value if _SESSION_RE.match(value) else None
+
+
+def _valid_client(value: str | None) -> str | None:
+    """The client label header, or None when absent, not valid UTF-8, empty, too long or not printable.
+
+    http.server decodes header bytes one character per byte (latin-1);
+    encoding back to those bytes and decoding as UTF-8 recovers the text the
+    sender wrote, so length and printability are checked in characters, not
+    raw bytes.
+    """
+    if value is None:
+        return None
+    try:
+        value = value.encode("latin-1").decode("utf-8")
+    except UnicodeError:
+        return None
+    value = value.strip()
+    return value if value and len(value) <= 80 and value.isprintable() else None
 
 
 def _host_name(host_header: str) -> str:
@@ -77,6 +116,15 @@ class BrowserGuardRequestHandler(SimpleXMLRPCRequestHandler):
 
     # StreamRequestHandler.setup applies this to the connection.
     timeout = _REQUEST_TIMEOUT_S
+
+    def end_headers(self) -> None:
+        """Add X-FreeCAD-MCP-Lock to every reply, including the 401/403/415 ones."""
+        try:
+            enabled = bool(session_lock.snapshot().get("enabled", False))
+        except Exception:
+            enabled = False
+        self.send_header(_HEADER_LOCK, "on" if enabled else "off")
+        super().end_headers()
 
     def discard_body(self) -> None:
         """Read the unread body of a request that is being refused.
@@ -178,6 +226,18 @@ class TokenAuthRequestHandler(BrowserGuardRequestHandler):
     def parse_request(self):
         if not super().parse_request():
             return False
+        # Reset first so a reused (keep-alive) connection never keeps a
+        # previous request's identity if anything below raises.
+        request_context.clear()
+        request_context.set(
+            _valid_session(self.headers.get(_HEADER_SESSION)),
+            _valid_client(self.headers.get(_HEADER_CLIENT)),
+            self.client_address[0],
+        )
+        # Pick up a changed password before checking it, so the first
+        # request after a change in freecad-mcp is checked against the new
+        # one instead of the one the server started with.
+        poll_settings()
         token = getattr(self.server, "auth_token", "")
         if not token:
             return True  # authentication disabled
@@ -215,6 +275,32 @@ class FilteredXMLRPCServer(ThreadingMixIn, SimpleXMLRPCServer):
         self.loopback_only = _is_loopback_name(str(addr[0]).lower())
         kwargs.setdefault("requestHandler", TokenAuthRequestHandler)
         super().__init__(addr, **kwargs)
+
+    def server_bind(self):
+        """Bind, exclusively on Windows: SO_EXCLUSIVEADDRUSE (final live
+        check) makes this bind fail loudly instead of quietly sharing
+        127.0.0.1:<port> with whatever already holds it, most notably WSL's
+        own localhost port forwarding for the same port when FreeCAD is
+        shared from inside WSL and on Windows on the same machine at once
+        (see remote-access.md's WSL section). getattr guards a constant
+        that exists only on Windows Python builds; sys.platform keeps this
+        a no-op everywhere else, where the plain bind already fails the
+        same way a second listener on the same port would.
+
+        SO_REUSEADDR and SO_EXCLUSIVEADDRUSE conflict on the same socket on
+        Windows (WinError 10022, WSAEINVAL) when both are set;
+        SimpleXMLRPCServer's own allow_reuse_address is True in FreeCAD's
+        Python, which would otherwise set SO_REUSEADDR right after this in
+        TCPServer.server_bind, so it is turned off here first, only when
+        this is actually setting the exclusive option (stage 7 blocker: the
+        RPC server never started on Windows with both set).
+        """
+        if sys.platform == "win32":
+            exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+            if exclusive is not None:
+                self.allow_reuse_address = False
+                self.socket.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+        super().server_bind()
 
     def verify_request(self, request, client_address):
         client_ip = client_address[0]
@@ -254,7 +340,7 @@ def validate_allowed_ips(allowed_ips_str):
 
     if not _COMMA_SEP_RE.match(allowed_ips_str):
         return [], [
-            "Malformed list - check for leading/trailing commas, "
+            "Malformed list: check for leading/trailing commas, "
             "double commas, or missing separators."
         ]
 

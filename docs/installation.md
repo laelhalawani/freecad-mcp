@@ -1,6 +1,6 @@
 # Installation
 
-[Back to README](../README.md) · [Configuration](configuration.md)
+[Back to README](../README.md) · [Configuration](configuration.md) · [Remote access](remote-access.md)
 
 FreeCAD MCP has two parts:
 
@@ -44,38 +44,55 @@ prints the line to add to yours. The wizard:
    whose `freecad` entry runs another program, starts deselected so that
    entry is kept; selecting it replaces the entry. With no client selected,
    setup continues and installs only the addon.
-2. **FreeCAD RPC auth token**: skip this unless you set a token with
-   **Set Auth Token** in FreeCAD (see [configuration](configuration.md#3-require-an-auth-token)).
-   Without a token, any program running on your machine can call FreeCAD's
-   RPC server. On the input screen every key goes into the token, `q`
-   included; `Esc` returns to the **Sign in** / **Skip for now** choice.
-3. **FreeCAD addon**: the wizard asks FreeCAD for its user data directory
-   (`FreeCAD.getUserAppDataDir()`) and shows where the addon will go. The
-   option to start the RPC server together with FreeCAD starts from the
-   current setting, and is on for a new install; toggle it with space. What
-   you choose is applied, on or off.
+2. **FreeCAD addon**: when FreeCAD is found on the machine, the wizard asks
+   it for its user data directory (`FreeCAD.getUserAppDataDir()`) and shows
+   where the addon will go. The option to start the RPC server together with
+   FreeCAD starts from the current setting, and is on for a new install;
+   toggle it with space. What you choose is applied, on or off. When FreeCAD
+   is not found, the wizard offers to stop here so you can install it (see
+   [below](#freecad-not-found)) instead, or to use FreeCAD on another
+   computer, which skips this step.
+3. **FreeCAD on another computer, or Share this PC**: when FreeCAD was
+   found, choose whether other devices may use it too (see
+   [remote access](remote-access.md) for what this sets up: allowed IP
+   addresses, an optional password, how long an idle agent keeps FreeCAD).
+   When you chose to use FreeCAD on another computer in the previous step
+   instead, enter that computer's address here and test the connection.
 4. **Registration**: the `freecad` server is added to each selected client's
-   configuration, and the wizard tells you which clients need a restart. Then
-   the token is saved and the addon installed.
+   configuration, and the wizard tells you which clients need a restart.
+   Then the addon is installed and what you chose in step 3 is applied.
 
-Nothing is written before step 4. Press `q` or `Ctrl+C` in steps 1 to 3 to
-cancel (on the token input screen, `Ctrl+C`): the wizard changes nothing, and
-the install script removes the binary and the `PATH` entry it just added, or
-puts back the version you had installed before. Interrupting the install
-script before the wizard starts, or an error that stops it there, undoes its
-changes the same way. Once step 4 starts writing the client configurations it runs to the
-end, and setup is complete. Restart FreeCAD and your AI client when the wizard
-finishes.
+Nothing is written before step 4. Press `q` or `Ctrl+C` in steps 1 and 2 to
+cancel; on a screen where you type a host, address list or password, `q`
+types like any other character instead, so only `Ctrl+C` cancels there. Either
+way the wizard changes nothing, and the install script removes the binary and
+the `PATH` entry it just added, or puts back the version you had installed
+before. Interrupting the install script before the wizard starts, or an error
+that stops it there, undoes its changes the same way. Once step 4 starts
+writing the client configurations it runs to the end, and setup is complete.
+Restart FreeCAD and your AI client when the wizard finishes.
+
+### FreeCAD not found
+
+When the wizard cannot find FreeCAD, it offers **Install FreeCAD on this
+computer first** or **Use FreeCAD on another computer**. Choosing to install
+FreeCAD first ends the wizard without changing anything and prints the exact
+command to run again once FreeCAD is installed and started; `freecad-mcp`
+exits with status 3 for this, which the install script treats the same as a
+cancel, undoing what it had put in place, rather than as an error. Choosing
+to use FreeCAD on another computer instead skips the addon step and asks for
+that computer's address (see step 3 above); that other computer needs
+freecad-mcp installed with Share this PC turned on.
 
 To install a specific release instead of the latest, pass `-Version`
 (PowerShell) or set `VERSION` (sh):
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/sairaph/freecad-mcp/releases/download/v0.3.0/install.ps1))) -Version v0.3.0
+& ([scriptblock]::Create((irm https://github.com/sairaph/freecad-mcp/releases/download/v0.4.0/install.ps1))) -Version v0.4.0
 ```
 
 ```sh
-curl -fsSL https://github.com/sairaph/freecad-mcp/releases/download/v0.3.0/install.sh | VERSION=v0.3.0 sh
+curl -fsSL https://github.com/sairaph/freecad-mcp/releases/download/v0.4.0/install.sh | VERSION=v0.4.0 sh
 ```
 
 ### Unattended install
@@ -88,13 +105,15 @@ client whose `freecad` entry was edited by hand, or runs another program, is
 left as it is, with a note on how to replace it. `install` also runs this way,
 without the wizard, when given `--token`, `--clients` or `--all`, and `add`
 when given `--all` (`add` takes only `--all`, `--yes`, `--dry-run` and
-`--dir`; for a project token use `install --scope project --token <token>`).
+`--dir`).
 
 - `--all` re-registers every client, edited entries included (another
   program's entry only when you name its client).
 - `--clients claude-desktop,cursor` registers exactly those clients, replacing
   whatever entry they have.
-- `--token <token>` stores the RPC auth token.
+- `--token <token>` stores the password (see
+  [remote access](remote-access.md)); the flag is still named `--token`, but
+  it holds a password, not a separate auth token.
 - `--dry-run` shows the plan without writing anything.
 
 To pass these through the install script, which with `--yes`, `--all`,
@@ -115,19 +134,22 @@ an array instead: `-ConfigureArgs "--yes", "--token", "my token"`.
 
 | Command | Purpose |
 | --- | --- |
-| `freecad-mcp` | In a terminal: an interactive menu (doctor, addon install, connection check). Started by an AI client: the MCP server. |
+| `freecad-mcp` | In a terminal: an interactive menu (doctor, addon install, connection check, Share this PC, Connect to FreeCAD on another computer). Started by an AI client: the MCP server. |
 | `freecad-mcp mcp` | Run the MCP server over stdio. It serves FreeCAD itself and does not bridge to other MCP servers: `--remote <url>` is refused. |
 | `freecad-mcp install` / `configure` | The setup wizard (`--yes` for unattended). |
 | `freecad-mcp add` | Register the server in the current project's client configs instead of the global ones. |
 | `freecad-mcp uninstall` | Remove the `freecad` entries that run `freecad-mcp` from the AI clients' global configurations, including entries edited by hand. An entry under that name that runs another program is left in place unless you name its client (`--clients cursor,zed` acts on only those; `--dry-run` previews). |
-| `freecad-mcp uninstall --all` | Remove what `install` and the install scripts wrote for your user: those client entries, the FreeCAD addon from every FreeCAD data folder that holds it, the addon's settings file (which can hold the auth token) from every FreeCAD data folder that has one, the stored token, the cache, and the installed program with its `PATH` entry (`--dry-run` to preview). When a client entry cannot be removed, the program and its `PATH` entry stay, so that client is not left pointing at a deleted program; the output says why. What `add` wrote into projects stays; `--all` cannot be combined with `--scope project` or `--clients`. |
-| `freecad-mcp uninstall --scope project` | Remove the entries `add` wrote to the current project (`--dir <dir>` for another project). A token `add` stored stays in `<project>/.freecad-mcp/`; delete that directory to remove it. |
+| `freecad-mcp uninstall --all` | Remove what `install` and the install scripts wrote for your user: those client entries, the FreeCAD addon from every FreeCAD data folder that holds it, the addon's settings file (which can hold the password) from every FreeCAD data folder that has one, the stored password, the listener (stopped and unregistered) and its log and lock files, the cache, and the installed program with its `PATH` entry (`--dry-run` to preview). When a client entry cannot be removed, the program and its `PATH` entry stay, so that client is not left pointing at a deleted program; the output says why. What `add` wrote into projects stays; `--all` cannot be combined with `--scope project` or `--clients`. |
+| `freecad-mcp uninstall --scope project` | Remove the entries `add` wrote to the current project (`--dir <dir>` for another project). |
 | `freecad-mcp install-addon` | Install or update the FreeCAD addon in the data folder FreeCAD reports, or in every FreeCAD data folder found on disk when FreeCAD cannot be asked (`--user-data-dir <dir>` for another folder, `--no-autostart` to turn auto-start off, `--dry-run`). |
 | `freecad-mcp uninstall-addon` | Remove the addon from every FreeCAD data folder that holds it (`--user-data-dir <dir>` for one folder). Its settings stay. |
 | `freecad-mcp check-connection` | Check that FreeCAD's RPC server answers and speaks this server's protocol version. |
-| `freecad-mcp login --token <token>` | Store the FreeCAD RPC auth token. |
-| `freecad-mcp doctor` | Check the binary, PATH, AI clients, FreeCAD, the addon and the RPC server. |
-| `freecad-mcp update` | Update the binary from GitHub releases, then every installed copy of the addon it ships. |
+| `freecad-mcp login --token <token>` | Store the password of the FreeCAD this computer's agents use, when it was set somewhere other than this computer's own Share this PC or Connect step (the flag is named `--token` but holds a password). |
+| `freecad-mcp share` | Turn sharing this computer's FreeCAD with other devices on or off from the command line; see [remote access](remote-access.md#command-line). |
+| `freecad-mcp connect` | Point this computer at FreeCAD on another shared computer from the command line, or stop using one; see [remote access](remote-access.md#command-line). |
+| `freecad-mcp listen` | Run the listener "Share this PC" registers to start automatically; you do not normally run this by hand. |
+| `freecad-mcp doctor` | Check the binary, PATH, AI clients, FreeCAD, the addon, the RPC server and remote access. |
+| `freecad-mcp update` | Update the binary from GitHub releases, then every installed copy of the addon it ships, and restart the listener if one is registered. |
 | `freecad-mcp version` | Print the version. |
 
 ## Start the RPC server
@@ -169,16 +191,13 @@ the matching copy, so the two normally match. The MCP server checks that the
 running addon speaks its protocol version: if it does not, for example after
 copying an older addon by hand, the next tool reply starts with a warning that
 says which side to update, and `get_rpc_status` and `check-connection` report
-it. This release speaks protocol 3 (addon 0.3.0): `start_freecad` launches
-FreeCAD itself when it is not running; documents gain full lifecycle tools
-(open, save, save as, close, activate); `import_file` and `export_document`
-handle CAD, mesh and 2D formats on disk; screenshots and object listings can
-target a chosen document; `list_objects` and `get_object` report bounding
-boxes, center of mass and validity; `recompute_document`, `check_printability`,
-mesh analysis and repair, transactional `undo`/`redo`, spreadsheet cell access,
-and `measure`/`get_selection` are new. An addon from an earlier release speaks
-protocol 1 or 2 and gets the `freecad-mcp install-addon` warning until it is
-updated.
+it. This release speaks protocol 4 (addon 0.4.0): FreeCAD can be shared with
+other devices (see [remote access](remote-access.md) for Share this PC,
+Connect, the listener, and the multi-agent session lock that comes with it);
+`release_session` and `close_freecad` manage that session; `get_rpc_status`
+and the "in use" errors report who holds FreeCAD.
+An addon from an earlier release speaks protocol 1, 2 or 3 and gets the
+`freecad-mcp install-addon` warning until it is updated.
 
 `freecad-mcp doctor` also finds every installed copy of the addon, in the data
 folder FreeCAD reports and in the other FreeCAD data folders on disk, and
@@ -211,10 +230,10 @@ freecad-mcp check-connection
 pings the RPC server and checks that the addon speaks the server's protocol
 version. If the
 port is closed, start the RPC server and check FreeCAD's Report View. If it is
-open but the check fails, check for another process using port 9875. For remote
-installations, also check the [allowed IP configuration](configuration.md#remote-connections).
+open but the check fails, check for another process using port 9875. For
+FreeCAD shared from another computer, see [remote access](remote-access.md#troubleshooting).
 
-To inspect the listener from FreeCAD's Python console:
+To inspect the RPC server from FreeCAD's Python console:
 
 ```python
 from rpc_server import rpc_server as bridge

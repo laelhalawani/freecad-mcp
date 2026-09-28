@@ -48,6 +48,7 @@ import FreeCAD
 import FreeCADGui
 from PySide import QtCore, QtWidgets
 
+from rpc_server import session_lock
 from rpc_server.dispatch_health import DispatchHealth, stuck_failure
 
 
@@ -346,6 +347,11 @@ def dispatch_to_gui(
     started_event = threading.Event()
     started_at: float | None = None
     cancelled = False
+    # Set (under state_lock) to a job id once the RPC thread gives up on a
+    # task that is still actually running, so _wrapped's own completion (not
+    # this function returning to its caller) is what frees the session lock's
+    # claim on it; None while no such hand-off happened.
+    gui_job_id: list[str | None] = [None]
 
     def _wrapped() -> None:
         nonlocal started_at
@@ -366,13 +372,25 @@ def dispatch_to_gui(
                     f"{traceback.format_exc()}"
                 )
                 res = f"{type(e).__name__}: {e}"
+            finally:
+                # Publish completion atomically with clearing health, so a deadline
+                # racing with completion cannot report a missing successful result.
+                with state_lock:
+                    _dispatch_health.finish(task_id)
+                    if res is not missing:
+                        response_queue.put_nowait(res)
         finally:
-            # Publish completion atomically with clearing health, so a deadline
-            # racing with completion cannot report a missing successful result.
+            # Runs after every path above, including a res that stayed
+            # "missing" (should not happen, but never leave a job claimed).
+            # The RPC thread only ever sets gui_job_id[0] while it holds
+            # state_lock and finds no response published yet (Phase 2,
+            # below); taking the lock again here (already released by the
+            # publish above) is what makes that write visible on this
+            # thread, not just program order.
             with state_lock:
-                _dispatch_health.finish(task_id)
-                if res is not missing:
-                    response_queue.put_nowait(res)
+                job_id = gui_job_id[0]
+            if job_id is not None:
+                session_lock.job_finished(job_id)
 
     queued_at = time.monotonic()
     queued_seq = next(_event_seq)
@@ -426,6 +444,18 @@ def dispatch_to_gui(
             try:
                 return response_queue.get_nowait()
             except queue.Empty:
+                # The task is still actually running on the GUI thread (it
+                # cannot be interrupted): keep it counted as in flight for
+                # the session lock until it truly finishes, the same
+                # job_started/job_finished bookkeeping execute_code_async's
+                # background jobs already use, rather than letting the
+                # lock's own per-call claim (about to end when this function
+                # returns) expire while the real work continues.
+                # Read here, still under state_lock, so _wrapped's own
+                # completion (which also takes state_lock first) can never
+                # have raced past this point unseen.
+                gui_job_id[0] = f"gui-{task_id}"
+                session_lock.job_started(gui_job_id[0])
                 stuck = _dispatch_health.mark_timed_out(task_id, timeout)
                 if stuck is not None:
                     return stuck_failure(stuck, just_timed_out=True)

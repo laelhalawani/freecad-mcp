@@ -2,7 +2,7 @@
 
 # The freecad-mcp binary embeds this addon, so the two always ship together.
 # Keep in step with <version> in ../package.xml.
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 # Bump when the RPC contract changes in a way the MCP server must know about:
 # a method or parameter is added or removed, or a response shape or meaning
@@ -18,4 +18,10 @@ __version__ = "0.3.1"
 #    compact; object replies add bound box, centre of mass, validity and
 #    linked object names; get_rpc_status reports the open documents; mutating
 #    replies name the transaction that holds their changes.
-PROTOCOL_VERSION = 3
+# 4: the RPC server always binds 127.0.0.1 (remote access goes through the
+#    freecad-mcp listener); the X-FreeCAD-MCP-Session and
+#    X-FreeCAD-MCP-Client headers identify the calling session; with remote
+#    access on, a session lock refuses other sessions with Fault 4230 (4231
+#    once after a forced release); release_session and close_freecad are
+#    added; get_rpc_status reports session; replies carry X-FreeCAD-MCP-Lock.
+PROTOCOL_VERSION = 4

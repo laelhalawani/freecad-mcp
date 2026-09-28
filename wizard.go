@@ -1,11 +1,13 @@
 package main
 
 // Install wizard plumbing. The wizard writes nothing until the AI clients
-// are registered: the token is held in memory and the addon choice is only
-// recorded, and both are applied after registration. Leaving the wizard
-// before that point (q, ctrl+c, closing it, or SIGINT/SIGTERM) leaves the
-// machine unchanged, and the process exits with exitCancelled so the install
-// scripts can roll back the binary they just placed.
+// are registered: the addon, "FreeCAD on another computer" and "Share this
+// PC" choices (with any password) are only recorded, and applied after
+// registration (finishWizard). Leaving the wizard before that point (q,
+// ctrl+c, closing it, SIGINT/SIGTERM, or "Install FreeCAD on this computer
+// first") leaves the machine unchanged, and the process exits with
+// exitCancelled so the install scripts can roll back the binary they just
+// placed.
 
 import (
 	"context"
@@ -17,7 +19,6 @@ import (
 	"github.com/sairaph/mcp-wizard/cli"
 	"github.com/sairaph/mcp-wizard/flow"
 	"github.com/sairaph/mcp-wizard/harness"
-	"github.com/sairaph/mcp-wizard/secret"
 
 	"github.com/sairaph/freecad-mcp/internal/domain"
 )
@@ -122,61 +123,11 @@ func pruneUnselected[K comparable](selected *map[K]bool) {
 	}
 }
 
-// deferredStore lets the login step see a stored token but keeps a new one
-// in memory until flush, so leaving the wizard does not write credentials.
-type deferredStore struct {
-	inner   secret.Store
-	pending *secret.Session
-}
-
-func (s *deferredStore) Load(ctx context.Context) (*secret.Session, bool, error) {
-	return s.inner.Load(ctx)
-}
-
-func (s *deferredStore) Save(_ context.Context, sess *secret.Session) error {
-	s.pending = sess.Clone()
-	return nil
-}
-
-func (s *deferredStore) Delete(context.Context) error { return nil }
-
-func (s *deferredStore) Path() string { return s.inner.Path() }
-
-// loginFresh makes each visit of the login step start clean: going back to
-// it drops a token typed on an earlier visit and the library's Skipped flag,
-// which it only resets in one branch, so both reflect the last visit.
-//
-// With a token already stored the library step skips itself, and a skip
-// always moves forward: going back from the next step would land on that
-// step again, so the client list could never be reached. A skip while going
-// back therefore keeps going back.
-type loginFresh struct {
-	flow.Step[AppState]
-	store *deferredStore
-}
-
-func (l loginFresh) Init(state *AppState) tea.Cmd {
-	if l.store != nil {
-		l.store.pending = nil
-	}
-	state.Login.Skipped = false
-	state.loginEnteredBack, state.Retreating = state.Retreating, false
-	return l.Step.Init(state)
-}
-
-func (l loginFresh) Update(msg tea.Msg, state *AppState) (flow.Directive, tea.Cmd) {
-	d, cmd := l.Step.Update(msg, state)
-	if d == flow.Skip && state.loginEnteredBack {
-		return flow.Back, cmd
-	}
-	return d, cmd
-}
-
-// loginInput lets a token be typed in full: mcp-wizard v0.1.1's login step
-// quits on q on its input screen as well, so a token containing q could not
-// be entered. On the input screen q goes into the input the way the library
-// adds other keys; on the Sign in / Skip screen q still quits, and ctrl+c
-// quits on both.
+// loginInput lets a password be typed in full in `freecad-mcp login`:
+// mcp-wizard v0.1.1's login step quits on q on its input screen as well, so a
+// password containing q could not be entered. On the input screen q goes into
+// the input the way the library adds other keys; on the Sign in / Skip
+// screen q still quits, and ctrl+c quits on both.
 type loginInput struct {
 	flow.Step[AppState]
 }
@@ -192,17 +143,10 @@ func (l loginInput) Update(msg tea.Msg, state *AppState) (flow.Directive, tea.Cm
 // runsUnattended reports whether install or add skip the wizard: --yes, or
 // a flag the wizard would ignore (--token and the other credential flags,
 // --clients, --all). `install` (with or without --scope project) can receive
-// all of them; `add` accepts only --all and --yes of these.
+// all of them; `add` accepts only --all and --yes of these. An unattended
+// install changes no remote access settings.
 func runsUnattended(cmd cli.Command) bool {
 	return cmd.Yes || cmd.All || len(cmd.Clients) > 0 || len(cmd.Credentials) > 0
-}
-
-// flush writes the token entered in the wizard, if any.
-func (s *deferredStore) flush(ctx context.Context) error {
-	if s.pending == nil || len(s.pending.Values) == 0 {
-		return nil
-	}
-	return s.inner.Save(ctx, s.pending)
 }
 
 // applyGuard keeps ctrl+c from ending the wizard while the registration
@@ -261,34 +205,49 @@ func classifyWizard(base *flow.BaseState, runCode int, applyStarted, dryRun, sig
 	}
 }
 
-// finishWizard applies what the wizard recorded once registration ran: the
-// token, then the addon. It returns the exit status.
-func finishWizard(ctx context.Context, w io.Writer, state *AppState, store *deferredStore, dryRun bool, registrationCode int) int {
+// finishWizard applies what the wizard recorded once registration ran, in
+// this order: the connection to FreeCAD on another computer or the share
+// settings, the addon, then the listener. With nothing to change for the
+// listener, a registered one is restarted so it runs this binary. It returns
+// the exit status.
+func finishWizard(ctx context.Context, w io.Writer, state *AppState, dryRun bool, registrationCode int) int {
 	code := registrationCode
-	// A token typed and later skipped (back, then "Skip for now") is dropped.
-	if !dryRun && store != nil && !state.Login.Skipped {
-		if err := store.flush(ctx); err != nil {
-			fmt.Fprintf(w, "  [fail] could not save the RPC auth token: %v\n", err)
-			code = 1
-		}
+	code = max(code, applyConnectChoice(ctx, w, state, dryRun))
+	code = max(code, applyShareChoice(ctx, w, state, dryRun))
+	if !state.Connect.Chosen {
+		code = max(code, finishAddon(w, state.Addon, dryRun))
 	}
-	a := state.Addon
+	listenerCode, handled := applyShareListener(ctx, w, state, dryRun)
+	code = max(code, listenerCode)
+	if !handled && !dryRun {
+		code = max(code, restartListener(ctx, w))
+	}
+	return code
+}
+
+// restartListener is restartListenerIfRegistered, called through a variable
+// so tests can replace it and never restart a real listener.
+var restartListener = restartListenerIfRegistered
+
+// finishAddon installs the addon into every located target with the chosen
+// auto-start setting, or says FreeCAD was not found.
+func finishAddon(w io.Writer, a addonState, dryRun bool) int {
 	fmt.Fprintln(w, "\n  FreeCAD addon")
 	if len(a.Targets) == 0 {
 		fmt.Fprintln(w, freecadNotFound)
-		return code
+		return 0
 	}
 	if dryRun {
 		for _, t := range a.Targets {
 			fmt.Fprintf(w, "  would install the FreeCAD addon into %s\n", t.AddonDir())
 		}
-		return code
+		return 0
 	}
 	var results []addonResult
 	for _, t := range a.Targets {
 		results = append(results, installAddon(t, a.AutoStart))
 	}
-	return max(code, reportAddonResults(w, results))
+	return reportAddonResults(w, results)
 }
 
 const interruptedMessage = "  Setup was interrupted while registering the AI clients, so some may be registered.\n" +

@@ -1,33 +1,22 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/sairaph/mcp-wizard/app"
-	"github.com/sairaph/mcp-wizard/app/detail"
-	"github.com/sairaph/mcp-wizard/app/menu"
-	"github.com/sairaph/mcp-wizard/async"
 	"github.com/sairaph/mcp-wizard/cli"
 	"github.com/sairaph/mcp-wizard/command"
 	"github.com/sairaph/mcp-wizard/doctor"
 	"github.com/sairaph/mcp-wizard/flow"
 	"github.com/sairaph/mcp-wizard/harness"
 	"github.com/sairaph/mcp-wizard/installer"
-	"github.com/sairaph/mcp-wizard/proxy"
 	"github.com/sairaph/mcp-wizard/secret"
 	"github.com/sairaph/mcp-wizard/tui"
 	"github.com/sairaph/mcp-wizard/update"
@@ -50,9 +39,9 @@ func init() {
 var usageSpecs = []cli.Spec{
 	{Name: "mcp", Description: "Run the MCP server (default when not in a terminal)"},
 	{Name: "install", Description: "Install the FreeCAD addon and register the server with AI clients"},
-	{Name: "uninstall", Description: "Remove AI client integration (--all: also the addon, token, cache and program)"},
+	{Name: "uninstall", Description: "Remove AI client integration (--all: also the addon, listener, password, cache and program)"},
 	{Name: "add", Description: "Register the server in this project's AI client configs"},
-	{Name: "login", Description: "Store the FreeCAD RPC auth token (login --token <token>)"},
+	{Name: "login", Description: "Store FreeCAD's password (login --token <password>)"},
 	{Name: "doctor", Description: "Diagnose the installation"},
 	{Name: "update", Description: "Update to the latest release"},
 	{Name: "version", Description: "Print the version"},
@@ -125,18 +114,20 @@ func printUsage(w *os.File) {
 type AppState struct {
 	flow.BaseState
 	Harness installer.HarnessState
-	Login   installer.LoginState
+	Login   installer.LoginState // `freecad-mcp login` only; install has no login step
 	Addon   addonState
+	// Connect is the "FreeCAD on another computer" choice (wizard_connect.go)
+	// and Share the "Share this PC" choice (wizard_share.go).
+	Connect connectState
+	Share   shareState
 	Results installer.ResultsState
 	// UntickedClients names the clients left unticked because their entry
 	// was edited or runs another program; harnessDetecting is set while the
 	// client list is being detected (see harnessSelection).
 	UntickedClients  []string
 	harnessDetecting bool
-	// Retreating is set by a step that goes back, and loginEnteredBack
-	// records it when the login step starts (see loginFresh).
-	Retreating       bool
-	loginEnteredBack bool
+	// Retreating is set by a step that goes back.
+	Retreating bool
 }
 
 func harnessState(s *AppState) *installer.HarnessState { return &s.Harness }
@@ -229,17 +220,8 @@ func byID(harnesses []harness.Harness) map[harness.ID]harness.Harness {
 	return m
 }
 
-// credentialKey is the store key the bridge reads the remote token from.
-func credentialKey() string {
-	if r := domain.Remote(); r != nil && r.CredentialKey != "" {
-		return r.CredentialKey
-	}
-	return "token"
-}
-
 // saveCredentialsFromFlags stores --email/--token given to an unattended
-// install so the server can use them without a login step. The token is
-// stored under the key the bridge reads.
+// install so the server can use them without a login step.
 func saveCredentialsFromFlags(ctx context.Context, store secret.Store, cmd cli.Command) error {
 	if len(cmd.Credentials) == 0 {
 		return nil
@@ -250,7 +232,7 @@ func saveCredentialsFromFlags(ctx context.Context, store secret.Store, cmd cli.C
 	}
 	for k, v := range cmd.Credentials {
 		if k == "token" {
-			k = credentialKey()
+			k = domain.TokenKey
 			v = strings.TrimSpace(v)
 		}
 		sess.Set(k, v)
@@ -258,47 +240,31 @@ func saveCredentialsFromFlags(ctx context.Context, store secret.Store, cmd cli.C
 	return store.Save(ctx, sess)
 }
 
-// loadCredential returns the stored value for key, looking in the current
-// project's store first (where `add` saves it) and then the global one.
+// loadCredential returns the stored value for key from the one credential
+// store (domain.CredentialPath), or "" when none is stored. A caller that
+// needs more than one key calls loadCredentials instead, which opens the
+// store once rather than once per key.
 func loadCredential(ctx context.Context, key string) (string, error) {
-	paths := []string{domain.CredentialPath()}
-	if cwd, err := os.Getwd(); err == nil {
-		paths = append([]string{domain.ProjectCredentialPath(cwd)}, paths...)
+	sess, exists, err := secret.NewFileStore(domain.CredentialPath()).Load(ctx)
+	if err != nil || !exists {
+		return "", err
 	}
-	for _, path := range paths {
-		sess, exists, err := secret.NewFileStore(path).Load(ctx)
-		if err != nil {
-			return "", err
-		}
-		if !exists {
-			continue
-		}
-		if v := strings.TrimSpace(sess.GetString(key)); v != "" {
-			return v, nil
-		}
-	}
-	return "", nil
+	return strings.TrimSpace(sess.GetString(key)), nil
 }
 
-// checkRemoteURL refuses to send a credential over plain HTTP to anything
-// but a loopback address.
-func checkRemoteURL(raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return fmt.Errorf("invalid remote URL %q: %w", raw, err)
+// loadCredentials reads token, host and port from the credential store in
+// one file load, each "" when not stored: serverSettings and newConnectPage
+// both need every field, and calling loadCredential three times would open
+// the store three times for the one read.
+func loadCredentials(ctx context.Context) (token, host, port string, err error) {
+	sess, exists, err := secret.NewFileStore(domain.CredentialPath()).Load(ctx)
+	if err != nil || !exists {
+		return "", "", "", err
 	}
-	switch u.Scheme {
-	case "https":
-		return nil
-	case "http":
-		host := u.Hostname()
-		if host == "localhost" || net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback() {
-			return nil
-		}
-		return fmt.Errorf("remote URL %q uses plain http; the credential would be sent in cleartext (use https)", raw)
-	default:
-		return fmt.Errorf("remote URL %q must use https", raw)
-	}
+	return strings.TrimSpace(sess.GetString(domain.TokenKey)),
+		strings.TrimSpace(sess.GetString(domain.HostKey)),
+		strings.TrimSpace(sess.GetString(domain.PortKey)),
+		nil
 }
 
 // --- Install / add ---
@@ -312,7 +278,7 @@ func runInstall(ctx context.Context, cmd cli.Command) int {
 	credStore := secret.NewFileStore(domain.CredentialPath())
 
 	if tui.IsInteractive() && !runsUnattended(cmd) {
-		return runWizard(ctx, detector, harness.Scope{}, domain.LoginConfig(credStore), cmd, "freecad-mcp setup")
+		return runWizard(ctx, detector, harness.Scope{}, cmd, "freecad-mcp setup", true)
 	}
 	return runUnattended(ctx, detector, harness.Scope{}, credStore, cmd, harness.Present)
 }
@@ -343,23 +309,22 @@ func runAdd(ctx context.Context, cmd cli.Command) int {
 		return 1
 	}
 	scope := harness.ProjectScopeDir(dir)
-	credStore := secret.NewFileStore(domain.ProjectCredentialPath(dir))
+	// One credential store per user: `add` registers project client entries,
+	// and every one of them reads domain.CredentialPath.
+	credStore := secret.NewFileStore(domain.CredentialPath())
 
 	if tui.IsInteractive() && !runsUnattended(cmd) {
-		return runWizard(ctx, detector, scope, domain.ProjectLoginConfig(credStore, dir), cmd, "freecad-mcp project setup")
+		return runWizard(ctx, detector, scope, cmd, "freecad-mcp project setup", false)
 	}
 	return runUnattended(ctx, detector, scope, credStore, cmd, harness.Present)
 }
 
-// runWizard drives the interactive install: pick clients, enter the token,
-// choose the addon options, register. Nothing is written before the
-// registration step; the token and the addon follow it (see wizard.go).
-func runWizard(ctx context.Context, detector *harness.Detector, scope harness.Scope, login installer.LoginConfig, cmd cli.Command, title string) int {
-	var store *deferredStore
-	if login.Store != nil {
-		store = &deferredStore{inner: login.Store}
-		login.Store = store
-	}
+// runWizard drives the interactive install: pick clients, the FreeCAD addon
+// (or FreeCAD on another computer), share this PC, register. machine adds the
+// per-machine steps (another computer, share this PC), which `add` leaves
+// out. Nothing is written before the registration step; the rest follows it
+// (see finishWizard).
+func runWizard(ctx context.Context, detector *harness.Detector, scope harness.Scope, cmd cli.Command, title string, machine bool) int {
 	state := &AppState{}
 	steps := []flow.Step[AppState]{
 		harnessSelection{
@@ -369,13 +334,25 @@ func runWizard(ctx context.Context, detector *harness.Detector, scope harness.Sc
 				return untickedClients(clientEntries(ctx, detector, scope, hs))
 			},
 		},
-		loginFresh{loginInput{installer.LoginStep(ctx, login, loginState)}, store},
 		newAddonStep(ctx),
-		applyGuard{installer.ApplyStep(ctx, detector, harnessState, resultsState, installer.ApplyStepOptions{Scope: scope, DryRun: cmd.DryRun}), cmd.DryRun},
 	}
+	if machine {
+		steps = append(steps, connectSteps(ctx)...)
+		steps = append(steps, shareSteps(ctx)...)
+	}
+	steps = append(steps,
+		applyGuard{installer.ApplyStep(ctx, detector, harnessState, resultsState, installer.ApplyStepOptions{Scope: scope, DryRun: cmd.DryRun}), cmd.DryRun})
 	applyIndex := stepIndex(steps, "apply")
 	f := flow.New(steps, state)
 	code := tui.Run(ctx, f, tui.Options{Title: title})
+
+	// "Install FreeCAD on this computer first" ends the wizard before
+	// anything was written. Its text, with the exact command to re-run, is
+	// printed here, after the terminal UI has closed, so it stays on screen.
+	if state.Connect.InstallFirst && !state.Settled {
+		fmt.Println(installFirstText())
+		return exitCancelled
+	}
 
 	switch classifyWizard(&state.BaseState, code, f.Current() >= applyIndex, cmd.DryRun, ctx.Err() != nil) {
 	case outcomeCancelled:
@@ -397,7 +374,7 @@ func runWizard(ctx context.Context, detector *harness.Detector, scope harness.Sc
 		// Registration failed for some clients; the rest still get the addon.
 		fmt.Fprintln(os.Stderr, state.Failure)
 	}
-	return finishWizard(ctx, os.Stdout, state, store, cmd.DryRun, code)
+	return finishWizard(ctx, os.Stdout, state, cmd.DryRun, code)
 }
 
 func runUnattended(ctx context.Context, detector *harness.Detector, scope harness.Scope, credStore secret.Store, cmd cli.Command, desired harness.DesiredState) int {
@@ -590,9 +567,7 @@ func newDoctor(ctx context.Context) *doctor.Runner {
 		clientsCheck{},
 	)
 	r.Add(freecadChecks()...)
-	if remote := domain.Remote(); remote != nil {
-		r.Add(remoteCheck{remote: remote})
-	}
+	r.Add(remoteChecks()...)
 	if version != "dev" {
 		r.Add(doctor.UpdateCheck{Opts: opts})
 	}
@@ -603,11 +578,12 @@ func runDoctor(ctx context.Context) int {
 	return newDoctor(ctx).Run(ctx, os.Stdout)
 }
 
-// credentialsCheck reports whether a FreeCAD RPC auth token is stored. The
-// token is only needed when one is set in the addon, so none is not a problem.
+// credentialsCheck reports whether a FreeCAD password is stored. It is only
+// needed when one is set in "Share this PC" on the computer running FreeCAD,
+// so none is not a problem.
 type credentialsCheck struct{ path string }
 
-func (c credentialsCheck) Name() string { return "RPC auth token" }
+func (c credentialsCheck) Name() string { return "FreeCAD password" }
 
 func (c credentialsCheck) Run(ctx context.Context) doctor.Result {
 	if os.Getenv(domain.EnvToken) != "" {
@@ -618,71 +594,10 @@ func (c credentialsCheck) Run(ctx context.Context) doctor.Result {
 		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: err.Error()}
 	}
 	if token == "" {
-		return doctor.Result{Name: c.Name(), Status: doctor.OK, Detail: "none stored; only needed after 'Set Auth Token' in FreeCAD (then run `freecad-mcp login --token <token>`)"}
+		return doctor.Result{Name: c.Name(), Status: doctor.OK, Detail: "none stored; only needed when a password is set in `" +
+			domain.BinaryName + "` > Share this PC on the computer running FreeCAD (on this computer that stores it too)"}
 	}
-	// loadCredential prefers the current project's store over c.path.
-	return doctor.Result{Name: c.Name(), Status: doctor.OK, Detail: "stored with `freecad-mcp login`"}
-}
-
-// remoteCheck confirms the remote endpoint accepts the stored credential
-// with a single bounded MCP initialize request. It does not open a session,
-// so nothing has to be torn down afterwards.
-type remoteCheck struct{ remote *domain.RemoteConfig }
-
-func (remoteCheck) Name() string { return "Remote endpoint" }
-
-func (c remoteCheck) Run(ctx context.Context) doctor.Result {
-	if err := checkRemoteURL(c.remote.URL); err != nil {
-		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: err.Error()}
-	}
-	token, err := loadCredential(ctx, c.remote.CredentialKey)
-	if err != nil {
-		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: err.Error()}
-	}
-	if token == "" {
-		return doctor.Result{Name: c.Name(), Status: doctor.Warn, Detail: "no credential stored; run `freecad-mcp login`"}
-	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"freecad-mcp-doctor","version":"` + version + `"}}}`
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.remote.URL, strings.NewReader(body))
-	if err != nil {
-		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: err.Error()}
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	if c.remote.HeaderName != "" {
-		req.Header.Set(c.remote.HeaderName, c.remote.HeaderPrefix+token)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: oneLine(fmt.Sprintf("%s: %v", c.remote.URL, err))}
-	}
-	defer resp.Body.Close()
-	// Tell the server we are not keeping the session it may have created.
-	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" && resp.StatusCode < 300 {
-		if del, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.remote.URL, nil); err == nil {
-			del.Header.Set("Mcp-Session-Id", sid)
-			if c.remote.HeaderName != "" {
-				del.Header.Set(c.remote.HeaderName, c.remote.HeaderPrefix+token)
-			}
-			if r, err := http.DefaultClient.Do(del); err == nil {
-				r.Body.Close()
-			}
-		}
-	}
-	switch {
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: fmt.Sprintf("%s rejected the stored credential (HTTP %d); run `freecad-mcp login`", c.remote.URL, resp.StatusCode)}
-	case resp.StatusCode >= 300:
-		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: fmt.Sprintf("%s: HTTP %d", c.remote.URL, resp.StatusCode)}
-	}
-	return doctor.Result{Name: c.Name(), Status: doctor.OK, Detail: c.remote.URL}
-}
-
-func oneLine(s string) string {
-	return strings.Join(strings.Fields(s), " ")
+	return doctor.Result{Name: c.Name(), Status: doctor.OK, Detail: "stored in " + c.path}
 }
 
 // clientsCheck lists the AI clients that have this server registered,
@@ -734,7 +649,8 @@ func runUpdate(ctx context.Context, cmd cli.Command) int {
 			return 1
 		}
 		fmt.Println("  Updated.")
-		return runNewBinaryAddonRefresh(ctx, filepath.Join(opts.InstallDir, opts.BinaryName))
+		code := runNewBinaryAddonRefresh(ctx, filepath.Join(opts.InstallDir, opts.BinaryName))
+		return max(code, restartListener(ctx, os.Stdout))
 	}
 
 	if version == "dev" {
@@ -757,114 +673,9 @@ func runUpdate(ctx context.Context, cmd cli.Command) int {
 	}
 	fmt.Printf("  Updated to %s.\n", latest)
 	// The new binary carries the matching addon; let it update FreeCAD's copy.
-	return runNewBinaryAddonRefresh(ctx, filepath.Join(opts.InstallDir, opts.BinaryName))
-}
-
-// --- App ---
-
-// The interactive app opens when the binary is run bare in a terminal. It
-// starts as a menu; extend appState with your own steps and screens.
-
-const (
-	stepMenu app.Step = iota
-	stepDoctor
-)
-
-type appState struct {
-	app.AppModel
-	ctx    context.Context
-	menu   *menu.Model
-	detail *detail.Model
-}
-
-func runApp(ctx context.Context) int {
-	s := &appState{ctx: ctx}
-	s.menu = menu.New(domain.ServerName+" "+version, func() []menu.Item {
-		return []menu.Item{
-			{Label: "Run doctor", Action: "doctor"},
-			{Label: "Install or update the FreeCAD addon", Action: "addon"},
-			{Label: "Check the FreeCAD connection", Action: "connection"},
-			{Label: "Quit", Action: "quit"},
-		}
-	})
-	return app.Run(ctx, s, app.Options{Title: domain.ServerName, Version: version})
-}
-
-func (m *appState) Init() tea.Cmd { return m.menu.Init() }
-
-func (m *appState) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if handled, cmd := m.HandleGlobalKeys(msg); handled {
-		return m, cmd
-	}
-
-	switch msg := msg.(type) {
-	case app.ActionMsg:
-		switch msg.Source {
-		case "menu":
-			action, _ := msg.Data.(string)
-			if msg.Value == "quit" || action == "quit" {
-				m.Quit = true
-				return m, tea.Quit
-			}
-			var (
-				title string
-				work  func(io.Writer)
-			)
-			switch action {
-			case "doctor":
-				title, work = "Doctor", func(w io.Writer) { newDoctor(m.ctx).Run(m.ctx, w) }
-			case "addon":
-				title, work = "FreeCAD addon", func(w io.Writer) { installAddonReport(m.ctx, w, nil, false) }
-			case "connection":
-				title, work = "FreeCAD connection", func(w io.Writer) { connectionReport(m.ctx, w) }
-			}
-			if work != nil {
-				m.Step = stepDoctor
-				m.Status = "Working..."
-				m.detail = detail.New(title, m.Status)
-				return m, tea.Batch(m.detail.Init(), async.Load(func() (string, error) {
-					var buf bytes.Buffer
-					work(&buf)
-					return buf.String(), nil
-				}))
-			}
-		case "detail":
-			if msg.Value == "back" {
-				m.Step = stepMenu
-				return m, nil
-			}
-		}
-		return m, nil
-
-	case async.Result[string]:
-		m.Status = ""
-		if msg.Err != nil {
-			m.detail.SetContent("Failed: " + msg.Err.Error())
-		} else {
-			m.detail.SetContent(msg.Value)
-		}
-		return m, nil
-	}
-
-	switch m.Step {
-	case stepMenu:
-		return m, m.menu.Update(msg)
-	case stepDoctor:
-		if m.detail != nil {
-			return m, m.detail.Update(msg)
-		}
-	}
-	return m, nil
-}
-
-func (m *appState) View() string {
-	switch m.Step {
-	case stepDoctor:
-		if m.detail != nil {
-			return m.detail.View()
-		}
-	}
-	return m.menu.View()
+	code := runNewBinaryAddonRefresh(ctx, filepath.Join(opts.InstallDir, opts.BinaryName))
+	// A registered listener still runs the old binary until it restarts.
+	return max(code, restartListener(ctx, os.Stdout))
 }
 
 // --- MCP Server ---
@@ -872,21 +683,13 @@ func (m *appState) View() string {
 func runMCPServer(ctx context.Context, cmd cli.Command) int {
 	transport := os.Getenv("TRANSPORT")
 
-	// The stored credential is the FreeCAD addon's RPC auth token, so it is
-	// never sent to an endpoint named on the command line.
+	// The stored credential is FreeCAD's RPC password, so it is never sent
+	// to an endpoint named on the command line.
 	if cmd.Remote != "" {
 		fmt.Fprintf(os.Stderr, "  %s serves FreeCAD's MCP tools itself and does not bridge to other MCP servers,\n"+
-			"  so `mcp --remote %s` is refused: the stored token belongs to FreeCAD's RPC server\n"+
+			"  so `mcp --remote %s` is refused: the stored password belongs to FreeCAD's RPC server\n"+
 			"  and is only sent to it. Run `%s mcp` without --remote.\n", domain.BinaryName, cmd.Remote, domain.BinaryName)
 		return 2
-	}
-
-	// A configured remote endpoint, when TRANSPORT is not set explicitly,
-	// turns this binary into a stdio bridge: the AI client talks to us, we
-	// talk to the remote with the stored credential. An explicit TRANSPORT
-	// always serves the embedded server.
-	if remoteURL, remote := bridgeTarget(); remoteURL != "" && transport == "" {
-		return runBridge(ctx, remoteURL, remote)
 	}
 
 	if transport == "" {
@@ -913,47 +716,6 @@ func runMCPServer(ctx context.Context, cmd cli.Command) int {
 		return 0
 	}
 	fmt.Fprintln(os.Stderr, err)
-	return 1
-}
-
-// bridgeTarget returns the remote URL to bridge to, from the project's
-// RemoteConfig, or "" when there is none. The second value carries the
-// header settings.
-func bridgeTarget() (string, *domain.RemoteConfig) {
-	if remote := domain.Remote(); remote != nil {
-		return remote.URL, remote
-	}
-	return "", nil
-}
-
-func runBridge(ctx context.Context, remoteURL string, remote *domain.RemoteConfig) int {
-	if err := checkRemoteURL(remoteURL); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 2
-	}
-	err := proxy.Run(ctx, proxy.Config{
-		URL: remoteURL,
-		HeaderFunc: func(ctx context.Context) (map[string]string, error) {
-			if remote.HeaderName == "" || remote.CredentialKey == "" {
-				return nil, nil
-			}
-			token, err := loadCredential(ctx, remote.CredentialKey)
-			if err != nil {
-				return nil, err
-			}
-			if token == "" {
-				return nil, fmt.Errorf("no credential stored; run `freecad-mcp login` (or `freecad-mcp login --token <token>`) first")
-			}
-			return map[string]string{remote.HeaderName: remote.HeaderPrefix + token}, nil
-		},
-	})
-	if err == nil || errors.Is(err, context.Canceled) {
-		return 0
-	}
-	fmt.Fprintln(os.Stderr, err)
-	if errors.Is(err, proxy.ErrUnauthorized) {
-		fmt.Fprintln(os.Stderr, "  The stored credential was rejected; run `freecad-mcp login` to replace it.")
-	}
 	return 1
 }
 

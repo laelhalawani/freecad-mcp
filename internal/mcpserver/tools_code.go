@@ -84,18 +84,18 @@ const headlessDescription = `Run a FreeCAD Python script in a separate headless 
 
 Use this for OCCT work that can crash or block FreeCAD: helical threads (makeHelix + makePipeShell), lofts and sweeps, booleans with many or B-spline tools, long parametric rebuilds. A native OpenCascade crash here only kills the helper process; the GUI and its open documents survive, and the tool reports the crash and the script's output.
 
-The script runs on the machine running this MCP server, independently of FREECAD_MCP_HOST, in a fresh process without GUI: import FreeCAD and Part yourself, open documents from disk (FreeCAD.openDocument(path)), and save results with doc.save()/saveAs() or Shape.exportBrep(). Nothing from the execute_code namespace is available. Print progress to stdout; it is returned when the process ends. After the script saved a .FCStd that is open in the GUI, call reload_document to show the result.`
+The script runs on the machine running this MCP server, independently of FREECAD_MCP_HOST, in a fresh process without GUI: import FreeCAD and Part yourself, open documents from disk (FreeCAD.openDocument(path)), and save results with doc.save()/saveAs() or Shape.exportBrep(). Nothing from the execute_code namespace is available. Print progress to stdout; it is returned when the process ends. After the script saved a .FCStd that is open in the GUI, call reload_document to show the result. With FreeCAD on another computer (remote access), the script still runs here, on the machine running this MCP server, and its files are this machine's, not the FreeCAD computer's.`
 
 func (s *Server) registerCodeTools() {
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "execute_code",
-		Description: executeCodeDescription,
+		Description: executeCodeDescription + "\n\nThe code runs in FreeCAD, on the computer running it. " + filePathsNote,
 		InputSchema: withPositiveMax(inputSchema[executeCodeInput](screenshotDefaults), "timeout", freecad.DefaultMaxExecuteCodeTime),
 	}, s.executeCode)
 
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "execute_code_async",
-		Description: executeCodeAsyncDescription,
+		Description: executeCodeAsyncDescription + "\n\nThe code runs in FreeCAD, on the computer running it. " + filePathsNote,
 		InputSchema: inputSchema[codeInput](nil),
 	}, s.executeCodeAsync)
 
@@ -116,15 +116,15 @@ func (s *Server) registerCodeTools() {
 
 func (s *Server) executeCode(ctx context.Context, _ *mcp.CallToolRequest, in executeCodeInput) (*mcp.CallToolResult, any, error) {
 	if err := freecad.CheckTimeout(in.Timeout); err != nil {
-		return failure("execute code", err, ""), nil, nil
+		return failure(ctx, "execute code", err, ""), nil, nil
 	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("execute code", err, ""), nil, nil
+		return failure(ctx, "execute code", err, ""), nil, nil
 	}
 	res, err := conn.ExecuteCode(ctx, in.Code, in.Timeout)
 	if err != nil {
-		return s.withNotice(timedFailure("execute code", err, largerTimeout("execute_code"))), nil, nil
+		return s.withNotice(timedFailure(ctx, "execute code", err, largerTimeout("execute_code"))), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reported("execute code", res,
@@ -142,11 +142,11 @@ func (s *Server) executeCode(ctx context.Context, _ *mcp.CallToolRequest, in exe
 func (s *Server) executeCodeAsync(ctx context.Context, _ *mcp.CallToolRequest, in codeInput) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("start async code execution", err, ""), nil, nil
+		return failure(ctx, "start async code execution", err, ""), nil, nil
 	}
 	res, err := conn.ExecuteCodeAsync(ctx, in.Code)
 	if err != nil {
-		return s.withNotice(failure("start async code execution", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "start async code execution", err, "")), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reported("start async execution", res, "Fix the code and retry.")), nil, nil
@@ -167,7 +167,7 @@ func (s *Server) executeCodeAsync(ctx context.Context, _ *mcp.CallToolRequest, i
 func (s *Server) getAsyncStatus(ctx context.Context, _ *mcp.CallToolRequest, in asyncStatusInput) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("get async status", err, ""), nil, nil
+		return failure(ctx, "get async status", err, ""), nil, nil
 	}
 	jobID := ""
 	if in.JobID != nil {
@@ -175,7 +175,7 @@ func (s *Server) getAsyncStatus(ctx context.Context, _ *mcp.CallToolRequest, in 
 	}
 	res, err := conn.GetAsyncStatus(ctx, jobID)
 	if err != nil {
-		return s.withNotice(failure("get async status", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "get async status", err, "")), nil, nil
 	}
 	if !succeeded(res) {
 		code := codeFreeCAD

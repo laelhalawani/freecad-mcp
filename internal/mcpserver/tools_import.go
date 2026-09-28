@@ -43,7 +43,7 @@ const importListCap = 100
 func (s *Server) registerImportTools() {
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "import_file",
-		Description: importFileDescription,
+		Description: importFileDescription + "\n\n" + filePathsNote,
 		InputSchema: withPositiveMax(inputSchema[importFileInput](mergeDefaults(screenshotDefaults, map[string]string{"timeout": "300"})),
 			"timeout", freecad.DefaultMaxExecuteCodeTime),
 	}, s.importFile)
@@ -51,11 +51,11 @@ func (s *Server) registerImportTools() {
 
 func (s *Server) importFile(ctx context.Context, _ *mcp.CallToolRequest, in importFileInput) (*mcp.CallToolResult, any, error) {
 	if err := freecad.CheckTimeout(in.Timeout); err != nil {
-		return failure("import file", err, ""), nil, nil
+		return failure(ctx, "import file", err, ""), nil, nil
 	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("import file", err, ""), nil, nil
+		return failure(ctx, "import file", err, ""), nil, nil
 	}
 	docName := ""
 	if in.DocName != nil {
@@ -74,7 +74,7 @@ func (s *Server) importFile(ctx context.Context, _ *mcp.CallToolRequest, in impo
 
 	res, err := conn.ImportFile(ctx, in.Path, docName, options, in.Timeout)
 	if err != nil {
-		return s.withNotice(timedFailure("import file", err, largerTimeout("import_file"))), nil, nil
+		return s.withNotice(timedFailure(ctx, "import file", err, largerTimeout("import_file"))), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("import file", res, "")), nil, nil

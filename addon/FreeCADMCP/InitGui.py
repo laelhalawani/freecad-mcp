@@ -22,7 +22,7 @@ class FreeCADMCPAddonWorkbench(Workbench):
             "Toggle_Auto_Start",
             "Toggle_Remote_Connections",
             "Configure_Allowed_IPs",
-            "Set_Auth_Token",
+            "Force_Release_Session",
         ]
         self.appendToolbar("FreeCAD MCP", commands)
         self.appendMenu("FreeCAD MCP", commands)

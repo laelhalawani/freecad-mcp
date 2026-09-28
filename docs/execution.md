@@ -97,7 +97,7 @@ dispatch as stuck.
 | Operation | Queue budget | Execution budget | MCP server's reply timeout |
 | --- | --- | --- | --- |
 | `execute_code` | 90 seconds (or `timeout`) | 90 seconds (or `timeout`) | At least `2 * timeout + 30` seconds; 210 seconds by default |
-| `run_fem_analysis` | Requested `timeout` (1 to 604800 seconds, default 600) | Requested `timeout` | At least `2 * timeout + 30` seconds |
+| `run_fem_analysis` | Requested `timeout` (1 to 3600 seconds, default 600) | Requested `timeout` | At least `2 * timeout + 30` seconds |
 | `import_file`, `export_document`, `check_printability`, `repair_mesh`, `mesh_to_solid`, `solid_to_mesh` | 300 seconds (or `timeout`) | 300 seconds (or `timeout`) | At least `2 * timeout + 30` seconds; 630 seconds by default |
 | `open_document`, `save_document`, `save_document_as`, `recompute_document`, `analyze_mesh` | 120 seconds (or `timeout`) | 120 seconds (or `timeout`) | At least `2 * timeout + 30` seconds; 270 seconds by default |
 

@@ -91,7 +91,7 @@ func (s *Server) registerDocumentTools() {
 			"without any dialog, and make it the active document. A file that is already open is not reloaded; " +
 			"the reply says so and gives the document name that later calls take as doc_name, its object count, " +
 			"and whether it needs a recompute. Use import_file for STEP, STL, 3MF and other formats, and " +
-			"reload_document to pick up changes made to an open file on disk.",
+			"reload_document to pick up changes made to an open file on disk. " + filePathsNote,
 		InputSchema: withPositiveMax(inputSchema[openDocumentInput](map[string]string{"hidden": "false", "activate": "true", "timeout": "120"}),
 			"timeout", freecad.DefaultMaxExecuteCodeTime),
 	}, s.openDocument)
@@ -108,15 +108,15 @@ func (s *Server) registerDocumentTools() {
 
 func (s *Server) openDocument(ctx context.Context, _ *mcp.CallToolRequest, in openDocumentInput) (*mcp.CallToolResult, any, error) {
 	if err := freecad.CheckTimeout(in.Timeout); err != nil {
-		return failure("open document", err, ""), nil, nil
+		return failure(ctx, "open document", err, ""), nil, nil
 	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("open document", err, ""), nil, nil
+		return failure(ctx, "open document", err, ""), nil, nil
 	}
 	res, err := conn.OpenDocument(ctx, in.Path, boolOr(in.Hidden, false), boolOr(in.Activate, true), in.Timeout)
 	if err != nil {
-		return s.withNotice(timedFailure("open document", err, largerTimeout("open_document"))), nil, nil
+		return s.withNotice(timedFailure(ctx, "open document", err, largerTimeout("open_document"))), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("open document", res, "")), nil, nil
@@ -154,11 +154,11 @@ func (s *Server) openDocument(ctx context.Context, _ *mcp.CallToolRequest, in op
 func (s *Server) activateDocument(ctx context.Context, _ *mcp.CallToolRequest, in activateDocumentInput) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("activate document", err, ""), nil, nil
+		return failure(ctx, "activate document", err, ""), nil, nil
 	}
 	res, err := conn.ActivateDocument(ctx, in.DocName, in.ViewIndex, boolOr(in.CreateView, false))
 	if err != nil {
-		return s.withNotice(failure("activate document", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "activate document", err, "")), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("activate document", res, "")), nil, nil
@@ -176,11 +176,11 @@ func (s *Server) activateDocument(ctx context.Context, _ *mcp.CallToolRequest, i
 func (s *Server) createDocument(ctx context.Context, _ *mcp.CallToolRequest, in createDocumentInput) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("create document", err, ""), nil, nil
+		return failure(ctx, "create document", err, ""), nil, nil
 	}
 	res, err := conn.CreateDocument(ctx, in.Name)
 	if err != nil {
-		return s.withNotice(failure("create document", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "create document", err, "")), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reported("create document", res, "Call list_documents to see the open documents.")), nil, nil
@@ -194,11 +194,11 @@ func (s *Server) createDocument(ctx context.Context, _ *mcp.CallToolRequest, in 
 func (s *Server) listDocuments(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("list documents", err, ""), nil, nil
+		return failure(ctx, "list documents", err, ""), nil, nil
 	}
 	res, err := conn.GetDocuments(ctx)
 	if err != nil {
-		return s.withNotice(failure("list documents", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "list documents", err, "")), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("list documents", res, "")), nil, nil
@@ -255,11 +255,11 @@ func viewsSummary(doc map[string]any) string {
 func (s *Server) reloadDocument(ctx context.Context, _ *mcp.CallToolRequest, in docNameInput) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("reload document", err, ""), nil, nil
+		return failure(ctx, "reload document", err, ""), nil, nil
 	}
 	res, err := conn.ReloadDocument(ctx, in.DocName)
 	if err != nil {
-		return s.withNotice(failure("reload document", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "reload document", err, "")), nil, nil
 	}
 	if !succeeded(res) {
 		// _reload_document_gui's every failure path (not_found, conflict for

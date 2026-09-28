@@ -115,6 +115,30 @@ else
   BASE="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}"
 fi
 URL="${BASE}/${ASSET}"
+# The one-line command a user runs to reach this script, shown by the
+# wizard's "Install FreeCAD first" screen for a re-run once FreeCAD is
+# installed. Passed to `configure` as FREECAD_MCP_INSTALL_COMMAND, scoped to
+# that one call so it never lingers in this script's own environment.
+# SH_ENV holds the env assignments that must sit on the sh side of the pipe
+# (a VAR=val before curl would only set it for curl, not for the sh that
+# actually reads CONFIGURE_ARGS): VERSION when pinned, and CONFIGURE_ARGS so
+# a flag such as --dry-run is not silently dropped from the exact command
+# shown to re-run after installing FreeCAD. CONFIGURE_ARGS is single-quoted
+# (the POSIX-portable way to embed arbitrary text in a shell command line)
+# with any embedded single quote escaped as '\''.
+SH_ENV=""
+if [ "$VERSION" != "latest" ]; then
+  SH_ENV="VERSION=${VERSION}"
+fi
+if [ -n "$CONFIGURE_ARGS" ]; then
+  QUOTED_ARGS=$(printf '%s' "$CONFIGURE_ARGS" | sed "s/'/'\\\\''/g")
+  SH_ENV="${SH_ENV:+$SH_ENV }CONFIGURE_ARGS='${QUOTED_ARGS}'"
+fi
+if [ "$VERSION" = "latest" ]; then
+  INSTALL_COMMAND="curl -fsSL https://github.com/${OWNER}/${REPO}/releases/latest/download/install.sh | ${SH_ENV:+$SH_ENV }sh"
+else
+  INSTALL_COMMAND="curl -fsSL https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/install.sh | ${SH_ENV} sh"
+fi
 INSTALL_ROOT="$HOME/.${REPO}"
 INSTALL_DIR="$INSTALL_ROOT/bin"
 TARGET="$INSTALL_DIR/$BIN"
@@ -382,14 +406,14 @@ if [ "$unattended" -eq 1 ]; then
   set +e
   stage=configure
   # shellcheck disable=SC2086
-  "$TARGET" configure $CONFIGURE_ARGS </dev/null
+  FREECAD_MCP_INSTALL_COMMAND="$INSTALL_COMMAND" "$TARGET" configure $CONFIGURE_ARGS </dev/null
   code=$?
   set -e
 elif ( : </dev/tty >/dev/tty ) 2>/dev/null; then
   set +e
   stage=configure
   # shellcheck disable=SC2086
-  "$TARGET" configure $CONFIGURE_ARGS </dev/tty >/dev/tty
+  FREECAD_MCP_INSTALL_COMMAND="$INSTALL_COMMAND" "$TARGET" configure $CONFIGURE_ARGS </dev/tty >/dev/tty
   code=$?
   set -e
 else

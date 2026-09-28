@@ -136,11 +136,11 @@ func (s *Server) registerObjectTools() {
 func (s *Server) createObject(ctx context.Context, req *mcp.CallToolRequest, in createObjectInput) (*mcp.CallToolResult, any, error) {
 	props, err := rawProperties(req)
 	if err != nil {
-		return failure("create object", &toolError{render.Error{Code: render.CodeInvalidInput, Message: err.Error(), Hint: propertiesHint}}, ""), nil, nil
+		return failure(ctx, "create object", &toolError{render.Error{Code: render.CodeInvalidInput, Message: err.Error(), Hint: propertiesHint}}, ""), nil, nil
 	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("create object", err, ""), nil, nil
+		return failure(ctx, "create object", err, ""), nil, nil
 	}
 	var analysis any
 	if in.AnalysisName != nil {
@@ -154,7 +154,7 @@ func (s *Server) createObject(ctx context.Context, req *mcp.CallToolRequest, in 
 	}
 	res, err := conn.CreateObject(ctx, in.DocName, objData)
 	if err != nil {
-		return s.withNotice(failure("create object", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "create object", err, "")), nil, nil
 	}
 	if !succeeded(res) {
 		if name := str(res, "object_name"); name != "" {
@@ -180,15 +180,15 @@ func (s *Server) createObject(ctx context.Context, req *mcp.CallToolRequest, in 
 func (s *Server) updateObject(ctx context.Context, req *mcp.CallToolRequest, in updateObjectInput) (*mcp.CallToolResult, any, error) {
 	props, err := rawProperties(req)
 	if err != nil {
-		return failure("update object", &toolError{render.Error{Code: render.CodeInvalidInput, Message: err.Error(), Hint: propertiesHint}}, ""), nil, nil
+		return failure(ctx, "update object", &toolError{render.Error{Code: render.CodeInvalidInput, Message: err.Error(), Hint: propertiesHint}}, ""), nil, nil
 	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("update object", err, ""), nil, nil
+		return failure(ctx, "update object", err, ""), nil, nil
 	}
 	res, err := conn.EditObject(ctx, in.DocName, in.ObjName, map[string]any{"Properties": props})
 	if err != nil {
-		return s.withNotice(failure("update object", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "update object", err, "")), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reported("update object", res,
@@ -204,11 +204,11 @@ func (s *Server) updateObject(ctx context.Context, req *mcp.CallToolRequest, in 
 func (s *Server) deleteObject(ctx context.Context, _ *mcp.CallToolRequest, in objectInput) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("delete object", err, ""), nil, nil
+		return failure(ctx, "delete object", err, ""), nil, nil
 	}
 	res, err := conn.DeleteObject(ctx, in.DocName, in.ObjName)
 	if err != nil {
-		return s.withNotice(failure("delete object", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "delete object", err, "")), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reported("delete object", res,
@@ -224,12 +224,12 @@ func (s *Server) deleteObject(ctx context.Context, _ *mcp.CallToolRequest, in ob
 func (s *Server) listObjects(ctx context.Context, _ *mcp.CallToolRequest, in documentInput) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("list objects", err, ""), nil, nil
+		return failure(ctx, "list objects", err, ""), nil, nil
 	}
 	compact := boolOr(in.Compact, false)
 	objects, err := conn.GetObjects(ctx, in.DocName, compact)
 	if err != nil {
-		return s.withNotice(failure("list objects", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "list objects", err, "")), nil, nil
 	}
 	count := 0
 	if list, ok := objects.([]any); ok {
@@ -251,11 +251,11 @@ func (s *Server) listObjects(ctx context.Context, _ *mcp.CallToolRequest, in doc
 func (s *Server) getObject(ctx context.Context, _ *mcp.CallToolRequest, in objectInput) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("get object", err, ""), nil, nil
+		return failure(ctx, "get object", err, ""), nil, nil
 	}
 	object, err := conn.GetObject(ctx, in.DocName, in.ObjName)
 	if err != nil {
-		return s.withNotice(failure("get object", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "get object", err, "")), nil, nil
 	}
 	if object == nil {
 		return s.withNotice(render.ErrorResult(render.Error{

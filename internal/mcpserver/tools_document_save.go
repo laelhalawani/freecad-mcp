@@ -65,7 +65,8 @@ func (s *Server) registerDocumentSaveTools() {
 		Description: "Save an open FreeCAD document to a new .FCStd file at an absolute path on the machine running " +
 			"FreeCAD. The document then uses that file and its label becomes the file name; with copy true a copy is " +
 			"written and the document keeps its file. An existing file is only replaced with overwrite true, and a " +
-			"file another open document uses is refused. Use export_document for STEP, STL, 3MF and other formats.",
+			"file another open document uses is refused. Use export_document for STEP, STL, 3MF and other formats. " +
+			filePathsNote,
 		InputSchema: withPositiveMax(inputSchema[saveDocumentAsInput](map[string]string{
 			"overwrite": "false", "copy": "false", "recompute": "true", "timeout": "120"}),
 			"timeout", freecad.DefaultMaxExecuteCodeTime),
@@ -82,15 +83,15 @@ func (s *Server) registerDocumentSaveTools() {
 
 func (s *Server) saveDocument(ctx context.Context, _ *mcp.CallToolRequest, in saveDocumentInput) (*mcp.CallToolResult, any, error) {
 	if err := freecad.CheckTimeout(in.Timeout); err != nil {
-		return failure("save document", err, ""), nil, nil
+		return failure(ctx, "save document", err, ""), nil, nil
 	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("save document", err, ""), nil, nil
+		return failure(ctx, "save document", err, ""), nil, nil
 	}
 	res, err := conn.SaveDocument(ctx, in.DocName, boolOr(in.Recompute, true), in.Timeout)
 	if err != nil {
-		return s.withNotice(timedFailure("save document", err, largerTimeout("save_document"))), nil, nil
+		return s.withNotice(timedFailure(ctx, "save document", err, largerTimeout("save_document"))), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("save document", res,
@@ -114,16 +115,16 @@ func (s *Server) saveDocument(ctx context.Context, _ *mcp.CallToolRequest, in sa
 
 func (s *Server) saveDocumentAs(ctx context.Context, _ *mcp.CallToolRequest, in saveDocumentAsInput) (*mcp.CallToolResult, any, error) {
 	if err := freecad.CheckTimeout(in.Timeout); err != nil {
-		return failure("save document as", err, ""), nil, nil
+		return failure(ctx, "save document as", err, ""), nil, nil
 	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("save document as", err, ""), nil, nil
+		return failure(ctx, "save document as", err, ""), nil, nil
 	}
 	res, err := conn.SaveDocumentAs(ctx, in.DocName, in.Path,
 		boolOr(in.Overwrite, false), boolOr(in.Copy, false), boolOr(in.Recompute, true), in.Timeout)
 	if err != nil {
-		return s.withNotice(timedFailure("save document as", err, largerTimeout("save_document_as"))), nil, nil
+		return s.withNotice(timedFailure(ctx, "save document as", err, largerTimeout("save_document_as"))), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("save document as", res, "")), nil, nil
@@ -153,11 +154,11 @@ func (s *Server) saveDocumentAs(ctx context.Context, _ *mcp.CallToolRequest, in 
 func (s *Server) closeDocument(ctx context.Context, _ *mcp.CallToolRequest, in closeDocumentInput) (*mcp.CallToolResult, any, error) {
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("close document", err, ""), nil, nil
+		return failure(ctx, "close document", err, ""), nil, nil
 	}
 	res, err := conn.CloseDocument(ctx, in.DocName, boolOr(in.DiscardChanges, false))
 	if err != nil {
-		return s.withNotice(failure("close document", err, "")), nil, nil
+		return s.withNotice(failure(ctx, "close document", err, "")), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("close document", res,

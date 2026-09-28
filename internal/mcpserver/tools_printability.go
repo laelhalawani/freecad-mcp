@@ -65,11 +65,11 @@ func (s *Server) registerPrintabilityTools() {
 
 func (s *Server) checkPrintability(ctx context.Context, _ *mcp.CallToolRequest, in checkPrintabilityInput) (*mcp.CallToolResult, any, error) {
 	if err := freecad.CheckTimeout(in.Timeout); err != nil {
-		return failure("check printability", err, ""), nil, nil
+		return failure(ctx, "check printability", err, ""), nil, nil
 	}
 	bedGiven := in.BedX != nil || in.BedY != nil || in.BedZ != nil
 	if bedGiven && (in.BedX == nil || in.BedY == nil || in.BedZ == nil) {
-		return failure("check printability", &toolError{render.Error{
+		return failure(ctx, "check printability", &toolError{render.Error{
 			Code:    render.CodeInvalidInput,
 			Message: "bed_x, bed_y and bed_z must be given together, or not at all",
 			Hint:    "Pass all three, e.g. {\"bed_x\": 220, \"bed_y\": 220, \"bed_z\": 250}, or omit all three to skip the bed fit check.",
@@ -101,11 +101,11 @@ func (s *Server) checkPrintability(ctx context.Context, _ *mcp.CallToolRequest, 
 
 	conn, err := s.fc.get(ctx)
 	if err != nil {
-		return failure("check printability", err, ""), nil, nil
+		return failure(ctx, "check printability", err, ""), nil, nil
 	}
 	res, err := conn.CheckPrintability(ctx, in.DocName, in.ObjectNames, options, in.Timeout)
 	if err != nil {
-		return s.withNotice(timedFailure("check printability", err, largerTimeout("check_printability"))), nil, nil
+		return s.withNotice(timedFailure(ctx, "check printability", err, largerTimeout("check_printability"))), nil, nil
 	}
 	if !succeeded(res) {
 		return s.withNotice(reportedCode("check printability", res,

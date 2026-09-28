@@ -7,14 +7,20 @@ runs CalculiX, and compares against beam-theory analytics.
 Prereqs:
 - FreeCAD is running with the FreeCADMCP addon loaded.
 - "Start RPC Server" was clicked, or auto-start is enabled.
-- When an auth token is set in FreeCAD ("Set Auth Token"), FREECAD_MCP_TOKEN
-  holds the same token.
+- When a password is set (freecad-mcp > Share this PC), FREECAD_MCP_TOKEN
+  holds the same password.
+
+Note: this script calls the addon directly, not through an MCP client, so its
+calls carry no agent identity. With remote access on, it holds FreeCAD's
+session as an unnamed agent for the run, and keeps holding it afterwards
+until the session frees itself after the configured idle timeout; another
+agent trying to use FreeCAD meanwhile gets an "in use" error until it does.
 
 Run:
     python3 examples/cantilever_fem.py
 
 Expected output: σ_max within ~50% of analytic and δ_tip within ~50% of
-analytic - coarser-than-textbook because the default mesh is linear tets at
+analytic, coarser than textbook because the default mesh is linear tets at
 ~5 mm size, which lock under bending. Refine the mesh or switch to second-
 order elements for closer convergence; that is out of scope for the smoke
 test, which only validates the pipeline end-to-end.
@@ -30,8 +36,9 @@ import xmlrpc.client
 
 HOST = "localhost"
 PORT = 9875
-# The RPC server's auth token, if one is set in FreeCAD. It is sent as the
-# password of HTTP Basic authentication, which the addon accepts.
+# The RPC server's password, if one is set (freecad-mcp > Share this PC). It
+# is sent as the password of HTTP Basic authentication, which the addon
+# accepts.
 TOKEN = os.environ.get("FREECAD_MCP_TOKEN", "").strip()
 
 DOC = "MCPCantilever"

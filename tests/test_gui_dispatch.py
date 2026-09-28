@@ -15,15 +15,18 @@ if str(ADDON_DIR) not in sys.path:
 
 
 class FakeSignal:
-    def __init__(self) -> None:
+    def __init__(self, *_types) -> None:
+        # PySide's Signal(*types) declares its argument types at class
+        # definition time (for example QtCore.Signal(bool, int)); this fake
+        # only needs to accept and ignore them.
         self.callback = None
 
     def connect(self, callback, *_args) -> None:
         self.callback = callback
 
-    def emit(self) -> None:
+    def emit(self, *args) -> None:
         if self.callback is not None:
-            self.callback()
+            self.callback(*args)
 
 
 class FakeStatusBar:
