@@ -37,6 +37,11 @@ def test_a_non_ascii_token_written_as_utf8_reads_back_intact(settings) -> None:
     assert module.load_settings()["auth_token"] == "pässwörd-€"
 
 
+def test_a_missing_file_gives_the_default_background_limit(settings) -> None:
+    module, _path = settings
+    assert module.load_settings()["background_after_minutes"] == 30
+
+
 def test_saved_settings_round_trip(settings) -> None:
     module, path = settings
     module.save_settings({**module.load_settings(), "auth_token": "tökén"})

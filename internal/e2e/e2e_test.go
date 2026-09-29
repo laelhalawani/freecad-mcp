@@ -447,6 +447,54 @@ func TestSelectionToMeasure(t *testing.T) {
 	}
 }
 
+// TestScriptsRunFromFiles: execute_code, execute_code_async and execute_code_headless take the
+// script as the path of a file. __file__ is that path, and an error names the file and its line.
+func TestScriptsRunFromFiles(t *testing.T) {
+	cs := session(t)
+	write := func(name, source string) string {
+		path := tempPath(t, name)
+		if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	box := write("box.py", "import FreeCAD\ndoc = FreeCAD.newDocument('E2EFile')\nbox = doc.addObject('Part::Box', 'Box')\n"+
+		"box.Length = 12\ndoc.recompute()\nprint('file', __file__)\nprint('volume', round(box.Shape.Volume, 3))\n")
+	broken := write("broken.py", "import FreeCAD\na = 1\nb = 2\n\nc = a + b\nd = c * 2\nraise RuntimeError('boom on line seven')\n")
+
+	closeDoc(t, cs, "E2EFile")
+	closeOnCleanup(t, cs, "E2EFile")
+	must(t, call(t, cs, "execute_code", map[string]any{"path": box, "include_screenshot": false}), "file "+box, "volume 1200")
+	fails(t, call(t, cs, "execute_code", map[string]any{"path": broken, "include_screenshot": false}),
+		"RuntimeError: boom on line seven", broken+", line 7")
+	fails(t, call(t, cs, "execute_code", map[string]any{"path": tempPath(t, "missing.py"), "include_screenshot": false}), "not_found")
+	fails(t, call(t, cs, "execute_code", map[string]any{"path": "box.py", "include_screenshot": false}), "invalid_input")
+	fails(t, call(t, cs, "execute_code", map[string]any{"path": box, "code": "pass"}), "Pass code or path, not both")
+
+	async := call(t, cs, "execute_code_async", map[string]any{"path": broken})
+	must(t, async, "job_id:")
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		st := call(t, cs, "get_async_status", map[string]any{"job_id": frontValue(async.text, "job_id")})
+		if strings.Contains(st.text, "failed") {
+			must(t, st, "RuntimeError: boom on line seven", broken+`", line 7`)
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("async job did not fail: %s", st.text)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	headless := write("headless.py", "print('file', __file__)\nprint('sum', 6 * 7)\n")
+	must(t, call(t, cs, "execute_code_headless", map[string]any{"path": headless, "timeout": 120}), "file "+headless, "sum 42")
+	if _, err := os.Stat(headless); err != nil {
+		t.Fatalf("the headless script file is gone after the run: %v", err)
+	}
+	fails(t, call(t, cs, "execute_code_headless", map[string]any{"path": broken, "timeout": 120}),
+		"RuntimeError: boom on line seven", "line 7")
+}
+
 func TestAgainstFreeCAD(t *testing.T) {
 	cs := session(t)
 

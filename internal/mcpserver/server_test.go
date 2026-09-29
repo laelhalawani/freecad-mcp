@@ -60,7 +60,12 @@ func addon(t *testing.T, extra map[string]xmlrpctest.Handler) *xmlrpctest.Server
 
 func session(t *testing.T, settings domain.Settings) *mcp.ClientSession {
 	t.Helper()
-	srv := New(Config{Version: "1.2.3", FreeCAD: settings})
+	return sessionOf(t, New(Config{Version: "1.2.3", FreeCAD: settings}))
+}
+
+// sessionOf connects a client to srv, for a test that sets up the server itself.
+func sessionOf(t *testing.T, srv *Server) *mcp.ClientSession {
+	t.Helper()
 	ctx := context.Background()
 	st, ct := mcp.NewInMemoryTransports()
 	if _, err := srv.MCPServer().Connect(ctx, st, nil); err != nil {

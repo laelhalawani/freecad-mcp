@@ -60,6 +60,16 @@ The setting is saved to `freecad_mcp_settings.json` in FreeCAD's user data
 directory and persists across sessions. With it on, the RPC server starts once
 FreeCAD finishes loading.
 
+## Long calls
+
+A call that keeps the agent waiting longer than `background_after_minutes`
+(30 by default, 1 to 1440) moves to the background: the agent gets a job id to
+poll with `get_async_status` (see [code execution](execution.md#long-calls-move-to-the-background)).
+`freecad-mcp settings` prints the value, and `freecad-mcp settings
+--background-after <minutes>` saves it to `freecad_mcp_settings.json`; add
+`--user-data-dir <dir>` for a FreeCAD user data directory other than the first
+one found. Restart your AI client to use a changed value.
+
 ## Starting FreeCAD from your AI client
 
 The `start_freecad` tool starts FreeCAD's GUI on this machine when nothing

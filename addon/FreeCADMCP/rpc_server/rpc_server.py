@@ -21,7 +21,7 @@ from PySide import QtCore
 
 from rpc_server import request_context, session_lock
 from rpc_server.commands import register_commands
-from rpc_server.errors import CONFLICT, INVALID_INPUT, NOT_FOUND, fail, tool_call
+from rpc_server.errors import CONFLICT, FREECAD_ERROR, INVALID_INPUT, NOT_FOUND, fail, tool_call
 from rpc_server.fem_executor import run_fem_analysis as _run_fem_analysis
 from rpc_server.gui_dispatch import (
     cleanup_waker,
@@ -35,7 +35,7 @@ from rpc_server.ip_filter import FilteredXMLRPCServer
 from rpc_server.lookup import require_document
 from rpc_server.object_factory import create_object_gui, edit_object_gui
 from rpc_server.parts_library import get_parts_list, insert_part_from_library
-from rpc_server.paths import home_example
+from rpc_server.paths import home_example, require_absolute_path
 from rpc_server.property_mapper import Object
 from rpc_server.serialize import serialize_object
 from rpc_server.settings import load_settings, on_change, poll as poll_settings, save_settings, unreadable as settings_unreadable
@@ -80,6 +80,11 @@ _EXEC_NAMESPACE: dict[str, Any] = {
     "Gui": FreeCADGui,
 }
 _async_execution = threading.local()
+
+# The setting the MCP server reads to move a long call to the background,
+# reported by get_rpc_status and kept current by _apply_settings.
+_BACKGROUND_AFTER_DEFAULT = 30
+_background_after_minutes = _BACKGROUND_AFTER_DEFAULT
 
 # Background jobs started by execute_code_async, newest last. The registry lets
 # the client read errors raised off the GUI thread via get_async_status instead
@@ -176,6 +181,100 @@ def _commit_async(fn: Callable[[], Any], timeout: float = 120) -> Any:
 # or synchronous script from waiting on its own GUI thread through commit().
 _EXEC_NAMESPACE["commit"] = _commit_async
 
+_NO_VALUE = object()
+_FILE_RUNS_LOCK = threading.Lock()
+_file_runs = 0  # file runs in progress, guarded by _FILE_RUNS_LOCK
+_file_before: Any = _NO_VALUE  # the namespace's __file__ before the first of them
+
+
+def _exec_in_namespace(code: str, script_path: str | None = None) -> None:
+    """Run ``code`` in the shared namespace of execute_code and execute_code_async.
+
+    Code that came from a file (``script_path``) is compiled with that path as
+    its filename, so a traceback or SyntaxError cites the file and its line
+    numbers, and sees ``__file__`` for the run only. Inline code keeps the
+    filename ``<string>``.
+    """
+    compiled = compile(code, script_path or "<string>", "exec")
+    if script_path is None:
+        exec(compiled, _EXEC_NAMESPACE)
+        return
+    # Runs of files can overlap (a background job and a GUI call share the
+    # namespace). Every run sets __file__ to its own path on entry, so while
+    # runs overlap it is the path of the most recently started one. The value
+    # from before any file ran is saved when the first run starts and restored
+    # when the last one ends, so no run loses __file__ mid-run and none leaves
+    # a stale one behind.
+    global _file_runs, _file_before
+    with _FILE_RUNS_LOCK:
+        if _file_runs == 0:
+            _file_before = _EXEC_NAMESPACE.get("__file__", _NO_VALUE)
+        _file_runs += 1
+        _EXEC_NAMESPACE["__file__"] = script_path
+    try:
+        exec(compiled, _EXEC_NAMESPACE)
+    finally:
+        with _FILE_RUNS_LOCK:
+            _file_runs -= 1
+            if _file_runs == 0:
+                if _file_before is _NO_VALUE:
+                    _EXEC_NAMESPACE.pop("__file__", None)
+                else:
+                    _EXEC_NAMESPACE["__file__"] = _file_before
+
+
+def _read_script(path: Any) -> tuple[tuple[str, str], None] | tuple[None, dict[str, Any]]:
+    """Return ``((absolute_path, source), None)`` for the script file at ``path``,
+    or ``(None, fail())`` when it is not an absolute path, not a file, or not text.
+
+    A leading byte order mark (what some Windows editors write) is dropped.
+    """
+    expanded, path_error = require_absolute_path(path)
+    if path_error is not None:
+        return None, path_error
+    if not os.path.isfile(expanded):
+        return None, fail(
+            NOT_FOUND,
+            f"'{expanded}' does not exist or is not a file.",
+            "Write the script to a .py file on the computer running FreeCAD, then call the tool again with its absolute path.",
+        )
+    try:
+        with open(expanded, encoding="utf-8-sig") as f:
+            return (expanded, f.read()), None
+    except UnicodeDecodeError:
+        return None, fail(INVALID_INPUT, f"'{expanded}' is not UTF-8 text.", "Save the script as UTF-8.")
+    except OSError as e:
+        return None, fail(INVALID_INPUT, f"'{expanded}' could not be read: {e}")
+
+
+def _script_failure(error: Exception, script_path: str) -> dict[str, Any]:
+    """The reply for a script file that raised on the GUI thread.
+
+    A reply carries only the exception's type and message; the traceback goes
+    to the Report View. For a file, the message also names the line of the
+    script that raised, so the caller can fix it without reading the Report
+    View. A SyntaxError's own text names only the file's base name, so it is
+    worded here with the full path.
+    """
+    import traceback
+
+    if isinstance(error, SyntaxError) and error.lineno:
+        message = f"{type(error).__name__}: {error.msg} ({script_path}, line {error.lineno})"
+    else:
+        line = None
+        frame = error.__traceback__
+        while frame is not None:
+            if frame.tb_frame.f_code.co_filename == script_path:
+                line = frame.tb_lineno
+            frame = frame.tb_next
+        message = f"{type(error).__name__}: {error}"
+        if line is not None:
+            message += f" ({script_path}, line {line})"
+    FreeCAD.Console.PrintError(
+        f"MCP RPC: GUI task raised {type(error).__name__}: {error}\n{traceback.format_exc()}"
+    )
+    return fail(FREECAD_ERROR, message)
+
 
 def _query_on_gui(task: Callable[[], Any], operation: str) -> Any:
     """Preserve query results while reporting dispatch failures as RPC faults."""
@@ -269,6 +368,7 @@ class FreeCADRPC:
             "protocol_version": PROTOCOL_VERSION,
             "execute_code_timeout": self.EXECUTE_CODE_TIMEOUT,
             "max_execute_code_timeout": self.MAX_EXECUTE_CODE_TIMEOUT,
+            "background_after_minutes": _background_after_minutes,
             # The computer FreeCAD actually runs on, so a client that reached
             # it through "localhost" can tell whether that name was answered
             # by this machine or, for example, WSL's own localhost port
@@ -481,6 +581,20 @@ class FreeCADRPC:
         functions can reuse it in later async calls. It may only be called from
         an async worker, not from a synchronous script or GUI callback.
         """
+        return self._start_async(code)
+
+    def execute_file_async(self, path: str) -> dict[str, Any]:
+        """Start the script file at ``path`` as execute_code_async starts code.
+
+        Same contract and reply; the file is read now, compiled under its own
+        path (tracebacks cite it) and sees ``__file__`` while it runs.
+        """
+        script, error = _read_script(path)
+        if error is not None:
+            return error
+        return self._start_async(script[1], script[0])
+
+    def _start_async(self, code: str, script_path: str | None = None) -> dict[str, Any]:
         # No status-bar message is shown for the job: setting one would wait on
         # the GUI thread, and process_gui_tasks clears the status bar as soon as
         # the task that set it finishes. Progress is read via get_async_status.
@@ -510,7 +624,7 @@ class FreeCADRPC:
                 pass
             outcome: dict[str, Any] = {"state": "done"}
             try:
-                exec(code, _EXEC_NAMESPACE)
+                _exec_in_namespace(code, script_path)
             except BaseException as e:
                 # SystemExit/KeyboardInterrupt raised by a worker script must
                 # also finish its job record rather than leave it running.
@@ -547,7 +661,8 @@ class FreeCADRPC:
         # get_async_status can still tell whose job a *finished* one was
         # too (live-fixes review L3).
         _record_job(job_id, state="running", started=time.time(), code=code_preview,
-                    session=caller_ctx.session or session_lock.ANONYMOUS)
+                    session=caller_ctx.session or session_lock.ANONYMOUS,
+                    **({"file": script_path} if script_path else {}))
         # A running job keeps its session's lock busy until it ends, so the
         # lock cannot expire while the job still writes through commit().
         session_lock.job_started(job_id)
@@ -588,6 +703,32 @@ class FreeCADRPC:
         task keeps running, and its result is discarded even though the work
         completes.
         """
+        timeout_s = self._execute_timeout(timeout)
+        if isinstance(timeout_s, dict):
+            return timeout_s
+        return self._execute(code, timeout_s)
+
+    def execute_file(self, path: str, timeout: Any = None) -> dict[str, Any]:
+        """Run the script file at ``path`` as execute_code runs code.
+
+        Same thread, transaction, shared namespace, captured output, timeout
+        rules and reply; the file is read now, compiled under its own path
+        (tracebacks and SyntaxErrors cite it and its line numbers) and sees
+        ``__file__`` while it runs. A file that raises reports the file and
+        line in its error.
+        """
+        # The timeout is checked before the file is read, as execute_code checks
+        # it before any work.
+        timeout_s = self._execute_timeout(timeout)
+        if isinstance(timeout_s, dict):
+            return timeout_s
+        script, error = _read_script(path)
+        if error is not None:
+            return error
+        return self._execute(script[1], timeout_s, script[0])
+
+    def _execute_timeout(self, timeout: Any) -> float | dict[str, Any]:
+        """The GUI-thread budget for one execute call, or the reply rejecting ``timeout``."""
         timeout_s = self.EXECUTE_CODE_TIMEOUT
         if timeout is not None:
             try:
@@ -597,7 +738,10 @@ class FreeCADRPC:
             if isinstance(timeout, bool) or not math.isfinite(timeout_s) or timeout_s <= 0:
                 return {"success": False, "error": f"invalid timeout: {timeout!r}"}
             timeout_s = min(timeout_s, self.MAX_EXECUTE_CODE_TIMEOUT)
+        return timeout_s
 
+    def _execute(self, code: str, timeout_s: float, script_path: str | None = None) -> dict[str, Any]:
+        """Run ``code`` on the GUI thread for execute_code and execute_file."""
         output_buffer = io.StringIO()
         tx_fields: dict[str, Any] = {}
 
@@ -617,8 +761,13 @@ class FreeCADRPC:
             # same edit by hand from the Python console while that other
             # document was active in the GUI.
             with contextlib.redirect_stdout(output_buffer):
-                with transaction("execute_code") as tx:
-                    exec(code, _EXEC_NAMESPACE)
+                try:
+                    with transaction("execute_code") as tx:
+                        _exec_in_namespace(code, script_path)
+                except Exception as e:
+                    if script_path is None:
+                        raise
+                    return _script_failure(e, script_path)
             tx_fields.update(tx.reply_fields())
             return True
 
@@ -634,6 +783,10 @@ class FreeCADRPC:
                 "message": "Python code executed successfully.\nOutput: " + output_buffer.getvalue(),
                 **tx_fields,
             }
+        if script_path is not None:
+            # The file is the record of what ran; its traceback is already logged.
+            FreeCAD.Console.PrintError(f"Error executing script file {script_path}: {_err(res)['error']}\n")
+            return _err(res)
         # Log the offending code (truncated) to make errors traceable
         code_preview = code if len(code) <= 800 else code[:800] + "\n...(truncated)"
         FreeCAD.Console.PrintError(
@@ -969,17 +1122,29 @@ def _session_timeout_s(settings: dict[str, Any]) -> float:
         return float(session_lock.DEFAULT_TIMEOUT_S)
 
 
+def _background_after(settings: dict[str, Any]) -> int:
+    """Minutes after which the MCP server moves a long call to the background,
+    from the settings: a whole number of 1 to 1440, else the default 30."""
+    value = settings.get("background_after_minutes", _BACKGROUND_AFTER_DEFAULT)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value):
+        return _BACKGROUND_AFTER_DEFAULT
+    return int(value) if 1 <= value <= 1440 else _BACKGROUND_AFTER_DEFAULT
+
+
 def _apply_settings(settings: dict[str, Any]) -> None:
-    """Apply settings that change while the server runs: the password and the lock.
+    """Apply settings that change while the server runs: the password, the lock
+    and the background limit that get_rpc_status reports.
 
     Runs when the server starts and whenever the settings file changes
     (settings.on_change), so a password or lock change made in freecad-mcp
     takes effect without restarting the RPC server.
     """
+    global _background_after_minutes
     server = rpc_server_instance
     if server is not None:
         server.auth_token = str(settings.get("auth_token", "") or "")
     session_lock.configure(bool(settings.get("remote_enabled", False)), _session_timeout_s(settings))
+    _background_after_minutes = _background_after(settings)
 
 
 def start_rpc_server(port: int = 9875) -> str:

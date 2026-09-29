@@ -186,6 +186,54 @@ func TestClientAdoptsABudgetUpToItsOwnCeiling(t *testing.T) {
 	}
 }
 
+func TestClientAdoptsTheBackgroundLimit(t *testing.T) {
+	c := connect(statusServer(t, matchingStatus(map[string]any{"background_after_minutes": 5})))
+	if c.BackgroundAfter() != 30*time.Minute {
+		t.Fatalf("limit before the check = %v, want the 30 min default", c.BackgroundAfter())
+	}
+	c.CheckAddonVersion(context.Background(), "1.0.0")
+	if c.BackgroundAfterMinutes != 5 || c.BackgroundAfter() != 5*time.Minute {
+		t.Fatalf("limit = %d min, %v", c.BackgroundAfterMinutes, c.BackgroundAfter())
+	}
+}
+
+func TestClientIgnoresAnInvalidBackgroundLimit(t *testing.T) {
+	for _, bad := range []any{0, -1, 1441, 2.5, true, "10", nil} {
+		c := connect(statusServer(t, matchingStatus(map[string]any{"background_after_minutes": bad})))
+		c.CheckAddonVersion(context.Background(), "1.0.0")
+		if c.BackgroundAfterMinutes != 30 {
+			t.Errorf("limit %#v adopted: %d", bad, c.BackgroundAfterMinutes)
+		}
+	}
+}
+
+func TestExecuteFileSendsThePathWithTheSameBudgetsAsCode(t *testing.T) {
+	var got [][]any
+	srv := xmlrpctest.New(t, map[string]xmlrpctest.Handler{
+		"execute_file":       func(p []any) (any, error) { got = append(got, p); return map[string]any{"success": true}, nil },
+		"execute_file_async": func(p []any) (any, error) { got = append(got, p); return map[string]any{"success": true}, nil },
+	})
+	c := connect(srv)
+	for _, call := range []func() error{
+		func() error { _, err := c.ExecuteFile(context.Background(), "/a/b.py", nil); return err },
+		func() error { _, err := c.ExecuteFile(context.Background(), "/a/b.py", ptr(600.0)); return err },
+		func() error { _, err := c.ExecuteFileAsync(context.Background(), "/a/b.py"); return err },
+	} {
+		if err := call(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// As execute_code: the run budget only travels with an explicit timeout.
+	want := [][]any{{"/a/b.py"}, {"/a/b.py", float64(600)}, {"/a/b.py"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("params = %#v, want %#v", got, want)
+	}
+	bad := 0.0
+	if _, err := c.ExecuteFile(context.Background(), "/a/b.py", &bad); err != freecad.ErrInvalidTimeout {
+		t.Fatalf("a zero timeout gave %v, want ErrInvalidTimeout", err)
+	}
+}
+
 func TestUnreachableAddonDoesNotBlockTheCheck(t *testing.T) {
 	c := freecad.NewConnection("127.0.0.1", 9, "", 500*time.Millisecond)
 	if w, _ := c.CheckAddonVersion(context.Background(), "1.0.0"); w != "" {

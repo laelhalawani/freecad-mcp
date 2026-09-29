@@ -123,6 +123,48 @@ func TestExceptionReportsExitCodeAndTraceback(t *testing.T) {
 	}
 }
 
+// writeScriptFile writes a script into a folder of its own, with a space in its
+// name, and returns its path.
+func writeScriptFile(t *testing.T, source string) string {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "my script.py")
+	if err := os.WriteFile(file, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
+func TestScriptFileRunsInPlaceAsMain(t *testing.T) {
+	py := python(t)
+	dir := scripts(t)
+	file := writeScriptFile(t, "\xef\xbb\xbfimport sys\nprint('file', __file__)\nprint('name', __name__)\n")
+	res := RunScript(context.Background(), Script{Path: file}, 30, py)
+	if !res.Success || res.Output != "file "+file+"\nname __main__" {
+		t.Fatalf("result = %+v", res)
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Fatalf("the script file is gone after the run: %v", err)
+	}
+	assertEmpty(t, dir) // nothing was copied into the script directory
+}
+
+func TestScriptFileTracebackCitesTheFileAndLine(t *testing.T) {
+	py := python(t)
+	scripts(t)
+	file := writeScriptFile(t, "import sys\nprint('start')\n\nraise ValueError('line four')\n")
+	res := RunScript(context.Background(), Script{Path: file}, 30, py)
+	if res.Success || res.ReturnCode == nil || *res.ReturnCode != 1 {
+		t.Fatalf("result = %+v", res)
+	}
+	want := `File "` + file + `", line 4`
+	if !strings.Contains(res.Output, want) || !strings.Contains(res.Output, "ValueError: line four") || !strings.Contains(res.Output, "start") {
+		t.Fatalf("output = %q, want it to hold %q", res.Output, want)
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Fatalf("the script file is gone after a failed run: %v", err)
+	}
+}
+
 func TestNativeCrashIsReportedNotPropagated(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX signal exit status")

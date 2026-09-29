@@ -20,6 +20,7 @@ type Handler func(params []any) (any, error)
 type Call struct {
 	Method string
 	Params []any
+	Header http.Header // the request's HTTP headers
 }
 
 // Server is a fake XML-RPC server.
@@ -109,7 +110,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	s.calls = append(s.calls, Call{Method: method, Params: params})
+	s.calls = append(s.calls, Call{Method: method, Params: params, Header: r.Header.Clone()})
 	h := s.handlers[method]
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "text/xml")

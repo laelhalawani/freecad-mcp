@@ -11,6 +11,8 @@ from pathlib import Path
 import types
 import xmlrpc.client
 
+import pytest
+
 from test_rpc_concurrency import running_server
 from test_rpc_handlers import rpc_module
 
@@ -36,6 +38,27 @@ def test_real_addon_reports_version_and_budgets(rpc_module: types.ModuleType) ->
     assert status["protocol_version"] == addon.PROTOCOL_VERSION
     assert status["execute_code_timeout"] == 42
     assert status["max_execute_code_timeout"] == rpc.MAX_EXECUTE_CODE_TIMEOUT
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(5, 5), (1, 1), (1440, 1440), (45.0, 45), (0, 30), (1441, 30), (2.5, 30), ("10", 30), (True, 30), (None, 30)],
+)
+def test_status_reports_the_background_limit_the_settings_hold(
+    rpc_module: types.ModuleType, value: object, expected: int,
+) -> None:
+    rpc = rpc_module.FreeCADRPC()
+    assert rpc.get_rpc_status()["background_after_minutes"] == 30
+    rpc_module._apply_settings({"background_after_minutes": value})
+    assert rpc.get_rpc_status()["background_after_minutes"] == expected
+
+
+def test_status_reports_the_default_background_limit_when_the_setting_is_missing(
+    rpc_module: types.ModuleType,
+) -> None:
+    rpc_module._apply_settings({"background_after_minutes": 7})
+    rpc_module._apply_settings({})
+    assert rpc_module.FreeCADRPC().get_rpc_status()["background_after_minutes"] == 30
 
 
 def test_status_travels_over_xmlrpc(rpc_module: types.ModuleType) -> None:

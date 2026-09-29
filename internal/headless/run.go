@@ -143,7 +143,7 @@ except Exception:
     pass
 _ns = {'__name__': '__main__', '__file__': SCRIPT, '__builtins__': __builtins__}
 try:
-    with open(SCRIPT, encoding='utf-8') as _f:
+    with open(SCRIPT, encoding='utf-8-sig') as _f:
         _source = _f.read()
     exec(compile(_source, SCRIPT, 'exec'), _ns)
 except SystemExit:
@@ -184,6 +184,24 @@ func prepare(ctx context.Context, timeout float64, command []string) (cmd []stri
 	return command, dir, ""
 }
 
+// Script is what a headless run executes: Code, which is written to a
+// temporary file for the run, or the file at Path, which runs where it is and
+// is never copied or deleted. Exactly one is set.
+type Script struct {
+	Code string
+	Path string
+}
+
+// prepare gives the path of the file to run. temp says the file was written
+// here, in dir, and is the caller's to remove.
+func (s Script) prepare(dir string) (path string, temp bool, msg string) {
+	if s.Path != "" {
+		return s.Path, false, ""
+	}
+	path, msg = writeScript(dir, s.Code)
+	return path, msg == "", msg
+}
+
 // writeScript writes code to a new script file in dir.
 func writeScript(dir, code string) (path, msg string) {
 	f, err := os.CreateTemp(dir, "script-*.py")
@@ -211,15 +229,22 @@ func crashMessage(name string, code int) string {
 // Run executes code as a script file through freecadcmd -c with bootstrap,
 // waiting at most timeout seconds. A nil command is auto-detected.
 func Run(ctx context.Context, code string, timeout float64, command []string) Result {
+	return RunScript(ctx, Script{Code: code}, timeout, command)
+}
+
+// RunScript is Run for a Script: inline code or a file that already exists.
+func RunScript(ctx context.Context, s Script, timeout float64, command []string) Result {
 	command, dir, msg := prepare(ctx, timeout, command)
 	if msg != "" {
 		return Result{Error: msg}
 	}
-	script, msg := writeScript(dir, code)
+	script, temp, msg := s.prepare(dir)
 	if msg != "" {
 		return Result{Error: msg}
 	}
-	defer os.Remove(script)
+	if temp {
+		defer os.Remove(script)
+	}
 
 	limit := time.Duration(timeout * float64(time.Second))
 	runCtx, cancel := context.WithTimeout(ctx, limit)

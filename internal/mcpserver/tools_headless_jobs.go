@@ -63,9 +63,9 @@ func (s *Server) sendKeepAlive(ctx context.Context, id, phrase string, started t
 	_, _ = conn.KeepSessionAlive(ctx, id, phrase, time.Since(started).Seconds(), ending)
 }
 
-// startHeadlessJob starts code in the background and replies with its job id.
-func (s *Server) startHeadlessJob(ctx context.Context, code string, timeout float64) *mcp.CallToolResult {
-	job, msg := s.jobs.Start(ctx, code, timeout, s.config.FreeCAD.FreecadCmd)
+// startHeadlessJob starts script in the background and replies with its job id.
+func (s *Server) startHeadlessJob(ctx context.Context, script headless.Script, timeout float64) *mcp.CallToolResult {
+	job, msg := s.jobs.StartScript(ctx, script, timeout, s.config.FreeCAD.FreecadCmd)
 	if msg != "" {
 		return s.withNotice(headlessFailure(headless.Result{Error: msg}, timeout))
 	}
@@ -112,6 +112,14 @@ func (s *Server) registerJobTools() {
 }
 
 func (s *Server) cancelJob(_ context.Context, _ *mcp.CallToolRequest, in cancelJobInput) (*mcp.CallToolResult, any, error) {
+	if isCallJobID(in.JobID) {
+		return render.ErrorResult(render.Error{
+			Code: render.CodeInvalidInput,
+			Message: fmt.Sprintf("FreeCAD cannot stop work already running in its window, so %s cannot be cancelled: it ends when the work finishes. "+
+				"Closing FreeCAD stops it and loses unsaved changes.", in.JobID),
+			Hint: fmt.Sprintf("Call get_async_status with {\"job_id\": %q} every minute or two until it finishes.", in.JobID),
+		}), nil, nil
+	}
 	if !headless.IsJobID(in.JobID) {
 		return render.ErrorResult(render.Error{
 			Code:    render.CodeInvalidInput,

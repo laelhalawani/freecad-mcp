@@ -121,6 +121,7 @@ func registerFreeCADCommands(r *command.Registry) {
 		},
 	})
 	registerRemoteCommands(r)
+	registerSettingsCommand(r)
 }
 
 // autoStartChoice is what an install does with the addon's "start the RPC

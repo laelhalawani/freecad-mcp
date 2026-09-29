@@ -11,6 +11,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sairaph/freecad-mcp/internal/addoninstall"
 	"github.com/sairaph/freecad-mcp/internal/domain"
 	"github.com/sairaph/freecad-mcp/internal/xmlrpc"
 )
@@ -44,6 +45,9 @@ type Connection struct {
 	MaxExecuteCodeTimeout float64
 	RPCTimeoutMargin      float64
 	VersionCheckTimeout   time.Duration
+	// BackgroundAfterMinutes is how long a call may keep the agent waiting
+	// before it moves to the background, as the addon's settings say.
+	BackgroundAfterMinutes int
 
 	// OnLock, when set, is told the addon's X-FreeCAD-MCP-Lock header ("on"
 	// or "off") of every reply that carries one. Set it before the first call.
@@ -83,6 +87,8 @@ func NewConnection(host string, port int, token string, timeout time.Duration) *
 		MaxExecuteCodeTimeout: DefaultMaxExecuteCodeTime,
 		RPCTimeoutMargin:      DefaultRPCTimeoutMargin,
 		VersionCheckTimeout:   DefaultVersionCheckTimeout,
+
+		BackgroundAfterMinutes: addoninstall.DefaultBackgroundAfterMinutes,
 	}
 	c.rpc.OnReply = func(h http.Header) {
 		if c.OnHeaders != nil {
@@ -253,8 +259,15 @@ func (c *Connection) CheckAddonVersion(ctx context.Context, serverVersion string
 	if !ok {
 		return AddonVersionWarning(map[string]any{}, serverVersion), nil
 	}
-	// Socket timeouts derive from these budgets, so this client's own ceiling
-	// bounds how long an addon's report can make it wait.
+	c.AdoptBudgets(status)
+	return AddonVersionWarning(status, serverVersion), status
+}
+
+// AdoptBudgets takes the run budgets and the background limit from an addon's
+// get_rpc_status reply. A value that is missing or out of range leaves the
+// current one. Socket timeouts derive from the budgets, so this client's own
+// ceiling bounds how long an addon's report can make it wait.
+func (c *Connection) AdoptBudgets(status map[string]any) {
 	ceiling := DefaultMaxExecuteCodeTime
 	if f, ok := IsBudget(status["execute_code_timeout"], ceiling); ok {
 		c.ExecuteCodeTimeout = f
@@ -262,7 +275,16 @@ func (c *Connection) CheckAddonVersion(ctx context.Context, serverVersion string
 	if f, ok := IsBudget(status["max_execute_code_timeout"], ceiling); ok {
 		c.MaxExecuteCodeTimeout = f
 	}
-	return AddonVersionWarning(status, serverVersion), status
+	if f, ok := IsBudget(status["background_after_minutes"], addoninstall.MaxBackgroundAfterMinutes); ok &&
+		f == math.Trunc(f) && f >= addoninstall.MinBackgroundAfterMinutes {
+		c.BackgroundAfterMinutes = int(f)
+	}
+}
+
+// BackgroundAfter is how long a call may keep the agent waiting before it
+// moves to the background.
+func (c *Connection) BackgroundAfter() time.Duration {
+	return time.Duration(c.BackgroundAfterMinutes) * time.Minute
 }
 
 // ErrInvalidTimeout rejects a timeout that is not a positive finite number.
@@ -319,19 +341,37 @@ func (c *Connection) ExecuteCodeBudget(timeout *float64) (run float64, wait time
 // sends one argument, so it keeps working with addons that predate the
 // timeout parameter.
 func (c *Connection) ExecuteCode(ctx context.Context, code string, timeout *float64) (map[string]any, error) {
+	return c.executeOnGUI(ctx, "execute_code", code, timeout)
+}
+
+// ExecuteFile runs the Python file at path (on the computer running FreeCAD)
+// on FreeCAD's GUI thread, with ExecuteCode's budgets.
+func (c *Connection) ExecuteFile(ctx context.Context, path string, timeout *float64) (map[string]any, error) {
+	return c.executeOnGUI(ctx, "execute_file", path, timeout)
+}
+
+// executeOnGUI calls method, which runs its argument (code or a file path) on
+// the GUI thread.
+func (c *Connection) executeOnGUI(ctx context.Context, method, arg string, timeout *float64) (map[string]any, error) {
 	run, wait, err := c.ExecuteCodeBudget(timeout)
 	if err != nil {
 		return nil, err
 	}
 	if timeout == nil {
-		return c.callMap(ctx, wait, "execute_code", code)
+		return c.callMap(ctx, wait, method, arg)
 	}
-	return c.callMap(ctx, wait, "execute_code", code, run)
+	return c.callMap(ctx, wait, method, arg, run)
 }
 
 // ExecuteCodeAsync starts code in the addon's background worker.
 func (c *Connection) ExecuteCodeAsync(ctx context.Context, code string) (map[string]any, error) {
 	return c.callMap(ctx, c.timeout, "execute_code_async", code)
+}
+
+// ExecuteFileAsync starts the Python file at path in the addon's background
+// worker.
+func (c *Connection) ExecuteFileAsync(ctx context.Context, path string) (map[string]any, error) {
+	return c.callMap(ctx, c.timeout, "execute_file_async", path)
 }
 
 // GetAsyncStatus reports one background job, or all of them for "".

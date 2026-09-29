@@ -40,6 +40,27 @@ Job status needs the addon that ships with this server; `freecad-mcp
 install-addon` installs it. An addon without job IDs reports only that the job
 started; its outcome then shows in FreeCAD's Report View.
 
+`execute_code` and `execute_code_async` also take `path`, the absolute path of
+a `.py` file on the computer running FreeCAD, instead of `code`; the file runs
+with the same namespace and rules, is compiled under its own path so tracebacks
+cite its lines, and sees `__file__` for the run. `execute_code_headless` takes
+`path` too, for a file on the computer running the MCP server, and runs it
+where it is.
+
+### Long calls move to the background
+
+A tool call that waits on FreeCAD work (`execute_code`, opening, saving,
+recomputing, importing, exporting, the mesh tools, `check_printability`,
+`run_fem_analysis`) can keep the agent waiting up to its budget, an hour or
+more for a GUI call and days for FEM. After the background limit, 30 minutes by
+default, the call becomes a job: the agent gets a `job_id` starting with `call-`
+and polls `get_async_status`, which returns the call's own reply, screenshot
+included, once it ends. FreeCAD keeps working on the call meanwhile, so it
+cannot be cancelled (`cancel_job` refuses it), and closing FreeCAD ends it and
+loses unsaved changes. The limit is the `background_after_minutes` setting, 1 to
+1440; change it with `freecad-mcp settings --background-after <minutes>`.
+`execute_code_headless` keeps its own background rule.
+
 ### Document and view access
 
 Async code must keep document and view access on the GUI thread. Build
