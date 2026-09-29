@@ -25,6 +25,11 @@ import (
 // temporary one too, so a failed tool call under test never writes to the
 // user's own error log.
 func TestMain(m *testing.M) {
+	if os.Getenv(fakeGUIEnv) != "" {
+		// This test binary standing in for FreeCAD's GUI command: it exits at
+		// once with success, the way a launch forwarded to an open FreeCAD does.
+		os.Exit(0)
+	}
 	listenerRunning = func() bool { return false }
 	home, err := os.MkdirTemp("", "freecad-mcp-test-home")
 	if err != nil {

@@ -48,7 +48,7 @@ DOCUMENT_XML = """<?xml version='1.0' encoding='utf-8'?>
 
 
 @pytest.fixture
-def headless_files(monkeypatch: pytest.MonkeyPatch):
+def headless_files(monkeypatch: pytest.MonkeyPatch, camera_calls: list):
     gui_doc = types.SimpleNamespace(Modified=False)
     printed: list[tuple[str, str]] = []
     freecad = types.ModuleType("FreeCAD")
@@ -161,6 +161,49 @@ def test_a_genuine_failure_is_a_developer_warning_not_a_popup(headless_files, tm
     printed = sys.modules["FreeCADGui"].printed
     assert [kind for kind, _ in printed] == ["PrintDeveloperWarning"]
     assert "view provider broke" in printed[0][1]
+
+
+@pytest.fixture
+def camera_calls(monkeypatch: pytest.MonkeyPatch) -> list:
+    """The camera side of the module, recording what is asked of it."""
+    calls: list = []
+    view = types.SimpleNamespace(
+        isAnimationEnabled=lambda: True, setAnimationEnabled=lambda on: calls.append(("animation", on))
+    )
+    view_mode = types.SimpleNamespace(
+        import_coin=lambda: None,
+        drawn_objects=lambda _doc: ["drawn"],
+        fit_pose=lambda _view, objects: calls.append(("fit", objects)) or "pose",
+        apply_pose=lambda _view, pose: calls.append(("apply", pose)),
+    )
+    view_manager = types.SimpleNamespace(
+        _document_capture_view=lambda _gui_doc: view,
+        apply_view_orientation=lambda _view, name: calls.append(("orient", name)),
+    )
+    package = types.ModuleType("rpc_server")
+    package.view_mode, package.view_manager = view_mode, view_manager
+    for name, module in (("rpc_server", package), ("rpc_server.view_mode", view_mode), ("rpc_server.view_manager", view_manager)):
+        monkeypatch.setitem(sys.modules, name, module)
+    return calls
+
+
+def test_a_file_without_gui_data_is_framed_from_the_isometric_direction(
+    headless_files, camera_calls: list, tmp_path: Path
+) -> None:
+    module, gui_doc = headless_files
+    doc = types.SimpleNamespace(Name="h", Objects=objects(gui_doc))
+    module.show_stored_visibility(doc, write_fcstd(tmp_path / "h.FCStd", gui_data=False))
+    assert camera_calls == [
+        ("animation", False), ("orient", "Isometric"), ("fit", ["drawn"]), ("apply", "pose"), ("animation", True),
+    ]
+    assert gui_doc.Modified is False
+
+
+def test_a_file_with_gui_data_keeps_its_saved_camera(headless_files, camera_calls: list, tmp_path: Path) -> None:
+    module, gui_doc = headless_files
+    doc = types.SimpleNamespace(Name="h", Objects=objects(gui_doc))
+    module.show_stored_visibility(doc, write_fcstd(tmp_path / "gui.FCStd", gui_data=True))
+    assert camera_calls == []
 
 
 def test_a_file_with_gui_data_keeps_what_freecad_restored(headless_files, tmp_path: Path) -> None:

@@ -69,15 +69,6 @@ def _orientation_of(view: Any, name: str) -> tuple:
     return quat
 
 
-def _effective_visible(obj: Any, show: list[str], hide: list[str], isolate: list[str]) -> bool:
-    """Whether ``obj`` will be visible after the visibility changes."""
-    if obj.Name in show or obj.Name in isolate:
-        return True
-    if obj.Name in hide or isolate:
-        return False
-    return bool(obj.ViewObject.Visibility)
-
-
 def _tour_stops(doc: Any, stops: Any) -> tuple[list[dict] | None, dict | None]:
     """The stops of a tour, checked: ``{"focus": [names] or ["all"], "dwell",
     "view_name"?}``; the caller turns a view name into an orientation. Without
@@ -174,8 +165,9 @@ def _set_view_gui(doc_name: str | None, options: dict[str, Any]) -> dict[str, An
     by_name, error = view_mode.check_visual_changes(doc, show, hide, isolate, transparency, display_mode)
     if error is not None:
         return error
+    kept, below = view_mode.isolation_scope([by_name[name] for name in isolate])
     if focus_objects and not any(
-        _effective_visible(o, show, hide, isolate) and view_mode._union_box([o]) is not None
+        view_mode.effective_visible(o, show, hide, isolate, kept, below) and view_mode._union_box([o]) is not None
         for o in focus_objects
     ):
         return fail(

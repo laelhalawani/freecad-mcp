@@ -474,19 +474,26 @@ class _Tour(_Engine):
         return {"mode": "tour", "stops": len(self.stops), "loop": self.loop}
 
 
-def _hidden_by_group(obj: Any) -> bool:
-    """Whether a group (a Group, Part or Body) that holds ``obj``, at any
-    depth, is hidden: FreeCAD does not draw the objects of a hidden group."""
-    seen = 0
+def containers_of(obj: Any) -> list:
+    """The groups (a Group, Part or Body) that hold ``obj``, nearest first, up
+    the chain."""
+    out = []
     parent = obj
-    while seen < 64:
-        seen += 1
+    for _ in range(64):
         try:
             parent = parent.getParentGroup() or parent.getParentGeoFeatureGroup()
         except Exception:
-            return False
+            break
         if parent is None:
-            return False
+            break
+        out.append(parent)
+    return out
+
+
+def _hidden_by_group(obj: Any) -> bool:
+    """Whether a group (a Group, Part or Body) that holds ``obj``, at any
+    depth, is hidden: FreeCAD does not draw the objects of a hidden group."""
+    for parent in containers_of(obj):
         view_object = getattr(parent, "ViewObject", None)
         try:
             if view_object is not None and not view_object.Visibility:
@@ -494,6 +501,53 @@ def _hidden_by_group(obj: Any) -> bool:
         except Exception:
             pass
     return False
+
+
+def descendants_of(obj: Any, _seen: set | None = None) -> list:
+    """The objects held by ``obj`` (a Group, Part or Body draws through its
+    ``Group``) at any depth, without an Origin's axes and planes."""
+    seen = _seen if _seen is not None else {obj.Name}
+    out = []
+    for member in getattr(obj, "Group", None) or []:
+        if member.Name in seen or getattr(member, "ViewObject", None) is None or member.TypeId in _ORIGIN_TYPES:
+            continue
+        seen.add(member.Name)
+        out.append(member)
+        out.extend(descendants_of(member, seen))
+    return out
+
+
+def isolation_scope(objects: list) -> tuple[dict[str, Any], set[str]]:
+    """What an isolate of ``objects`` leaves alone: the groups that hold them,
+    which must stay visible for them to be drawn (by name), and the names of
+    everything they hold themselves, which they draw."""
+    kept = {c.Name: c for obj in objects for c in containers_of(obj)}
+    below = {d.Name for obj in objects for d in descendants_of(obj)}
+    return kept, below
+
+
+def _is_visible(obj: Any) -> bool:
+    try:
+        return bool(obj.ViewObject.Visibility)
+    except Exception:
+        return False
+
+
+def effective_visible(obj: Any, show: list[str], hide: list[str], isolate: list[str], kept: dict, below: set) -> bool:
+    """Whether ``obj`` will be drawn after the visibility changes: visible
+    itself, and held by no group that will be hidden. ``kept`` and ``below`` are
+    ``isolation_scope`` of the isolated objects."""
+
+    def visible(item: Any) -> bool:
+        if item.Name in show or item.Name in isolate:
+            return True
+        if item.Name in hide:
+            return False
+        if isolate and item.Name not in below:
+            return item.Name in kept
+        return _is_visible(item)
+
+    return visible(obj) and all(visible(c) for c in containers_of(obj) if getattr(c, "ViewObject", None))
 
 
 # The axes, planes and point of an Origin report Visibility true whether or not
@@ -694,14 +748,19 @@ def apply_visual_changes(
     "display_mode"}``."""
     shown: list[str] = []
     hidden: list[str] = []
-    shown_names = set(show) | set(isolate)
+    # An isolated object draws through the groups that hold it (a Pad through
+    # its Body): they stay visible, and what else they hold is hidden instead.
+    # What an isolated group holds is what it draws: never hidden.
+    kept, below = isolation_scope([by_name[name] for name in isolate])
+    shown_names = set(show) | set(isolate) | set(kept)
     hide_names = set(hide)
     if isolate:
-        for obj in visible_shape_objects(doc):
-            if obj.Name not in shown_names:
-                hide_names.add(obj.Name)
+        drawn = {obj.Name for obj in visible_shape_objects(doc)}
+        for container in kept.values():
+            drawn.update(member.Name for member in descendants_of(container) if _is_visible(member))
+        hide_names |= drawn - shown_names - below
     for name in sorted(shown_names):
-        obj = by_name[name]
+        obj = by_name.get(name) or kept[name]
         _remember(doc.Name, obj, "visibility", bool(obj.ViewObject.Visibility))
         obj.ViewObject.Visibility = True
         shown.append(name)

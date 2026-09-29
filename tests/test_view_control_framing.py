@@ -27,6 +27,8 @@ class RecordingViewMode(types.SimpleNamespace):
             apply_visual_changes=lambda *_args: {"shown": [], "hidden": [], "transparency": {}, "display_mode": {}},
             _union_box=lambda _objects: object(),
             drawn_objects=lambda doc: list(doc.Objects),
+            isolation_scope=lambda _objects: ({}, set()),
+            effective_visible=lambda *_args: True,
             apply_pose=lambda _view, _pose: None,
             start_orbit=lambda *_args: None,
             start_tour=lambda *_args: None,

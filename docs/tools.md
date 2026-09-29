@@ -892,7 +892,10 @@ gets no unsaved-changes mark.
 - `focus` (array of strings, optional): objects to frame; default everything
   visible.
 - `show`, `hide`, `isolate` (arrays of strings, optional): visibility;
-  `isolate` shows the listed objects and hides every other visible one.
+  `isolate` shows the listed objects and hides every other visible one, except
+  the groups (a Body, a Part) that hold them, which stay visible so the objects
+  are drawn; what else those groups hold is hidden, and `shown` lists the
+  groups too. An isolated group (a Body, an App::Part) keeps what it holds.
 - `transparency` (object of object name to 0 to 100), `display_mode` (object
   of object name to a mode such as `Flat Lines`).
 - `mode` (string, default `"static"`, one of `static`, `orbit`, `tour`).
@@ -1013,8 +1016,12 @@ which case it returns the "in use" error instead (see
 FreeCAD detached, with a startup macro that starts the RPC server on the
 configured port, so the addon's auto-start setting does not matter. When
 another FreeCAD window is already open without the RPC server, that FreeCAD
-receives the request instead (state `forwarded`). For a FreeCAD that already
-runs, use `open_document` instead of `file`.
+receives the request instead (state `forwarded`); when nothing answers on the
+port within 10 seconds, the call fails saying the server did not answer, with
+what to do: if that FreeCAD is busy, wait and call `get_rpc_status` before
+closing it; otherwise start the RPC server from the FreeCAD MCP toolbar there,
+turn on Auto-Start Server, or save, close that FreeCAD and call `start_freecad`
+again. For a FreeCAD that already runs, use `open_document` instead of `file`.
 
 On Windows, a server that runs outside the user's desktop (started over SSH or
 as a service, in Windows session 0) never starts FreeCAD itself, since it

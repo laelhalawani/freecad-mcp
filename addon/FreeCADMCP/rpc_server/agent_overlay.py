@@ -48,7 +48,11 @@ POLL_MS = 250
 PREDRAW_S = 0.08
 
 WARNING_LINE = "An agent is changing this model; please don't edit until it finishes."
-BLOCKING_LINE = "FreeCAD may not respond until this finishes."
+BLOCKING_LINE = "FreeCAD may not respond."
+# The banner is a compact two-line bar, translucent enough (alpha of 255) to
+# show the model behind it.
+PAD_Y = 3
+BACKGROUND_ALPHA = 205
 
 PHRASES = {
     "execute_code": "Running a script",
@@ -237,11 +241,12 @@ def _lines(active: "list[dict[str, Any]]") -> "list[str]":
     head = f"{first['label']}: {first['phrase']} ({int(max(0.0, now - first['started']))} s)"
     if len(active) > 1:
         head += f" and {len(active) - 1} more"
-    lines = [head]
+    # The note that matters most to the person comes first: a narrow view
+    # elides the end of the line.
+    note = WARNING_LINE
     if any(a["blocking"] for a in active):
-        lines.append(BLOCKING_LINE)
-    lines.append(WARNING_LINE)
-    return lines
+        note = BLOCKING_LINE + " " + note
+    return [head, note]
 
 
 def _sampled_chrome_color() -> "QtGui.QColor | None":
@@ -271,7 +276,7 @@ class _Banner(QtWidgets.QWidget):
     def __init__(self, parent: QtWidgets.QWidget):
         super().__init__(parent)
         self._lines: "list[str]" = []
-        self._background = QtGui.QColor(45, 45, 48, 232)
+        self._background = QtGui.QColor(45, 45, 48, BACKGROUND_ALPHA)
         self._foreground = QtGui.QColor(240, 240, 240)
         self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(QtCore.Qt.WA_ShowWithoutActivating, True)
@@ -289,7 +294,7 @@ class _Banner(QtWidgets.QWidget):
         if parent is None:
             return
         metrics = QtGui.QFontMetrics(self.font())
-        height = 2 * 6 + len(self._lines) * (metrics.height() + 2)
+        height = 2 * PAD_Y + len(self._lines) * metrics.height()
         self.setGeometry(0, 0, parent.width(), height)
 
     def refresh_colors(self) -> None:
@@ -303,7 +308,7 @@ class _Banner(QtWidgets.QWidget):
         if color is None:
             color = QtGui.QColor(self.palette().color(QtGui.QPalette.Window))
         luminance = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
-        self._background = QtGui.QColor(color.red(), color.green(), color.blue(), 232)
+        self._background = QtGui.QColor(color.red(), color.green(), color.blue(), BACKGROUND_ALPHA)
         self._foreground = QtGui.QColor(20, 20, 20) if luminance >= 128 else QtGui.QColor(240, 240, 240)
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt name)
@@ -311,17 +316,22 @@ class _Banner(QtWidgets.QWidget):
         try:
             painter.fillRect(self.rect(), self._background)
             accent = QtGui.QColor(240, 160, 32)
-            painter.fillRect(QtCore.QRect(0, 0, 6, self.height()), accent)
+            painter.fillRect(QtCore.QRect(0, 0, 4, self.height()), accent)
             painter.fillRect(QtCore.QRect(0, self.height() - 1, self.width(), 1), accent)
             painter.setPen(self._foreground)
-            metrics = painter.fontMetrics()
-            y = 6
+            y = PAD_Y
             for index, text in enumerate(self._lines):
                 font = QtGui.QFont(self.font())
                 font.setBold(index == 0)
                 painter.setFont(font)
-                line = metrics.height() + 2
-                painter.drawText(QtCore.QRect(16, y, self.width() - 24, line), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, text)
+                metrics = painter.fontMetrics()
+                line = metrics.height()
+                room = self.width() - 20
+                painter.drawText(
+                    QtCore.QRect(12, y, room, line),
+                    QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft,
+                    metrics.elidedText(text, QtCore.Qt.ElideRight, room),
+                )
                 y += line
         finally:
             painter.end()

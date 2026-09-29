@@ -173,7 +173,52 @@ func (s *Server) startFreeCAD(ctx context.Context, _ *mcp.CallToolRequest, in st
 	}
 	s.fc.reset()
 
+	if state.State == freecad.LaunchForwarded && !s.answersWithin(ctx, forwardedAnswerWait) {
+		return s.withNotice(forwardedWithoutConnection(state.Port, forwardedAnswerWait)), nil, nil
+	}
 	return s.withNotice(launchResult(state, func() string { return s.launcher.LogTail(1500) }, file, "")), nil, nil
+}
+
+// forwardedAnswerWait is how long start_freecad waits, after FreeCAD forwarded
+// the launch to a window that was already open, for that window's RPC server
+// to answer. The forwarded startup macro starts the server within moments when
+// the window has the addon; a window without it never will. A variable so the
+// tests need not wait it out.
+var forwardedAnswerWait = 10 * time.Second
+
+// answersWithin reports whether FreeCAD's RPC server answers within wait.
+func (s *Server) answersWithin(ctx context.Context, wait time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for {
+		if _, err := s.fc.get(ctx); err == nil {
+			return true
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// forwardedWithoutConnection is start_freecad's reply when the launch went to a
+// FreeCAD window that was already open and nothing answers on port afterwards:
+// that window has no agent connection, and launching again would forward to it
+// again.
+func forwardedWithoutConnection(port int, waited time.Duration) *mcp.CallToolResult {
+	return render.ErrorResult(render.Error{
+		Code: render.CodeUnavailable,
+		Message: fmt.Sprintf("FreeCAD is already open: the launch went to that window, but its RPC server did not "+
+			"answer on port %d within %d s, so it may have no agent connection.", port, int(waited.Seconds())),
+		Hint: "If that FreeCAD is busy (a long recompute, a dialog), wait and call get_rpc_status before closing it. " +
+			"Otherwise, in that window choose Start RPC Server in the FreeCAD MCP toolbar or menu, or turn on " +
+			"Auto-Start Server there so it starts by itself; or save, then close that FreeCAD and call start_freecad " +
+			"with {} again. If that window has no FreeCAD MCP toolbar, the addon is not installed for it: run `" +
+			domain.BinaryName + " install-addon` and restart it. Then call get_rpc_status.",
+	})
 }
 
 // alreadyRunningResult is start_freecad's already_running reply. port is
