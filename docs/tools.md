@@ -86,6 +86,16 @@ has no view to activate until a later `activate_document` call with
 `create_view` true. Use `import_file` for STEP, STL, 3MF and other formats,
 and `reload_document` to pick up changes made to an already open file on disk.
 
+A file saved without a GUI, for example by `execute_code_headless`, stores no
+camera, and FreeCAD opens its objects hidden. The addon corrects that for any
+open of such a file, not only this tool's: it shows the objects the file stores
+as visible (an Origin keeps FreeCAD's own default), points the 3D view at them
+from the Isometric direction once the view is laid out, and leaves the document
+unmodified. That covers `open_document`, `reload_document`, the `file` of
+`start_freecad`, File > Open, a double click and the recent files list, and a
+document opened hidden when it later gets a 3D view. Files saved by FreeCAD's GUI
+keep their saved visibility and camera.
+
 ### `activate_document`
 
 Make an open document the active one and bring its tab to the front.

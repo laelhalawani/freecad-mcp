@@ -42,6 +42,17 @@ class FreeCADMCPAddonWorkbench(Workbench):
 
 Gui.addWorkbench(FreeCADMCPAddonWorkbench())
 
+# Every document that opens without GUI data (a file saved by freecadcmd) is
+# restored, however it was opened. Registered here, when the GUI part loads, so
+# the file FreeCAD opens from its command line is covered too.
+try:
+    from rpc_server import headless_files as _headless_files
+
+    _headless_files.install()
+except Exception as _headless_error:
+    # The log only: no popup for a person who never asked for this.
+    FreeCAD.Console.PrintLog(f"[MCP] Could not watch for headless-saved files: {_headless_error}\n")
+
 
 def _auto_start_mcp():
     port = None
