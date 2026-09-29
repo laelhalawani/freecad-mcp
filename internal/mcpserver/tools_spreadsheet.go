@@ -13,22 +13,22 @@ import (
 const maxSpreadsheetCellWrites = 500
 
 type getSpreadsheetCellsInput struct {
-	DocName   string   `json:"doc_name" jsonschema:"the name of an open document, as list_documents shows it"`
-	SheetName string   `json:"sheet_name" jsonschema:"the name of a Spreadsheet::Sheet object, as list_objects shows it"`
-	Cells     []string `json:"cells,omitempty" jsonschema:"cells to read: addresses such as B2, ranges such as A1:C10, or aliases (default: every non-empty cell)"`
+	DocName   string   `json:"doc_name"`
+	SheetName string   `json:"sheet_name"`
+	Cells     []string `json:"cells,omitempty"`
 }
 
 type cellUpdate struct {
-	Cell    string  `json:"cell" jsonschema:"the cell address, such as B2, or an existing alias"`
-	Content *string `json:"content,omitempty" jsonschema:"what to enter: a number with an optional unit (10 mm), text, or an expression starting with = (=Length*2); an empty string clears the cell"`
-	Alias   *string `json:"alias,omitempty" jsonschema:"alias to give the cell, usable in expressions as <sheet_name>.<alias>; an empty string removes it"`
+	Cell    string  `json:"cell"`
+	Content *string `json:"content,omitempty"`
+	Alias   *string `json:"alias,omitempty"`
 }
 
 type updateSpreadsheetCellsInput struct {
-	DocName   string       `json:"doc_name" jsonschema:"the name of an open document, as list_documents shows it"`
-	SheetName string       `json:"sheet_name" jsonschema:"the name of a Spreadsheet::Sheet object, as list_objects shows it"`
-	Cells     []cellUpdate `json:"cells" jsonschema:"the cells to change, 1 to 500; each needs content, alias or both"`
-	Recompute *bool        `json:"recompute,omitempty" jsonschema:"recompute the document afterwards so dependent objects update (default true)"`
+	DocName   string       `json:"doc_name"`
+	SheetName string       `json:"sheet_name"`
+	Cells     []cellUpdate `json:"cells"`
+	Recompute *bool        `json:"recompute,omitempty"`
 }
 
 type getSpreadsheetCellsFront struct {
@@ -51,24 +51,10 @@ type updateSpreadsheetCellsFront struct {
 }
 
 func (s *Server) registerSpreadsheetTools() {
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name: "get_spreadsheet_cells",
-		Description: "Read cells of a FreeCAD spreadsheet (Spreadsheet::Sheet): for each cell its content as " +
-			"entered, such as =Length*2, its computed value and its alias. Spreadsheets usually hold the parameters " +
-			"that drive a parametric model through expressions. Without cells every non-empty cell is returned, up " +
-			"to 2000; update_spreadsheet_cells changes them.",
-		InputSchema: inputSchema[getSpreadsheetCellsInput](nil),
-	}, s.getSpreadsheetCells)
-
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name: "update_spreadsheet_cells",
-		Description: "Set the content and aliases of cells of a FreeCAD spreadsheet, then recompute the document so " +
-			"objects whose expressions use them update. Content is a number with an optional unit, text, or an " +
-			"expression starting with =. Create a sheet first with create_object and obj_type Spreadsheet::Sheet. " +
-			"The reply shows each cell's new value and objects that became invalid; undo reverts the change.",
-		InputSchema: withItemRange(inputSchema[updateSpreadsheetCellsInput](map[string]string{"recompute": "true"}),
-			"cells", 1, maxSpreadsheetCellWrites),
-	}, s.updateSpreadsheetCells)
+	addTool(s.mcpServer, "get_spreadsheet_cells", inputSchema[getSpreadsheetCellsInput](nil), s.getSpreadsheetCells)
+	addTool(s.mcpServer, "update_spreadsheet_cells",
+		withItemRange(inputSchema[updateSpreadsheetCellsInput](map[string]string{"recompute": "true"}),
+			"cells", 1, maxSpreadsheetCellWrites), s.updateSpreadsheetCells)
 }
 
 func (s *Server) getSpreadsheetCells(ctx context.Context, _ *mcp.CallToolRequest, in getSpreadsheetCellsInput) (*mcp.CallToolResult, any, error) {
@@ -153,6 +139,10 @@ func (s *Server) updateSpreadsheetCells(ctx context.Context, _ *mcp.CallToolRequ
 	if len(rows) > 0 {
 		body.WriteString("\n")
 		writeCellTable(&body, rows)
+		// The content column is FreeCAD's stored text, which marks what kind
+		// of value a cell holds: a number with a unit is stored as "=5 mm".
+		body.WriteString("\nIn the content column FreeCAD marks an expression or a number with a unit with a leading =, " +
+			"and text with a leading '; a plain number has no mark.\n")
 	}
 	if len(invalidObjs) == 0 {
 		body.WriteString("\nNo objects became invalid.")

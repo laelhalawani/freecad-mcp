@@ -19,7 +19,7 @@ from rpc_server.errors import CONFLICT, INVALID_INPUT, fail, tool_call
 from rpc_server.gui_task import resolve_timeout, run_on_gui
 from rpc_server.lookup import require_document
 from rpc_server.object_validation import invalid_objects_report
-from rpc_server.paths import home_example, require_absolute_path
+from rpc_server.paths import ensure_parent_directory, home_example, require_absolute_path
 
 
 SAVE_TIMEOUT = 120.0
@@ -125,9 +125,10 @@ def save_document_as(
     """Save a document to a new .FCStd file, or write a copy of it.
 
     Reply: ``{"success", "document", "label", "file_name", "copy",
-    "recomputed", "invalid_objects", "invalid_count", "invalid_truncated"}``.
-    GUI thread, default timeout ``SAVE_TIMEOUT``. No transaction: saving is
-    not undoable.
+    "recomputed", "invalid_objects", "invalid_count", "invalid_truncated",
+    "created_directory"?}``; ``created_directory`` is the folder this call
+    created because the target's folder was missing. GUI thread, default
+    timeout ``SAVE_TIMEOUT``. No transaction: saving is not undoable.
     """
     run_budget = resolve_timeout(timeout, SAVE_TIMEOUT)
     if isinstance(run_budget, dict):
@@ -189,6 +190,10 @@ def save_document_as(
                 + " to replace it, or choose another path.",
             )
 
+        created_directory, dir_error = ensure_parent_directory(target)
+        if dir_error is not None:
+            return dir_error
+
         did_recompute = bool(recompute) and doc.mustExecute()
         if did_recompute:
             doc.recompute()
@@ -203,7 +208,7 @@ def save_document_as(
             FreeCADGui.getDocument(doc_name).Modified = False
             file_name = str(doc.FileName)
 
-        return {
+        reply = {
             "success": True,
             "document": doc_name,
             "label": str(doc.Label),
@@ -212,6 +217,9 @@ def save_document_as(
             "recomputed": did_recompute,
             **invalid_objects_report(doc.Objects, exclude_touched=not did_recompute),
         }
+        if created_directory:
+            reply["created_directory"] = created_directory
+        return reply
 
     return run_on_gui(task, run_budget, "save_document_as", tool="save_document_as")
 
@@ -232,14 +240,24 @@ def close_document(doc_name: str, discard_changes: bool = False) -> dict[str, An
         modified = bool(getattr(gdoc, "Modified", False))
 
         if modified and not discard_changes:
+            discard = tool_call("close_document", {"doc_name": doc_name, "discard_changes": True})
+            if not str(doc.FileName or ""):
+                # Never saved: save_document has no file to write.
+                keep = "Call " + tool_call(
+                    "save_document_as",
+                    {"doc_name": doc_name, "path": "<absolute path>.FCStd"},
+                )
+                return fail(
+                    CONFLICT,
+                    f"Document '{doc_name}' has unsaved changes and was never saved.",
+                    f"{keep} to keep it, or {discard} to discard it.",
+                )
             return fail(
                 CONFLICT,
                 f"Document '{doc_name}' has unsaved changes.",
                 "Call "
                 + tool_call("save_document", {"doc_name": doc_name})
-                + " to keep them, or "
-                + tool_call("close_document", {"doc_name": doc_name, "discard_changes": True})
-                + " to discard them.",
+                + f" to keep them, or {discard} to discard them.",
             )
 
         if not doc.isClosable():

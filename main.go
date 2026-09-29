@@ -374,7 +374,8 @@ func runWizard(ctx context.Context, detector *harness.Detector, scope harness.Sc
 		// Registration failed for some clients; the rest still get the addon.
 		fmt.Fprintln(os.Stderr, state.Failure)
 	}
-	return finishWizard(ctx, os.Stdout, state, cmd.DryRun, code)
+	code = finishWizard(ctx, os.Stdout, state, cmd.DryRun, code)
+	return max(code, installSkills(os.Stdout, scope, selectedIDs(state.Harness.Selected), cmd.DryRun, false))
 }
 
 func runUnattended(ctx context.Context, detector *harness.Detector, scope harness.Scope, credStore secret.Store, cmd cli.Command, desired harness.DesiredState) int {
@@ -410,13 +411,16 @@ func registerUnattended(ctx context.Context, detector *harness.Detector, scope h
 			if len(cmd.Clients) > 0 {
 				return 2
 			}
-			return 0
+			// Every client is registered already; the guide skill is still
+			// written for them.
+			return installSkills(os.Stdout, scope, skillClients(harnesses, entries, nil), cmd.DryRun, true)
 		}
 		printKept(os.Stdout, kept, entries, scope, name, cmd.DryRun)
-		if len(ids) == 0 && len(kept) > 0 {
-			return 0
+		code := 0
+		if len(ids) > 0 || len(kept) == 0 {
+			code = registerIDs(ctx, detector, scope, harnesses, ids, cmd.DryRun, desired)
 		}
-		return registerIDs(ctx, detector, scope, harnesses, ids, cmd.DryRun, desired)
+		return max(code, installSkills(os.Stdout, scope, skillClients(harnesses, entries, ids), cmd.DryRun, true))
 	}
 	// Removal targets every entry that runs freecad-mcp, edited ones too;
 	// another program's entry under the same name only when named.
@@ -445,7 +449,20 @@ func registerUnattended(ctx context.Context, detector *harness.Detector, scope h
 	if len(ids) == 0 && len(foreign) > 0 {
 		return 0
 	}
-	return registerIDs(ctx, detector, scope, harnesses, ids, cmd.DryRun, desired)
+	code := registerIDs(ctx, detector, scope, harnesses, ids, cmd.DryRun, desired)
+	// The guide skill goes with the clients it was written for, except from a
+	// folder another client that stays registered still reads.
+	removing := map[harness.ID]bool{}
+	for _, id := range ids {
+		removing[id] = true
+	}
+	var remaining []harness.ID
+	for id, e := range entries {
+		if e.ours() && !removing[id] {
+			remaining = append(remaining, id)
+		}
+	}
+	return max(code, removeSkills(os.Stdout, scope, ids, remaining, cmd.DryRun))
 }
 
 // registerIDs adds or removes the server in the given harnesses, replacing a

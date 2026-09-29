@@ -20,7 +20,7 @@ import (
 )
 
 type startFreeCADInput struct {
-	File *string `json:"file,omitempty" jsonschema:"absolute path of an .FCStd file to open once FreeCAD has started (optional)"`
+	File *string `json:"file,omitempty"`
 }
 
 // expectedWaitSeconds is how long a fresh FreeCAD GUI start takes before its
@@ -49,18 +49,8 @@ type startFreeCADFront struct {
 	ExpectedWaitSeconds int    `yaml:"expected_wait_seconds,omitempty"`
 }
 
-const startFreeCADDescription = `Start FreeCAD's GUI with the MCP addon's RPC server when it is not running yet: on this machine, or on the computer this server is configured for when that computer shares FreeCAD through freecad-mcp ("Share this PC").
-
-The tool first checks whether FreeCAD already answers; then it reports state already_running and launches nothing, or reports instead when another agent holds FreeCAD (the session lock applies here too). Otherwise it starts FreeCAD detached with a startup macro that starts the RPC server on the configured port, so the addon's auto-start setting does not matter. When another FreeCAD window is already open without the RPC server, that FreeCAD receives the request instead (state forwarded). Pass file to open an .FCStd document once FreeCAD is up: an absolute path on the computer running FreeCAD. For a FreeCAD that already runs, use open_document.
-
-FreeCAD takes about 15 seconds to start, longer on its first start. The reply returns at once: call get_rpc_status every few seconds until it reports rpc: reachable, then continue with list_documents. Set FREECAD_MCP_FREECAD on the computer running FreeCAD when FreeCAD is installed somewhere it is not found.`
-
 func (s *Server) registerLaunchTools() {
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name:        "start_freecad",
-		Description: startFreeCADDescription,
-		InputSchema: inputSchema[startFreeCADInput](nil),
-	}, s.startFreeCAD)
+	addTool(s.mcpServer, "start_freecad", inputSchema[startFreeCADInput](nil), s.startFreeCAD)
 }
 
 func (s *Server) startFreeCAD(ctx context.Context, _ *mcp.CallToolRequest, in startFreeCADInput) (*mcp.CallToolResult, any, error) {

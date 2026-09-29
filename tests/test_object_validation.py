@@ -38,9 +38,18 @@ class FakeDocument:
         self.Name = "Doc"
         self.obj = obj
         self.recompute_count = 0
+        # Like a real document's Objects, kept in step with addObject and
+        # removeObject: create_object_gui reads it to find what a failed
+        # creation left behind.
+        self.Objects: list[object] = []
 
     def addObject(self, _obj_type: str, _name: str) -> object:
+        if self.obj not in self.Objects:
+            self.Objects.append(self.obj)
         return self.obj
+
+    def removeObject(self, name: str) -> None:
+        self.Objects = [o for o in self.Objects if getattr(o, "Name", None) != name]
 
     def getObject(self, name: str) -> object | None:
         return self.obj if name == getattr(self.obj, "Name", None) else None

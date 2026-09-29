@@ -74,6 +74,66 @@ func TestInstallWritesTheAddon(t *testing.T) {
 	}
 }
 
+// A refresh compares content, not the version string: the installed copy records
+// what it was written from, and a stale, missing or edited file or a missing
+// record makes it differ.
+func TestSameContentFollowsTheInstalledFiles(t *testing.T) {
+	target := Target{UserDataDir: t.TempDir()}
+	if SameContent(target) {
+		t.Fatal("nothing installed counts as the same")
+	}
+	if _, err := Install(target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(target.AddonDir(), contentHashFile)); err != nil {
+		t.Fatalf("Install wrote no content record: %v", err)
+	}
+	if !SameContent(target) {
+		t.Fatal("a fresh install differs from the embedded files")
+	}
+	// Bytecode FreeCAD leaves behind is not part of the content.
+	pycache := filepath.Join(target.AddonDir(), "rpc_server", "__pycache__")
+	if err := os.MkdirAll(pycache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(pycache, "x.pyc"), []byte("x"), 0o644)
+	if !SameContent(target) {
+		t.Fatal("bytecode counted as a difference")
+	}
+
+	// A stray an operating system adds is not part of the content either.
+	os.WriteFile(filepath.Join(target.AddonDir(), "desktop.ini"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(target.AddonDir(), "Thumbs.db"), []byte("x"), 0o644)
+	if !SameContent(target) {
+		t.Fatal("desktop.ini or Thumbs.db counted as a difference")
+	}
+
+	version := filepath.Join(target.AddonDir(), "rpc_server", "version.py")
+	original, err := os.ReadFile(version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string]func() error{
+		"an edited file":   func() error { return os.WriteFile(version, append(original, '#'), 0o644) },
+		"a stale file":     func() error { return os.WriteFile(filepath.Join(target.AddonDir(), "stale.py"), []byte("x"), 0o644) },
+		"a missing file":   func() error { return os.Remove(filepath.Join(target.AddonDir(), "Init.py")) },
+		"a missing record": func() error { return os.Remove(filepath.Join(target.AddonDir(), contentHashFile)) },
+	} {
+		if _, err := Install(target); err != nil {
+			t.Fatal(err)
+		}
+		if err := change(); err != nil {
+			t.Fatal(err)
+		}
+		if SameContent(target) {
+			t.Errorf("%s still counts as the same", name)
+		}
+	}
+	if _, err := Install(target); err != nil || !SameContent(target) {
+		t.Fatalf("a reinstall does not converge: %v", err)
+	}
+}
+
 func TestInstallReplacesAnOlderCopy(t *testing.T) {
 	target := Target{UserDataDir: t.TempDir()}
 	stale := filepath.Join(target.AddonDir(), "stale.py")

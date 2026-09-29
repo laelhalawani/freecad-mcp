@@ -7,6 +7,7 @@ import FreeCAD
 import ObjectsFem
 
 from rpc_server.errors import INVALID_INPUT, NOT_FOUND, fail, tool_call
+from rpc_server.fem_loads import analysis_loads
 from rpc_server.transactions import active_document, transaction
 
 
@@ -38,6 +39,78 @@ def _find_calculix_solver(analysis):
             if _fem_type(member) == solver_type:
                 return member
     return None
+
+
+#: The name of the von Mises field of a result pipeline
+#: (Mod/Fem/App/FemVTKTools.cpp, "vonMises" to "von Mises Stress").
+_VON_MISES_FIELD = "von Mises Stress"
+
+
+def _hide_meshed_geometry(analysis) -> list[str]:
+    """Hide the FEM mesh and the solid it meshes, which sit under the coloured
+    result and would hide it. Returns the names hidden."""
+    hidden = []
+    for member in analysis.Group:
+        if _fem_type(member) not in ("Fem::FemMeshGmsh", "Fem::FemMeshNetgen"):
+            continue
+        targets = [member]
+        for attr in ("Shape", "Part"):
+            target = getattr(member, attr, None)
+            if target is not None and not isinstance(target, (list, tuple)):
+                targets.append(target)
+        for target in targets:
+            view = getattr(target, "ViewObject", None)
+            if view is not None and view.Visibility:
+                view.Visibility = False
+                hidden.append(target.Name)
+    return hidden
+
+
+def _colour_by_von_mises(analysis, result_obj, von_mises) -> dict:
+    """Colour the result the way FreeCAD's own result view does, so a
+    screenshot taken next shows the stress.
+
+    In FreeCAD 1.x solving loads the result into a post pipeline
+    (feminout/importCcxFrdResults.py ``setupPipeline``) whose view object
+    colours by its ``Field``; choosing "von Mises Stress" also puts the colour
+    bar in the 3D view (Gui/ViewProviderFemPostObject.cpp). Without a
+    pipeline the result mesh is coloured node by node instead, as the "Show
+    result" panel does (femtaskpanels/task_result_mechanical.py). Returns {}
+    when there is no GUI or no way to colour, which never fails the analysis.
+    """
+    if not von_mises:
+        return {}
+    try:
+        import FreeCADGui  # noqa: F401
+    except Exception:
+        return {}
+    try:
+        pipelines = [m for m in analysis.Group if getattr(m, "TypeId", "") == "Fem::FemPostPipeline"]
+        coloured = False
+        if pipelines:
+            view = getattr(pipelines[-1], "ViewObject", None)
+            if view is not None and _VON_MISES_FIELD in view.getEnumerationsOfProperty("Field"):
+                view.Field = _VON_MISES_FIELD
+                view.Visibility = True
+                coloured = True
+        if not coloured:
+            mesh_obj = getattr(result_obj, "Mesh", None)
+            view = getattr(mesh_obj, "ViewObject", None)
+            node_numbers = list(getattr(result_obj, "NodeNumbers", None) or [])
+            if view is None or mesh_obj.FemMesh.NodeCount != len(node_numbers):
+                return {}
+            view.show()
+            view.setNodeColorByScalars(node_numbers, list(von_mises))
+        hidden = _hide_meshed_geometry(analysis)
+    except Exception as e:
+        FreeCAD.Console.PrintWarning(f"MCP RPC: could not colour the FEM result: {type(e).__name__}: {e}\n")
+        return {}
+    return {
+        "coloured": True,
+        "colour_field": _VON_MISES_FIELD,
+        "colour_range_MPa": [min(von_mises), max(von_mises)],
+        "hidden_objects": hidden,
+    }
 
 
 def run_fem_analysis(doc_name: str, analysis_name: str) -> dict:
@@ -137,16 +210,21 @@ def run_fem_analysis(doc_name: str, analysis_name: str) -> dict:
             disp = list(getattr(result_obj, "DisplacementLengths", None) or [])
             doc.recompute()
 
-            return {
+            reply = {
                 "success": True,
                 "result_object": result_obj.Name,
                 "node_count": len(vm),
                 "max_von_mises_MPa": max(vm) if vm else None,
                 "min_von_mises_MPa": min(vm) if vm else None,
                 "max_displacement_mm": max(disp) if disp else None,
+                "loads": analysis_loads(analysis),
                 "working_dir": work_dir,
                 **tx.reply_fields(),
             }
+            colouring = _colour_by_von_mises(analysis, result_obj, vm)
+            if colouring:
+                reply.update(colouring)
+            return reply
     except Exception as e:
         return {
             "success": False,

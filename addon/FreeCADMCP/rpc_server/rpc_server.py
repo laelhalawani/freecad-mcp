@@ -409,24 +409,14 @@ class FreeCADRPC:
             return res
         return _err(res)
 
-    # A ceiling on run_fem_analysis's own timeout, the same idea as
-    # MAX_EXECUTE_CODE_TIMEOUT: an unbounded value would let a caller hold
-    # the session lock (through this call's own in-flight count) far past
-    # what the busy wording promises other agents ("it frees 30 min after
-    # that agent's last call"), for a solve nobody can cancel once started.
-    MAX_FEM_ANALYSIS_TIMEOUT = 3600
-
     def run_fem_analysis(self, doc_name: str, analysis_name: str, timeout: int = 600) -> dict[str, Any]:
         """Run the CalculiX solver on an existing Fem::FemAnalysis and return summary results."""
         try:
             timeout_s = int(timeout)
         except (TypeError, ValueError):
             return {"success": False, "error": f"invalid timeout: {timeout!r}"}
-        if timeout_s > self.MAX_FEM_ANALYSIS_TIMEOUT:
-            return {
-                "success": False,
-                "error": f"timeout must be at most {self.MAX_FEM_ANALYSIS_TIMEOUT} seconds",
-            }
+        if timeout_s <= 0:
+            return {"success": False, "error": f"invalid timeout: {timeout!r}"}
         res = dispatch_to_gui(
             lambda: self._run_fem_analysis_gui(doc_name, analysis_name),
             timeout=timeout_s,
@@ -793,7 +783,12 @@ class FreeCADRPC:
 
         return update_spreadsheet_cells(doc_name, sheet_name, cells, recompute)
 
-    # Inspection (measure.py, selection.py)
+    # Inspection (measure.py, selection.py, subelements.py)
+
+    def list_subelements(self, doc_name, obj_name, kind="faces") -> dict[str, Any]:
+        from rpc_server.subelements import list_subelements
+
+        return list_subelements(doc_name, obj_name, kind)
 
     def measure(self, doc_name, kind, refs) -> dict[str, Any]:
         from rpc_server.measure import measure

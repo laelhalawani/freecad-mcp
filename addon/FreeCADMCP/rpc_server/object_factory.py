@@ -14,7 +14,8 @@ object after recompute and report the actual object name.
 import FreeCAD
 import ObjectsFem
 
-from rpc_server.property_mapper import Object, set_object_property
+from rpc_server.fem_loads import load_info
+from rpc_server.property_mapper import Object, quantity_values, set_object_property
 from rpc_server.object_validation import object_validity_error
 from rpc_server.transactions import active_document, transaction
 
@@ -48,10 +49,16 @@ def _create_fem_mesh(doc: FreeCAD.Document, obj: Object):
     setattr(res, geom_attr, target_obj)
     del obj.properties[geom_key]
 
+    # The remaining properties follow the same value rules as every other type
+    # (expressions, links, units); a legacy name is renamed only when the mesh
+    # has the new one, and a name the mesh lacks fails like anywhere else.
+    properties = {}
     for param, value in obj.properties.items():
-        target_param = legacy_to_new.get(param, param)
-        if target_param and hasattr(res, target_param):
-            setattr(res, target_param, value)
+        target = legacy_to_new.get(param) or param
+        if target != param and target not in res.PropertiesList:
+            target = param
+        properties[target] = value
+    set_object_property(doc, res, properties)
     doc.recompute()
 
     GmshTools(res).create_mesh()
@@ -233,6 +240,36 @@ def _create_generic_object(doc: FreeCAD.Document, obj: Object):
     return res
 
 
+def _creation_failure(doc: FreeCAD.Document, tx, existing: set, error: Exception) -> str:
+    """Undo a creation that raised and return the error text for the caller.
+
+    When this call opened the transaction it is aborted, which removes
+    everything created since. When it joined an open transaction (aborting
+    would discard the user's own pending edit) the objects created since the
+    call started are removed by hand instead.
+    """
+    leftover = []
+    if tx.opened:
+        try:
+            tx.abort()
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(
+                f"MCP RPC: could not abort transaction '{tx.name}': {type(e).__name__}: {e}\n"
+            )
+    for created in [o for o in doc.Objects if o.Name not in existing]:
+        try:
+            doc.removeObject(created.Name)
+        except Exception:
+            leftover.append(created.Name)
+    message = str(error).strip().rstrip(".") or type(error).__name__
+    if leftover:
+        return (
+            f"{message}. Creation failed, but {', '.join(leftover)} could not be "
+            "removed; delete it with delete_object."
+        )
+    return f"{message}. Nothing was created."
+
+
 def create_object_gui(doc_name: str, obj: Object):
     """Create an object in ``doc_name`` according to ``obj.type``.
 
@@ -252,22 +289,29 @@ def create_object_gui(doc_name: str, obj: Object):
         # of opening an empty linked one in whatever document the GUI has
         # focused (transactions.active_document docstring).
         with active_document(doc), transaction("create_object") as tx:
-            if obj.type == "Fem::FemMeshGmsh":
-                if not obj.analysis:
-                    return (
-                        "Fem::FemMeshGmsh requires an 'analysis_name' naming the "
-                        "Fem::AnalysisPython container to add the mesh to."
-                    )
-                created = _create_fem_mesh(doc, obj)
-            elif obj.type.startswith("Fem::"):
-                created = _create_fem_object(doc, obj)
-            elif obj.type in _PYTHON_FACTORIES:
-                created = _create_python_object(doc, obj)
-            else:
-                created = _create_generic_object(doc, obj)
+            if obj.type == "Fem::FemMeshGmsh" and not obj.analysis:
+                return (
+                    "Fem::FemMeshGmsh requires an 'analysis_name' naming the "
+                    "Fem::AnalysisPython container to add the mesh to."
+                )
+            existing = {o.Name for o in doc.Objects}
+            requested = list(obj.properties)
+            try:
+                if obj.type == "Fem::FemMeshGmsh":
+                    created = _create_fem_mesh(doc, obj)
+                elif obj.type.startswith("Fem::"):
+                    created = _create_fem_object(doc, obj)
+                elif obj.type in _PYTHON_FACTORIES:
+                    created = _create_python_object(doc, obj)
+                else:
+                    created = _create_generic_object(doc, obj)
+            except Exception as e:
+                return _creation_failure(doc, tx, existing, e)
 
             doc.recompute()
             problem = object_validity_error(created)
+            quantities = quantity_values(created, requested)
+            load = load_info(created)
         # The transaction commits above regardless of problem, so an object
         # that failed to compute stays in the document; undo removes it, or
         # the caller can fix it with update_object or remove it with
@@ -279,7 +323,12 @@ def create_object_gui(doc_name: str, obj: Object):
                 "object_name": created.Name,
                 "error": problem,
             }
-        return {"success": True, "object_name": created.Name, **tx.reply_fields()}
+        reply = {"success": True, "object_name": created.Name, **tx.reply_fields()}
+        if quantities:
+            reply["quantities"] = quantities
+        if load is not None:
+            reply["load"] = load
+        return reply
     except Exception as e:
         return str(e)
 
@@ -306,6 +355,8 @@ def edit_object_gui(doc_name: str, obj: Object):
             set_object_property(doc, obj_ins, obj.properties)
             doc.recompute()
             problem = object_validity_error(obj_ins)
+            quantities = quantity_values(obj_ins, obj.properties)
+            load = load_info(obj_ins)
         # Commits above regardless of problem, so a property change that left
         # the object invalid stays applied; undo reverts it.
         if problem:
@@ -316,6 +367,11 @@ def edit_object_gui(doc_name: str, obj: Object):
                 "error": problem,
             }
         FreeCAD.Console.PrintMessage(f"Object '{obj_ins.Name}' updated via RPC.\n")
-        return {"success": True, "object_name": obj_ins.Name, **tx.reply_fields()}
+        reply = {"success": True, "object_name": obj_ins.Name, **tx.reply_fields()}
+        if quantities:
+            reply["quantities"] = quantities
+        if load is not None:
+            reply["load"] = load
+        return reply
     except Exception as e:
         return str(e)

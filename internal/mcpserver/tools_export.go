@@ -11,27 +11,21 @@ import (
 )
 
 type exportDocumentInput struct {
-	DocName              string   `json:"doc_name" jsonschema:"the name of an open document, as list_documents shows it"`
-	Path                 string   `json:"path" jsonschema:"absolute path of the file to write on the machine running FreeCAD; its extension picks the format"`
-	ObjectNames          []string `json:"object_names,omitempty" jsonschema:"names of the objects to export, as list_objects shows them (default: the visible top-level objects with geometry)"`
-	Overwrite            *bool    `json:"overwrite,omitempty" jsonschema:"replace an existing file at path (default false)"`
-	IncludeHidden        *bool    `json:"include_hidden,omitempty" jsonschema:"include hidden top-level objects in the default set (default false)"`
-	Recompute            *bool    `json:"recompute,omitempty" jsonschema:"recompute the document before exporting when it needs it (default true)"`
-	Quality              *string  `json:"quality,omitempty" jsonschema:"mesh formats and glTF: tessellation preset; coarse for previews, standard for FDM prints, fine for resin and small curved parts (default standard)"`
-	LinearDeflection     *float64 `json:"linear_deflection,omitempty" jsonschema:"mesh formats and glTF: largest distance in mm between the surface and its triangles, 0.001 to 100; overrides the preset"`
-	AngularDeflectionDeg *float64 `json:"angular_deflection_deg,omitempty" jsonschema:"mesh formats: largest angle in degrees between neighbouring triangles, 0.5 to 90; overrides the preset"`
-	Relative             *bool    `json:"relative,omitempty" jsonschema:"mesh formats: linear_deflection is relative to each edge's length (default false)"`
-	ASCII                *bool    `json:"ascii,omitempty" jsonschema:"STL only: write ASCII STL instead of binary (default false)"`
-	StepUnit             *string  `json:"step_unit,omitempty" jsonschema:"STEP and IGES only: the length unit written to the file (default: FreeCAD's export preference)"`
-	StepSchema           *string  `json:"step_schema,omitempty" jsonschema:"STEP only: the application protocol (default: FreeCAD's export preference)"`
-	Timeout              *float64 `json:"timeout,omitempty" jsonschema:"seconds for each of the queue and GUI execution budgets, more than 0 and at most 1800; default 300; raise it for fine meshes of large models"`
+	DocName              string   `json:"doc_name"`
+	Path                 string   `json:"path"`
+	ObjectNames          []string `json:"object_names,omitempty"`
+	Overwrite            *bool    `json:"overwrite,omitempty"`
+	IncludeHidden        *bool    `json:"include_hidden,omitempty"`
+	Recompute            *bool    `json:"recompute,omitempty"`
+	Quality              *string  `json:"quality,omitempty"`
+	LinearDeflection     *float64 `json:"linear_deflection,omitempty"`
+	AngularDeflectionDeg *float64 `json:"angular_deflection_deg,omitempty"`
+	Relative             *bool    `json:"relative,omitempty"`
+	ASCII                *bool    `json:"ascii,omitempty"`
+	StepUnit             *string  `json:"step_unit,omitempty"`
+	StepSchema           *string  `json:"step_schema,omitempty"`
+	Timeout              *float64 `json:"timeout,omitempty"`
 }
-
-const exportDocumentDescription = `Export objects of an open FreeCAD document to a file for 3D printing or CAD exchange, without any dialog in FreeCAD.
-
-The format follows the extension of path: .stl (binary, or ASCII with ascii true), .ast, .3mf, .amf, .obj, .ply and .off are triangle meshes for slicers, tessellated with the quality preset (coarse, standard, fine) or explicit linear_deflection and angular_deflection_deg; 3MF and AMF keep one object per part and declare millimeters, which slicers prefer. .step/.stp and .iges/.igs keep exact geometry, names and colors; .glb/.gltf write a tessellated scene in meters (.gltf also writes a separate .bin buffer next to it, reported in the reply as companion_file); .brep/.brp write the exact shape; .FCStd writes a copy of the document; .dxf and .svg write 2D geometry projected on the XY plane.
-
-Without object_names the visible top-level objects that have geometry are exported, so a Body is written once, not once per feature; list_objects shows the names. The reply gives the file, its size, the exported and skipped objects and, for meshes, the facet count and whether the mesh is closed. An existing file is only replaced with overwrite true. Use save_document_as to save the document itself, and check_printability before exporting for a printer.`
 
 func (s *Server) registerExportTools() {
 	schema := inputSchema[exportDocumentInput](map[string]string{
@@ -42,11 +36,7 @@ func (s *Server) registerExportTools() {
 	schema = withEnum(schema, "step_schema", "AP203", "AP214IS", "AP242DIS")
 	schema = withRange(schema, 0.001, 100, "linear_deflection")
 	schema = withRange(schema, 0.5, 90, "angular_deflection_deg")
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name:        "export_document",
-		Description: exportDocumentDescription + "\n\n" + filePathsNote,
-		InputSchema: withPositiveMax(schema, "timeout", freecad.DefaultMaxExecuteCodeTime),
-	}, s.exportDocument)
+	addTool(s.mcpServer, "export_document", withPositiveMax(schema, "timeout", freecad.DefaultMaxExecuteCodeTime), s.exportDocument)
 }
 
 type exportDocumentFront struct {
@@ -139,6 +129,7 @@ func (s *Server) exportDocument(ctx context.Context, _ *mcp.CallToolRequest, in 
 	var body strings.Builder
 	fmt.Fprintf(&body, "Exported %d object(s) from '%s' to '%s' (%s, via %s).",
 		len(objects), in.DocName, front.File, front.Format, front.Exporter)
+	body.WriteString(createdFolderNote(res))
 
 	if names := stringItems(objects); len(names) > 0 {
 		fmt.Fprintf(&body, "\n\nExported: %s.", strings.Join(names, ", "))

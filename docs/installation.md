@@ -54,8 +54,12 @@ prints the line to add to yours. The wizard:
    computer, which skips this step.
 3. **FreeCAD on another computer, or Share this PC**: when FreeCAD was
    found, choose whether other devices may use it too (see
-   [remote access](remote-access.md) for what this sets up: allowed IP
-   addresses, an optional password, how long an idle agent keeps FreeCAD).
+   [remote access](remote-access.md) for what this sets up: an optional
+   password, how long an idle agent keeps FreeCAD). The wizard does not ask
+   which devices may connect: it keeps the allowed list already saved, or else
+   allows this computer's own network subnet (only this computer, with a note,
+   when no network is found), and its result lines say how to change that in
+   freecad-mcp > Share this PC > Advanced.
    When you chose to use FreeCAD on another computer in the previous step
    instead, enter that computer's address here and test the connection.
 4. **Registration**: the `freecad` server is added to each selected client's
@@ -63,7 +67,7 @@ prints the line to add to yours. The wizard:
    Then the addon is installed and what you chose in step 3 is applied.
 
 Nothing is written before step 4. Press `q` or `Ctrl+C` in steps 1 and 2 to
-cancel; on a screen where you type a host, address list or password, `q`
+cancel; on a screen where you type a host, address or password, `q`
 types like any other character instead, so only `Ctrl+C` cancels there. Either
 way the wizard changes nothing, and the install script removes the binary and
 the `PATH` entry it just added, or puts back the version you had installed
@@ -88,12 +92,54 @@ To install a specific release instead of the latest, pass `-Version`
 (PowerShell) or set `VERSION` (sh):
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/sairaph/freecad-mcp/releases/download/v0.4.0/install.ps1))) -Version v0.4.0
+& ([scriptblock]::Create((irm https://github.com/sairaph/freecad-mcp/releases/download/v0.4.1/install.ps1))) -Version v0.4.1
 ```
 
 ```sh
-curl -fsSL https://github.com/sairaph/freecad-mcp/releases/download/v0.4.0/install.sh | VERSION=v0.4.0 sh
+curl -fsSL https://github.com/sairaph/freecad-mcp/releases/download/v0.4.1/install.sh | VERSION=v0.4.1 sh
 ```
+
+`install-addon --refresh` (and so `update`) compares the installed addon's
+files with the ones this binary ships, not only the version number, and
+replaces a copy that differs. That includes a symlinked or hand-copied
+development addon: the embedded copy takes its place.
+
+### The guide skill
+
+`install`, `configure` and `add` also write the `freecad-mcp-guide` skill: a
+short home file (`SKILL.md`) and guide files on property values and units,
+choosing faces and edges, FEM, files, printing, spreadsheet parameters, code
+and sharing FreeCAD. It is embedded in the binary, so it always matches the
+tools. It goes only into the skill folders of the AI clients the setup
+registers, one copy per folder:
+
+| Folder | Clients that read it |
+| --- | --- |
+| `~/.claude/skills/freecad-mcp-guide/` | Claude Code; also Cursor, OpenCode and VS Code when Claude Code is registered too |
+| `~/.agents/skills/freecad-mcp-guide/` | Codex, Gemini CLI, Windsurf, Zed, Cline, Zoo Code; Cursor, OpenCode and VS Code without Claude Code |
+| `~/.kiro/skills/freecad-mcp-guide/` | Kiro CLI (listed as Amazon Q) |
+| `~/.continue/skills/freecad-mcp-guide/` (or under `CONTINUE_GLOBAL_DIR`) | Continue |
+
+`~` is your home folder. With `add` (or `install --scope project`) the same
+folders are written under the project directory instead, and Continue uses the
+project's `.claude/skills`. Claude Desktop takes skills only as an upload
+(Settings, Capabilities, Skills), so the setup prints a note for it and writes
+nothing.
+
+Only a folder whose `SKILL.md` carries the `generator: freecad-mcp` marker is
+ever replaced or removed: a skill of the same name that you wrote or edited is
+left alone, with a note. `freecad-mcp update` rewrites the copies it wrote,
+`freecad-mcp uninstall` removes them together with the client entries they
+served (unless another registered client still reads that folder), and
+`uninstall --all` removes every copy it wrote. The MCP prompt
+`asset_creation_strategy` returns `SKILL.md` followed by every guide file, so
+it stands alone where no skill folder was written. A later `install` writes
+the copies for every client that runs freecad-mcp, not only those named with
+`--clients`, and removes a copy of its own from a folder no such client reads.
+Removing one client with `uninstall` rewrites a copy where a client that
+stays registered read the folder just emptied. Every rule the
+guide repeats also sits in the server instructions and the tool schemas, so a
+client that never loads the skill loses nothing essential.
 
 ### Unattended install
 
@@ -138,8 +184,8 @@ an array instead: `-ConfigureArgs "--yes", "--token", "my token"`.
 | `freecad-mcp mcp` | Run the MCP server over stdio. It serves FreeCAD itself and does not bridge to other MCP servers: `--remote <url>` is refused. |
 | `freecad-mcp install` / `configure` | The setup wizard (`--yes` for unattended). |
 | `freecad-mcp add` | Register the server in the current project's client configs instead of the global ones. |
-| `freecad-mcp uninstall` | Remove the `freecad` entries that run `freecad-mcp` from the AI clients' global configurations, including entries edited by hand. An entry under that name that runs another program is left in place unless you name its client (`--clients cursor,zed` acts on only those; `--dry-run` previews). |
-| `freecad-mcp uninstall --all` | Remove what `install` and the install scripts wrote for your user: those client entries, the FreeCAD addon from every FreeCAD data folder that holds it, the addon's settings file (which can hold the password) from every FreeCAD data folder that has one, the stored password, the listener (stopped and unregistered) and its log and lock files, the cache, and the installed program with its `PATH` entry (`--dry-run` to preview). When a client entry cannot be removed, the program and its `PATH` entry stay, so that client is not left pointing at a deleted program; the output says why. What `add` wrote into projects stays; `--all` cannot be combined with `--scope project` or `--clients`. |
+| `freecad-mcp uninstall` | Remove the `freecad` entries that run `freecad-mcp` from the AI clients' global configurations, including entries edited by hand, and the guide skill written for those clients. An entry under that name that runs another program is left in place unless you name its client (`--clients cursor,zed` acts on only those; `--dry-run` previews). |
+| `freecad-mcp uninstall --all` | Remove what `install` and the install scripts wrote for your user: those client entries, the guide skill copies, the FreeCAD addon from every FreeCAD data folder that holds it, the addon's settings file (which can hold the password) from every FreeCAD data folder that has one, the stored password, the listener (stopped and unregistered) and its log and lock files, the cache, and the installed program with its `PATH` entry (`--dry-run` to preview). When a client entry cannot be removed, the program and its `PATH` entry stay, so that client is not left pointing at a deleted program; the output says why. What `add` wrote into projects stays; `--all` cannot be combined with `--scope project` or `--clients`. |
 | `freecad-mcp uninstall --scope project` | Remove the entries `add` wrote to the current project (`--dir <dir>` for another project). |
 | `freecad-mcp install-addon` | Install or update the FreeCAD addon in the data folder FreeCAD reports, or in every FreeCAD data folder found on disk when FreeCAD cannot be asked (`--user-data-dir <dir>` for another folder, `--no-autostart` to turn auto-start off, `--dry-run`). |
 | `freecad-mcp uninstall-addon` | Remove the addon from every FreeCAD data folder that holds it (`--user-data-dir <dir>` for one folder). Its settings stay. |
@@ -149,7 +195,7 @@ an array instead: `-ConfigureArgs "--yes", "--token", "my token"`.
 | `freecad-mcp connect` | Point this computer at FreeCAD on another shared computer from the command line, or stop using one; see [remote access](remote-access.md#command-line). |
 | `freecad-mcp listen` | Run the listener "Share this PC" registers to start automatically; you do not normally run this by hand. |
 | `freecad-mcp doctor` | Check the binary, PATH, AI clients, FreeCAD, the addon, the RPC server and remote access. |
-| `freecad-mcp update` | Update the binary from GitHub releases, then every installed copy of the addon it ships, and restart the listener if one is registered. |
+| `freecad-mcp update` | Update the binary from GitHub releases, then every installed copy of the addon and of the guide skill it ships, and restart the listener if one is registered. |
 | `freecad-mcp version` | Print the version. |
 
 ## Start the RPC server
@@ -191,7 +237,7 @@ the matching copy, so the two normally match. The MCP server checks that the
 running addon speaks its protocol version: if it does not, for example after
 copying an older addon by hand, the next tool reply starts with a warning that
 says which side to update, and `get_rpc_status` and `check-connection` report
-it. This release speaks protocol 4 (addon 0.4.0): FreeCAD can be shared with
+it. This release speaks protocol 5 (addon 0.4.1): FreeCAD can be shared with
 other devices (see [remote access](remote-access.md) for Share this PC,
 Connect, the listener, and the multi-agent session lock that comes with it);
 `release_session` and `close_freecad` manage that session; `get_rpc_status`

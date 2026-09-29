@@ -1,9 +1,11 @@
 package main
 
 // The install wizard's "Share this PC with other devices?" steps, shown
-// after the addon step when FreeCAD was found: allowed IPs, password and
-// session timeout. They are applied after registration by applyShareChoice
-// (settings and credentials) and applyShareListener (autostart and start),
+// after the addon step when FreeCAD was found: password and session timeout.
+// The allowed IPs are not asked: they follow the saved list or the
+// default-route subnet, and the result lines point to the Share page for
+// changing them. The choices are applied after registration by
+// applyShareChoice (settings and credentials) and applyShareListener (autostart and start),
 // in the order finishWizard calls them: the share settings, then the addon,
 // then the listener, so the listener only starts once the addon it talks to
 // is in place.
@@ -28,7 +30,6 @@ import (
 	"github.com/sairaph/mcp-wizard/tui"
 
 	"github.com/sairaph/freecad-mcp/internal/addoninstall"
-	"github.com/sairaph/freecad-mcp/internal/domain"
 )
 
 // shareState is the "Share this PC" choice. The password is held in memory
@@ -62,14 +63,14 @@ type shareState struct {
 	// minutesText is the minutes screen's own editing buffer; TimeoutMinutes
 	// is only updated once it parses as a valid value.
 	minutesText string
-	// message is the current validation error on the allowed IPs or minutes
+	// message is the current validation error on the password or minutes
 	// screen, or "" before one.
 	message string
 	// readErr is set when the addon settings could not be read (message then
 	// holds the error and recovery guidance): the choice screen refuses Yes
 	// while it is set, so enter cannot save the defaults over a file that
 	// failed to read for some other reason (a hand-edited auth_token, for
-	// example) — see shareChoiceStep.Update.
+	// example); see shareChoiceStep.Update.
 	readErr bool
 }
 
@@ -84,7 +85,6 @@ type shareSkipMsg struct{}
 func shareSteps(ctx context.Context) []flow.Step[AppState] {
 	return []flow.Step[AppState]{
 		&shareChoiceStep{},
-		&shareAllowedIPsStep{},
 		&sharePasswordStep{},
 		&shareMinutesStep{},
 	}
@@ -125,25 +125,7 @@ func (s *shareChoiceStep) Init(state *AppState) tea.Cmd {
 		}
 		sh.Initial = settings.RemoteEnabled
 		sh.On = settings.RemoteEnabled
-		if settings.AllowedIPs != "" && !(settings.AllowedIPs == addoninstall.DefaultAllowedIPs && !sh.Initial) {
-			// Keep the saved list unless there is nothing deliberately
-			// chosen to keep: never saved, or nothing but the plain default
-			// while remote access is off (still a first time, not a real
-			// choice, live check L8). While remote access is already on,
-			// a saved plain default is instead the loopback-only SSH-tunnel
-			// setup (contract 5.1), chosen on purpose: replacing it with a
-			// LAN suggestion just because this screen was revisited would
-			// expose that tunnel-only setup to the whole LAN (live-fixes
-			// review M2). A list other than the plain default is kept
-			// either way, so an off-then-on cycle never drops a custom one
-			// such as a WSL range added next to a LAN subnet.
-			sh.AllowedIPs = settings.AllowedIPs
-		} else {
-			sh.AllowedIPs = strings.Join(suggestedAllowedIPs(), ", ")
-		}
-		if sh.AllowedIPs == "" {
-			sh.AllowedIPs = addoninstall.DefaultAllowedIPs
-		}
+		sh.AllowedIPs = initialAllowedIPs(settings)
 		// A password already set is kept unless the user types a new one,
 		// whether or not remote access happens to be on right now: the
 		// Share page already allows leaving remote access off with a
@@ -209,75 +191,6 @@ func (s *shareChoiceStep) View(state *AppState) string {
 	b.WriteString(tui.Footer(theme, tui.Hints(theme,
 		tui.Hint{Key: "↑↓", Label: "move"}, tui.Hint{Key: "enter", Label: "continue"},
 		tui.Hint{Key: "esc", Label: "back"}, tui.Hint{Key: "q", Label: "cancel"})))
-	return tui.Section(theme, s.Title(state), b.String())
-}
-
-// --- Allowed IPs ---
-
-type shareAllowedIPsStep struct{}
-
-func (s *shareAllowedIPsStep) ID() string { return "share-allowed-ips" }
-
-func (s *shareAllowedIPsStep) Title(*AppState) string { return "Share this PC" }
-
-func (s *shareAllowedIPsStep) Hints(*AppState) []struct{ Key, Label string } {
-	return []struct{ Key, Label string }{{"enter", "continue"}, {"esc", "back"}}
-}
-
-func (s *shareAllowedIPsStep) Init(state *AppState) tea.Cmd {
-	if !state.Share.On {
-		return func() tea.Msg { return shareSkipMsg{} }
-	}
-	state.Share.message = ""
-	return nil
-}
-
-func (s *shareAllowedIPsStep) Update(msg tea.Msg, state *AppState) (flow.Directive, tea.Cmd) {
-	if _, ok := msg.(shareSkipMsg); ok {
-		return flow.Skip, nil
-	}
-	k, ok := msg.(tea.KeyMsg)
-	if !ok {
-		return flow.Continue, nil
-	}
-	sh := &state.Share
-	switch k.String() {
-	case "ctrl+c":
-		return flow.Quit, nil
-	case "esc":
-		state.Retreating = true
-		return flow.Back, nil
-	case "enter":
-		if _, err := domain.ParseAllowedIPs(sh.AllowedIPs); err != nil {
-			sh.message = err.Error()
-			return flow.Continue, nil
-		}
-		sh.message = ""
-		return flow.Next, nil
-	case "backspace":
-		sh.AllowedIPs = trimLastRune(sh.AllowedIPs)
-		sh.message = ""
-	default:
-		if len(k.Runes) > 0 {
-			sh.AllowedIPs += string(k.Runes)
-			sh.message = ""
-		}
-	}
-	return flow.Continue, nil
-}
-
-func (s *shareAllowedIPsStep) View(state *AppState) string {
-	theme := tui.DefaultTheme
-	sh := &state.Share
-	var b strings.Builder
-	b.WriteString("  Which devices may connect? IP addresses or subnets, comma-separated.\n")
-	b.WriteString("  Example: 192.168.1.0/24, 10.0.0.5\n\n")
-	fmt.Fprintf(&b, "  Allowed IPs: %s_\n", sh.AllowedIPs)
-	if sh.message != "" {
-		b.WriteString("\n  " + sh.message + "\n")
-	}
-	b.WriteString(tui.Footer(theme, tui.Hints(theme,
-		tui.Hint{Key: "enter", Label: "continue"}, tui.Hint{Key: "esc", Label: "back"})))
 	return tui.Section(theme, s.Title(state), b.String())
 }
 

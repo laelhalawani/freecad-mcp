@@ -25,6 +25,28 @@ def home_example(name: str) -> str:
     return f"{home}/{name}"
 
 
+def ensure_parent_directory(path: str) -> tuple[str | None, dict[str, Any] | None]:
+    """Create ``path``'s folder (and any missing parents) when it does not exist.
+
+    Returns ``(created_directory, None)``, where ``created_directory`` is None
+    when the folder already existed, or ``(None, fail())`` when it cannot be
+    created. FreeCAD's writers do not all raise a catchable error for a
+    missing folder; without one the write silently does nothing.
+    """
+    directory = os.path.dirname(path)
+    if not directory or os.path.isdir(directory):
+        return None, None
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError as e:
+        return None, fail(
+            INVALID_INPUT,
+            f"the folder '{directory}' does not exist and could not be created: {e}",
+            "Check that the drive exists and is writable, or choose another path.",
+        )
+    return os.path.abspath(directory), None
+
+
 def require_absolute_path(path: Any) -> tuple[str, None] | tuple[None, dict[str, Any]]:
     """Return ``(expanded_path, None)``, or ``(None, fail())`` when ``path`` cannot be used.
 

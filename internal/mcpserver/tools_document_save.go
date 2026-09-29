@@ -11,23 +11,23 @@ import (
 )
 
 type saveDocumentInput struct {
-	DocName   string   `json:"doc_name" jsonschema:"the name of an open document, as list_documents shows it"`
-	Recompute *bool    `json:"recompute,omitempty" jsonschema:"recompute the document before saving when it needs it (default true)"`
-	Timeout   *float64 `json:"timeout,omitempty" jsonschema:"seconds for each of the queue and GUI execution budgets, more than 0 and at most 1800; default 120"`
+	DocName   string   `json:"doc_name"`
+	Recompute *bool    `json:"recompute,omitempty"`
+	Timeout   *float64 `json:"timeout,omitempty"`
 }
 
 type saveDocumentAsInput struct {
-	DocName   string   `json:"doc_name" jsonschema:"the name of an open document, as list_documents shows it"`
-	Path      string   `json:"path" jsonschema:"absolute path of the .FCStd file to write on the machine running FreeCAD; .FCStd is appended when the name has no extension"`
-	Overwrite *bool    `json:"overwrite,omitempty" jsonschema:"replace an existing file at path (default false)"`
-	Copy      *bool    `json:"copy,omitempty" jsonschema:"write a copy and keep the document on its current file and name (default false)"`
-	Recompute *bool    `json:"recompute,omitempty" jsonschema:"recompute the document before saving when it needs it (default true)"`
-	Timeout   *float64 `json:"timeout,omitempty" jsonschema:"seconds for each of the queue and GUI execution budgets, more than 0 and at most 1800; default 120"`
+	DocName   string   `json:"doc_name"`
+	Path      string   `json:"path"`
+	Overwrite *bool    `json:"overwrite,omitempty"`
+	Copy      *bool    `json:"copy,omitempty"`
+	Recompute *bool    `json:"recompute,omitempty"`
+	Timeout   *float64 `json:"timeout,omitempty"`
 }
 
 type closeDocumentInput struct {
-	DocName        string `json:"doc_name" jsonschema:"the name of an open document, as list_documents shows it"`
-	DiscardChanges *bool  `json:"discard_changes,omitempty" jsonschema:"close even when the document has unsaved changes, losing them (default false)"`
+	DocName        string `json:"doc_name"`
+	DiscardChanges *bool  `json:"discard_changes,omitempty"`
 }
 
 type saveDocumentFront struct {
@@ -50,35 +50,15 @@ type closeDocumentFront struct {
 }
 
 func (s *Server) registerDocumentSaveTools() {
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name: "save_document",
-		Description: "Save an open FreeCAD document to its own .FCStd file, recomputing it first when it needs it, " +
-			"without any dialog in FreeCAD. A document that was never saved has no file yet: use save_document_as " +
-			"with a path instead. The reply names the file and lists objects that are invalid after the recompute; " +
-			"list_documents shows which documents have unsaved changes.",
-		InputSchema: withPositiveMax(inputSchema[saveDocumentInput](map[string]string{"recompute": "true", "timeout": "120"}),
-			"timeout", freecad.DefaultMaxExecuteCodeTime),
-	}, s.saveDocument)
-
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name: "save_document_as",
-		Description: "Save an open FreeCAD document to a new .FCStd file at an absolute path on the machine running " +
-			"FreeCAD. The document then uses that file and its label becomes the file name; with copy true a copy is " +
-			"written and the document keeps its file. An existing file is only replaced with overwrite true, and a " +
-			"file another open document uses is refused. Use export_document for STEP, STL, 3MF and other formats. " +
-			filePathsNote,
-		InputSchema: withPositiveMax(inputSchema[saveDocumentAsInput](map[string]string{
+	addTool(s.mcpServer, "save_document",
+		withPositiveMax(inputSchema[saveDocumentInput](map[string]string{"recompute": "true", "timeout": "120"}),
+			"timeout", freecad.DefaultMaxExecuteCodeTime), s.saveDocument)
+	addTool(s.mcpServer, "save_document_as",
+		withPositiveMax(inputSchema[saveDocumentAsInput](map[string]string{
 			"overwrite": "false", "copy": "false", "recompute": "true", "timeout": "120"}),
-			"timeout", freecad.DefaultMaxExecuteCodeTime),
-	}, s.saveDocumentAs)
-
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name: "close_document",
-		Description: "Close an open FreeCAD document and its tabs. A document with unsaved changes is refused unless " +
-			"discard_changes is true; call save_document or save_document_as first to keep them. The reply names the " +
-			"document that is active afterwards. FreeCAD asks no questions, so nothing waits for a person.",
-		InputSchema: inputSchema[closeDocumentInput](map[string]string{"discard_changes": "false"}),
-	}, s.closeDocument)
+			"timeout", freecad.DefaultMaxExecuteCodeTime), s.saveDocumentAs)
+	addTool(s.mcpServer, "close_document",
+		inputSchema[closeDocumentInput](map[string]string{"discard_changes": "false"}), s.closeDocument)
 }
 
 func (s *Server) saveDocument(ctx context.Context, _ *mcp.CallToolRequest, in saveDocumentInput) (*mcp.CallToolResult, any, error) {
@@ -143,6 +123,7 @@ func (s *Server) saveDocumentAs(ctx context.Context, _ *mcp.CallToolRequest, in 
 	} else {
 		fmt.Fprintf(&body, "Document '%s' saved to '%s' (label is now '%s').", doc, file, label)
 	}
+	body.WriteString(createdFolderNote(res))
 	if recomputed {
 		body.WriteString(" It was recomputed first.")
 	}

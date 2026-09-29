@@ -45,6 +45,7 @@ class _GoodShape:
     Vertexes = [object() for _ in range(8)]
     Edges = [object() for _ in range(6)]
     Faces = [object() for _ in range(4)]
+    Solids = [object()]
     BoundBox = _StubBoundBox()
     ShapeType = "Solid"
     CenterOfMass = _StubVector(0.5, 1.0, 1.5)
@@ -74,6 +75,7 @@ def test_good_shape_serializes():
     result = serialize.serialize_shape(_GoodShape())
     assert result["Volume"] == 42.0
     assert result["VertexCount"] == 8
+    assert result["SolidCount"] == 1
 
 
 def test_broken_shape_returns_error_dict_instead_of_raising():

@@ -5,6 +5,7 @@ import xmlrpc.client
 
 from rpc_server import tessellation
 from rpc_server.object_validation import object_states, object_status, object_validity_error
+from rpc_server.property_mapper import quantity_text, quantity_type
 
 
 def _get_optional_app_type(name: str) -> type | tuple[type, ...] | None:
@@ -18,6 +19,7 @@ def _get_optional_app_type(name: str) -> type | tuple[type, ...] | None:
 
 _COLOR_TYPE = _get_optional_app_type("Color")
 _DOCUMENT_OBJECT_TYPE = _get_optional_app_type("DocumentObject")
+_QUANTITY_TYPE = quantity_type()
 
 # Shape types whose CenterOfMass FreeCAD computes directly
 # (Mod/Part/App/TopoShapeSolid.pyi, TopoShapeShell.pyi, TopoShapeFace.pyi,
@@ -94,6 +96,10 @@ def serialize_value(value):
     elif _DOCUMENT_OBJECT_TYPE is not None and isinstance(value, _DOCUMENT_OBJECT_TYPE):
         # A Link (or the object end of a LinkSub) is a DocumentObject.
         return value.Name
+    elif _QUANTITY_TYPE is not None and isinstance(value, _QUANTITY_TYPE):
+        # In the units FreeCAD prefers for it ("100.00 N"), the way the
+        # create and update replies show it, not in base units.
+        return quantity_text(value)
     elif isinstance(value, (list, tuple)):
         # A LinkSub is (DocumentObject, (sub names...)); a LinkSubList is a
         # list of those; a LinkList is a list of DocumentObject (handled by
@@ -178,6 +184,8 @@ def serialize_shape(shape):
             "VertexCount": len(shape.Vertexes),
             "EdgeCount": len(shape.Edges),
             "FaceCount": len(shape.Faces),
+            # A fused result can be a Compound of several solids.
+            "SolidCount": len(shape.Solids),
             "BoundBox": bound_box_list(shape.BoundBox),
         }
     except Exception as e:

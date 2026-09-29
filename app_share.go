@@ -1,7 +1,8 @@
 package main
 
 // The app's "Share this PC (remote access)" page: remote access on or off,
-// allowed IPs, password, port and session timeout, an async Test connection
+// password and session timeout (allowed IPs and port sit in a collapsed
+// Advanced row), an async Test connection
 // and Save, each reporting through the shared remote.go logic (applyShare,
 // applyUnshare, testShare). Test connection only proves the port answers
 // from this computer; it says so, and points to the Connect page for a real
@@ -19,6 +20,7 @@ import (
 	"github.com/sairaph/mcp-wizard/tui"
 
 	"github.com/sairaph/freecad-mcp/internal/addoninstall"
+	"github.com/sairaph/freecad-mcp/internal/domain"
 )
 
 // sharePhase is the page's loading state: sharePhaseLoading while the
@@ -31,15 +33,38 @@ const (
 	sharePhaseForm
 )
 
-// shareFields are the tab order of the page's fields; 0 is the checkbox.
+// The page's fields. The tab order is shareFieldOrder: the checkbox, password
+// and minutes, then the Advanced row, and only while that row is expanded the
+// allowed IPs and the port.
 const (
 	shareFieldEnabled = iota
-	shareFieldAllowedIPs
 	shareFieldPassword
-	shareFieldPort
 	shareFieldMinutes
-	shareFieldCount
+	shareFieldAdvanced
+	shareFieldAllowedIPs
+	shareFieldPort
 )
+
+// visibleFields is the tab order for the current expansion state.
+func (p *sharePage) visibleFields() []int {
+	fields := []int{shareFieldEnabled, shareFieldPassword, shareFieldMinutes, shareFieldAdvanced}
+	if p.advancedOpen {
+		fields = append(fields, shareFieldAllowedIPs, shareFieldPort)
+	}
+	return fields
+}
+
+// moveFocus moves the focus by delta (1 or -1) through visibleFields.
+func (p *sharePage) moveFocus(delta int) {
+	fields := p.visibleFields()
+	idx := 0
+	for i, f := range fields {
+		if f == p.focus {
+			idx = i
+		}
+	}
+	p.focus = fields[(idx+delta+len(fields))%len(fields)]
+}
 
 // shareFieldNone is p.focus while no field is being edited: t and s then act
 // as the page's shortcuts, the same model as the Connect page (app_connect.go).
@@ -77,12 +102,15 @@ type sharePage struct {
 	// defaults the form was left showing.
 	loadError error
 
-	enabled     bool
-	allowedIPs  string
-	password    string
-	portText    string
-	minutesText string
-	focus       int
+	enabled bool
+	// advancedOpen is whether the Advanced row is expanded into the allowed
+	// IPs and port fields; collapsed by default.
+	advancedOpen bool
+	allowedIPs   string
+	password     string
+	portText     string
+	minutesText  string
+	focus        int
 
 	testing   bool
 	testLines []shareTestLine
@@ -119,15 +147,7 @@ func (p *sharePage) Update(msg tea.Msg) (bool, tea.Cmd) {
 		p.loadError = m.Value.loadErr
 		s := m.Value.settings
 		p.enabled = s.RemoteEnabled
-		p.allowedIPs = s.AllowedIPs
-		if !s.RemoteEnabled {
-			// Not shared yet: suggest a subnet. Once remote access is on,
-			// the saved list is kept as is (including the loopback-only
-			// SSH-tunnel setup, "127.0.0.1").
-			if subnets := suggestedAllowedIPs(); len(subnets) > 0 {
-				p.allowedIPs = strings.Join(subnets, ", ")
-			}
-		}
+		p.allowedIPs = initialAllowedIPs(s)
 		p.password = s.AuthToken
 		p.portText = strconv.Itoa(s.ListenerPort)
 		p.minutesText = strconv.Itoa(s.SessionTimeoutMinutes)
@@ -177,15 +197,21 @@ func (p *sharePage) Update(msg tea.Msg) (bool, tea.Cmd) {
 			p.focus = shareFieldNone
 			return false, nil
 		case "tab":
-			p.focus = (p.focus + 1) % shareFieldCount
+			p.moveFocus(1)
 			return false, nil
 		case "shift+tab":
-			p.focus = (p.focus - 1 + shareFieldCount) % shareFieldCount
+			p.moveFocus(-1)
 			return false, nil
 		}
 		if p.focus == shareFieldEnabled {
 			if m.Type == tea.KeySpace {
 				p.enabled = !p.enabled
+			}
+			return false, nil
+		}
+		if p.focus == shareFieldAdvanced {
+			if m.Type == tea.KeySpace || m.Type == tea.KeyEnter {
+				p.advancedOpen = !p.advancedOpen
 			}
 			return false, nil
 		}
@@ -256,6 +282,9 @@ func (p *sharePage) options() (shareOptions, error) {
 		return shareOptions{}, err
 	}
 	if err := validatePassword(p.password); err != nil {
+		return shareOptions{}, err
+	}
+	if _, err := domain.ParseAllowedIPs(p.allowedIPs); err != nil {
 		return shareOptions{}, err
 	}
 	return shareOptions{
@@ -338,14 +367,22 @@ func (p *sharePage) View() string {
 	b.WriteString("  empty.\n\n")
 
 	b.WriteString(p.rowPrefix(shareFieldEnabled) + mark + " Allow other devices to use FreeCAD on this computer\n")
-	b.WriteString(p.rowPrefix(shareFieldAllowedIPs) + fmt.Sprintf("%-14s%s\n", "Allowed IPs:", p.allowedIPs))
 	b.WriteString(p.rowPrefix(shareFieldPassword) + fmt.Sprintf("%-14s%s  (optional)\n", "Password:", maskValue(p.password)))
-	b.WriteString(p.rowPrefix(shareFieldPort) + fmt.Sprintf("%-14s%s\n", "Port:", p.portText))
 	b.WriteString(p.rowPrefix(shareFieldMinutes) + "How long to keep the session assigned to an agent? (minutes): " + p.minutesText + "\n")
 	b.WriteString("    With remote access on, several agents may try to use FreeCAD. The session lock\n")
 	b.WriteString("    stops one agent from taking control while another works. Agents can free it\n")
 	b.WriteString("    themselves; after this long without activity it becomes available to another\n")
 	b.WriteString("    agent.\n\n")
+	if p.advancedOpen {
+		b.WriteString(p.rowPrefix(shareFieldAdvanced) + "Advanced: allowed devices and port\n")
+		b.WriteString(p.rowPrefix(shareFieldAllowedIPs) + fmt.Sprintf("  %-14s%s\n", "Allowed IPs:", p.allowedIPs))
+		b.WriteString("      IP addresses or subnets, comma-separated. Example: 192.168.1.0/24, 10.0.0.5\n")
+		b.WriteString(p.rowPrefix(shareFieldPort) + fmt.Sprintf("  %-14s%s\n", "Port:", p.portText))
+		b.WriteString("\n")
+	} else {
+		b.WriteString(p.rowPrefix(shareFieldAdvanced) +
+			fmt.Sprintf("Advanced: allowed devices %s, port %s\n\n", p.allowedIPs, p.portText))
+	}
 
 	b.WriteString("  Connections are not encrypted; on an untrusted network use an SSH tunnel\n")
 	b.WriteString("  (" + remoteAccessDocsURL + ").\n\n")
@@ -374,7 +411,7 @@ func (p *sharePage) View() string {
 	if p.focus != shareFieldNone {
 		b.WriteString(tui.Footer(theme, tui.Hints(theme,
 			tui.Hint{Key: "tab", Label: "next field"},
-			tui.Hint{Key: "space", Label: "toggle (on the checkbox)"},
+			tui.Hint{Key: "space", Label: "toggle (checkbox) or expand (Advanced)"},
 			tui.Hint{Key: "esc", Label: "stop editing"},
 		)))
 	} else {

@@ -16,21 +16,6 @@ import (
 // sessionToolNames are the remote-only tools, added and removed together.
 var sessionToolNames = []string{"release_session", "close_freecad"}
 
-// freeForOthers ends both remote-only tools' descriptions.
-const freeForOthers = "Remember to always save your project and close the app when you are not working or are " +
-	"taking a longer break, to free it for other agents."
-
-const releaseSessionDescription = "Free the FreeCAD session this agent holds, so another agent can use FreeCAD at " +
-	"once instead of waiting for the idle timeout. With remote access on, an agent's first call to FreeCAD (anything " +
-	"but start_freecad and get_rpc_status) claims FreeCAD for that agent until it has been idle for the configured " +
-	"time; get_rpc_status shows who holds it and when it frees. This only frees this agent's own session: documents " +
-	"stay open and unsaved changes stay unsaved, so save them first with save_document. " + freeForOthers
-
-const closeFreeCADDescription = "Quit FreeCAD on the computer that runs it and free the session, for example at " +
-	"the end of a work session. Documents with unsaved changes are refused unless discard_changes is true: save " +
-	"them first with save_document or save_document_as. It is also refused while a task panel or command is open " +
-	"in FreeCAD. FreeCAD closes a moment after the reply; start_freecad opens it again. " + freeForOthers
-
 // sessionExplanation ends get_rpc_status's session sentence while the lock is
 // on, naming the two tools that manage it.
 const sessionExplanation = "With remote access on, one agent at a time holds FreeCAD; only get_rpc_status works " +
@@ -43,7 +28,7 @@ type releaseSessionFront struct {
 }
 
 type closeFreeCADInput struct {
-	DiscardChanges *bool `json:"discard_changes,omitempty" jsonschema:"quit even when documents have unsaved changes, losing them (default false)"`
+	DiscardChanges *bool `json:"discard_changes,omitempty"`
 }
 
 type closeFreeCADFront struct {
@@ -55,17 +40,8 @@ type closeFreeCADFront struct {
 // addSessionTools registers release_session and close_freecad (setRemoteTools
 // calls it when the lock turns on).
 func (s *Server) addSessionTools() {
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name:        "release_session",
-		Description: releaseSessionDescription,
-		InputSchema: inputSchema[struct{}](nil),
-	}, s.releaseSession)
-
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name:        "close_freecad",
-		Description: closeFreeCADDescription,
-		InputSchema: inputSchema[closeFreeCADInput](map[string]string{"discard_changes": "false"}),
-	}, s.closeFreeCAD)
+	addTool(s.mcpServer, "release_session", inputSchema[struct{}](nil), s.releaseSession)
+	addTool(s.mcpServer, "close_freecad", inputSchema[closeFreeCADInput](map[string]string{"discard_changes": "false"}), s.closeFreeCAD)
 }
 
 // releaseSession frees the session lock this agent holds. It is exempt from

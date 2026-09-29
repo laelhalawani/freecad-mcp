@@ -5,6 +5,11 @@
 // Start FreeCAD with the addon's RPC server running, build the binary, then:
 //
 //	FREECAD_MCP_E2E_BINARY=/path/to/freecad-mcp go test -tags e2e -v ./internal/e2e/
+//
+// The tests create documents with E2E names and close them, unsaved, when they
+// end; a test whose document keeps the file (save_document_as, open_document)
+// takes its temp path before newDoc, so the document closes before its folder
+// is removed.
 package e2e
 
 import (
@@ -317,8 +322,10 @@ func TestHiddenOpenKeepsActiveDocument(t *testing.T) {
 // document's file in get_rpc_status.
 func TestSaveCopyKeepsSnapshotFileName(t *testing.T) {
 	cs := session(t)
-	newDoc(t, cs, "E2ECopy")
+	// tempPath first: cleanups run last to first, so the document closes before
+	// its folder is removed.
 	path := tempPath(t, "E2ECopy_copy.FCStd")
+	newDoc(t, cs, "E2ECopy")
 	must(t, call(t, cs, "save_document_as", map[string]any{"doc_name": "E2ECopy", "path": path, "copy": true}), "copy: true")
 	st := call(t, cs, "get_rpc_status", nil)
 	must(t, st, `"name": "E2ECopy"`)

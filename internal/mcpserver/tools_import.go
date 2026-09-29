@@ -11,12 +11,12 @@ import (
 )
 
 type importFileInput struct {
-	Path         string   `json:"path" jsonschema:"absolute path of the file to import on the machine running FreeCAD"`
-	DocName      *string  `json:"doc_name,omitempty" jsonschema:"the open document to import into; omit it to create a new document named after the file"`
-	Merge        *bool    `json:"merge,omitempty" jsonschema:"STEP, IGES and glTF only: merge the file's parts into one compound (default: FreeCAD's import preference)"`
-	UseLinkGroup *bool    `json:"use_link_group,omitempty" jsonschema:"STEP, IGES and glTF only: build assemblies from App::Link groups (default: FreeCAD's import preference)"`
-	ImportHidden *bool    `json:"import_hidden,omitempty" jsonschema:"STEP, IGES and glTF only: also import objects the file marks hidden (default: FreeCAD's import preference)"`
-	Timeout      *float64 `json:"timeout,omitempty" jsonschema:"seconds for each of the queue and GUI execution budgets, more than 0 and at most 1800; default 300; raise it for large assemblies"`
+	Path         string   `json:"path"`
+	DocName      *string  `json:"doc_name,omitempty"`
+	Merge        *bool    `json:"merge,omitempty"`
+	UseLinkGroup *bool    `json:"use_link_group,omitempty"`
+	ImportHidden *bool    `json:"import_hidden,omitempty"`
+	Timeout      *float64 `json:"timeout,omitempty"`
 	screenshotOptions
 }
 
@@ -29,24 +29,15 @@ type importFileFront struct {
 	Transaction     string `yaml:"transaction,omitempty"`
 }
 
-const importFileDescription = `Import a CAD, mesh or 2D file into a FreeCAD document, without any dialog in FreeCAD.
-
-Formats by extension: .step/.stp, .iges/.igs, .gltf/.glb (assemblies keep their parts and colors), .brep/.brp, .stl/.ast, .obj, .off, .ply, .3mf (triangle meshes), .dxf and .svg (2D geometry). With doc_name the file is added to that open document; without it a new document named after the file is created. The reply lists the created objects with their names for get_object and update_object, the importer used, and objects that are invalid after the recompute. Undo removes the whole import in one step.
-
-Mesh files become Mesh objects, not solids: call mesh_to_solid to turn one into a Part solid, or analyze_mesh and repair_mesh to fix it first. An SVG without absolute units and no recognised Inkscape version marker imports at an assumed 96 dpi rather than asking, with a warning in the reply saying so. Use open_document for .FCStd files.`
-
 // importListCap bounds how many created or invalid objects the body lists, so
 // a large assembly import keeps the reply small; the reply keys themselves
 // are unaffected, only the body's readable listing.
 const importListCap = 100
 
 func (s *Server) registerImportTools() {
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name:        "import_file",
-		Description: importFileDescription + "\n\n" + filePathsNote,
-		InputSchema: withPositiveMax(inputSchema[importFileInput](mergeDefaults(screenshotDefaults, map[string]string{"timeout": "300"})),
-			"timeout", freecad.DefaultMaxExecuteCodeTime),
-	}, s.importFile)
+	addTool(s.mcpServer, "import_file",
+		withPositiveMax(inputSchema[importFileInput](mergeDefaults(screenshotDefaults, map[string]string{"timeout": "300"})),
+			"timeout", freecad.DefaultMaxExecuteCodeTime), s.importFile)
 }
 
 func (s *Server) importFile(ctx context.Context, _ *mcp.CallToolRequest, in importFileInput) (*mcp.CallToolResult, any, error) {

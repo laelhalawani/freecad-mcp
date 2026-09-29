@@ -11,8 +11,8 @@ import (
 )
 
 type recomputeDocumentInput struct {
-	DocName string   `json:"doc_name" jsonschema:"the name of an open document, as list_documents shows it"`
-	Timeout *float64 `json:"timeout,omitempty" jsonschema:"seconds for each of the queue and GUI execution budgets, more than 0 and at most 1800; default 120"`
+	DocName string   `json:"doc_name"`
+	Timeout *float64 `json:"timeout,omitempty"`
 	screenshotOptions
 }
 
@@ -25,16 +25,9 @@ type recomputeFront struct {
 }
 
 func (s *Server) registerRecomputeTools() {
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name: "recompute_document",
-		Description: "Recompute every object of a FreeCAD document and report each one that failed, with FreeCAD's " +
-			"status message, and each that is still touched. Use it after a series of changes, after " +
-			"delete_object (dependents may break), or when open_document reports that the document needs a " +
-			"recompute. Fix a failed object with update_object or remove it with delete_object; failures do not " +
-			"make the call fail.",
-		InputSchema: withPositiveMax(inputSchema[recomputeDocumentInput](mergeDefaults(screenshotDefaults, map[string]string{"timeout": "120"})),
-			"timeout", freecad.DefaultMaxExecuteCodeTime),
-	}, s.recomputeDocument)
+	addTool(s.mcpServer, "recompute_document",
+		withPositiveMax(inputSchema[recomputeDocumentInput](mergeDefaults(screenshotDefaults, map[string]string{"timeout": "120"})),
+			"timeout", freecad.DefaultMaxExecuteCodeTime), s.recomputeDocument)
 }
 
 func (s *Server) recomputeDocument(ctx context.Context, _ *mcp.CallToolRequest, in recomputeDocumentInput) (*mcp.CallToolResult, any, error) {
