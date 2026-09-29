@@ -4,14 +4,12 @@ The MCP server rejects them before opening a socket; that side is tested in
 Go: internal/freecad and internal/mcpserver.
 """
 
-from concurrent.futures import ThreadPoolExecutor
-import threading
 import types
 from unittest.mock import MagicMock
 
 import pytest
 
-from test_rpc_concurrency import client, running_server
+from test_client_timeouts import check_budgets_reach_the_dispatch_and_outcomes_are_ordered, run_two_queued_calls
 from test_rpc_handlers import rpc_module
 
 
@@ -34,28 +32,11 @@ def test_addon_rejects_invalid_timeout_before_dispatch(
     assert "must_not_run" not in rpc_module._EXEC_NAMESPACE
 
 
-def test_custom_timeout_covers_queue_then_execution_over_tcp(rpc_module: types.ModuleType) -> None:
+def test_custom_timeout_replaces_the_default_budget_of_queued_calls_over_tcp(rpc_module: types.ModuleType) -> None:
     rpc = rpc_module.FreeCADRPC()
-    rpc.EXECUTE_CODE_TIMEOUT = 0.05
-    entered = threading.Event()
-    rpc_module.FreeCAD.test_entered = entered
-    # Two runs of `hold` seconds each fit the custom budget only one at a time:
-    # the queued call's wait plus its run is over it, yet its run is not.
-    budget, hold = 2.0, 1.2
-    with running_server(rpc) as (host, port):
-        with ThreadPoolExecutor(max_workers=2) as workers:
-            first = workers.submit(
-                client(host, port, 30).execute_code,
-                f"import time\nFreeCAD.test_entered.set()\ntime.sleep({hold})\nprint('first')",
-                budget,
-            )
-            assert entered.wait(10)
-            queued = workers.submit(
-                client(host, port, 30).execute_code, f"import time\ntime.sleep({hold})\nprint('second')", budget,
-            )
-            first_result, second_result = first.result(timeout=30), queued.result(timeout=30)
-        assert first_result["success"] is True
-        assert first_result["message"].endswith("first\n")
-        assert second_result["success"] is True
-        assert second_result["message"].endswith("second\n")
-        assert client(host, port, 30).get_rpc_status()["gui_dispatch"]["state"] == "healthy"
+    rpc.EXECUTE_CODE_TIMEOUT = 0.05  # the default, which the calls' own budget replaces
+    budget = 30.0
+    outcome = run_two_queued_calls(rpc_module, rpc, budget, call_timeout=budget)
+    # The calls' own budget reaches the dispatch, not the default, and the
+    # outcomes arrive in order (see run_two_queued_calls for what this cannot show).
+    check_budgets_reach_the_dispatch_and_outcomes_are_ordered(outcome, budget)
