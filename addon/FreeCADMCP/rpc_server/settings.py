@@ -23,6 +23,9 @@ _DEFAULT_SETTINGS = {
     "auth_token": "",
     # Idle time after which another agent can take FreeCAD, 1 to 1440.
     "session_timeout_minutes": 30,
+    # Minutes a call may keep the agent waiting before the MCP server hands
+    # it a job id to poll instead, 1 to 1440.
+    "background_after_minutes": 30,
     # The listener's port on this computer.
     "listener_port": 9876,
 }

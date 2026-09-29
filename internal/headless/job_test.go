@@ -68,6 +68,24 @@ func TestJobFinishedKeepsItsOutputForLaterReads(t *testing.T) {
 	assertEmpty(t, dir)
 }
 
+func TestJobRunsAScriptFileInPlaceAndLeavesIt(t *testing.T) {
+	dir := scripts(t)
+	file := writeScriptFile(t, "print(__file__)\n")
+	j, msg := NewJobs().StartScript(context.Background(), Script{Path: file}, 60, python(t))
+	if msg != "" {
+		t.Fatal(msg)
+	}
+	t.Cleanup(func() { j.Cancel() })
+	waitDone(t, j)
+	if s := j.Snapshot(); !s.Success || s.Output != file {
+		t.Fatalf("finished job reported %+v", s)
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Fatalf("the script file is gone after the job: %v", err)
+	}
+	assertEmpty(t, dir)
+}
+
 func TestCancelAfterTheProcessEndedReportsFinished(t *testing.T) {
 	scripts(t)
 	m := NewJobs()

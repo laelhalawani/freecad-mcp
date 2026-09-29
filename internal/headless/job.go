@@ -42,7 +42,7 @@ type Job struct {
 	Started time.Time
 	Timeout float64
 
-	script string
+	script string // the temporary script written for this job; "" for a file the caller named
 	output string
 	stop   context.CancelFunc
 	kill   func() // ends the process and everything it started
@@ -102,20 +102,33 @@ func newJobID() string {
 // ends, timeout seconds pass, Cancel or StopAll. msg is the error text when it
 // could not start.
 func (m *Jobs) Start(ctx context.Context, code string, timeout float64, command []string) (job *Job, msg string) {
+	return m.StartScript(ctx, Script{Code: code}, timeout, command)
+}
+
+// StartScript is Start for a Script: inline code or a file that already
+// exists, which the job never removes.
+func (m *Jobs) StartScript(ctx context.Context, s Script, timeout float64, command []string) (job *Job, msg string) {
 	command, dir, msg := prepare(ctx, timeout, command)
 	if msg != "" {
 		return nil, msg
 	}
 	m.sweep(dir)
-	script, msg := writeScript(dir, code)
+	script, temp, msg := s.prepare(dir)
 	if msg != "" {
 		return nil, msg
+	}
+	// removeTemp removes the script written for this job; a file the caller
+	// named is left alone.
+	removeTemp := func() {
+		if temp {
+			os.Remove(script)
+		}
 	}
 	id := newJobID()
 	outPath := filepath.Join(dir, "job-"+id+".log")
 	out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		os.Remove(script)
+		removeTemp()
 		return nil, fmt.Sprintf("could not write the script: %v", err)
 	}
 	runCtx, stop := context.WithTimeout(context.Background(), time.Duration(timeout*float64(time.Second)))
@@ -127,11 +140,14 @@ func (m *Jobs) Start(ctx context.Context, code string, timeout float64, command 
 	if err != nil {
 		stop()
 		out.Close()
-		os.Remove(script)
+		removeTemp()
 		os.Remove(outPath)
 		return nil, fmt.Sprintf("could not start headless FreeCAD: %v", err)
 	}
-	j := &Job{ID: id, Started: time.Now(), Timeout: timeout, script: script, output: outPath, stop: stop, kill: kill, done: make(chan struct{})}
+	j := &Job{ID: id, Started: time.Now(), Timeout: timeout, output: outPath, stop: stop, kill: kill, done: make(chan struct{})}
+	if temp {
+		j.script = script
+	}
 	m.mu.Lock()
 	m.jobs[id] = j
 	m.mu.Unlock()
@@ -160,7 +176,9 @@ func (j *Job) wait(runCtx context.Context, cmd *exec.Cmd, out *os.File) {
 	j.exited.Store(true)
 	j.kill() // whatever the script left running ends with it
 	out.Close()
-	os.Remove(j.script)
+	if j.script != "" {
+		os.Remove(j.script)
+	}
 	defer close(j.done)
 	j.mu.Lock()
 	defer j.mu.Unlock()

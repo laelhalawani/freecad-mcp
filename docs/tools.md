@@ -743,7 +743,16 @@ changes only, since it freezes FreeCAD while it runs: work that may take more
 than a few seconds (booleans or distances between complex parts, threads,
 fillets, meshing) goes to `execute_code_headless`.
 
-- `code` (string, required): the Python code to execute.
+- `code` (string): the Python code to execute. Pass exactly one of `code` and
+  `path`.
+- `path` (string): the absolute path of a `.py` file on the computer running
+  FreeCAD, run instead of `code`. A script longer than about 30 lines belongs
+  in a file: write it with your own file tools, run it with `path`, and fix it
+  by editing the file and running it again. The file is compiled under its
+  own path, so a traceback cites the file and its line, an error reply names
+  both, and `__file__` is its path for the run. It shares the namespace, the
+  transaction and the budgets of `code`. With remote access on that computer
+  may not be yours: use `code` there.
 - `timeout` (number, optional, up to 1800 seconds): seconds for each of the
   queue and GUI execution budgets, overriding the 90 second default; raise it
   for other slow work that must run on the GUI thread.
@@ -762,8 +771,10 @@ Execute Python code in FreeCAD without waiting for completion, for
 long-running background computations that do not touch the GUI or mutate the
 document tree directly.
 
-- `code` (string, required): background-safe Python code; use `commit(fn)` for
-  every document and view write.
+- `code` (string): background-safe Python code; use `commit(fn)` for every
+  document and view write. Pass exactly one of `code` and `path`.
+- `path` (string): the absolute path of a `.py` file on the computer running
+  FreeCAD, run instead of `code`, with the same rules as for `execute_code`.
 
 The call returns at once with a `job_id`; poll `get_async_status` with it. The
 code runs in a background thread and must not call `FreeCADGui` APIs,
@@ -794,6 +805,14 @@ while a job runs, and a headless job's status does not need FreeCAD to be
 running. An unknown `job_id` is a not-found error. `cancel_job` stops a
 headless job.
 
+A call that keeps the agent waiting longer than the background limit becomes
+a job whose id starts with `call-` (see [long calls](execution.md#long-calls-move-to-the-background)).
+While it runs, this tool reports its tool and elapsed time; once it ends it
+returns that call's own reply, screenshot included, with `job_id` and `state:
+finished` added to its front matter. The reply is kept for later reads and
+forgotten a day after the call ends or when the MCP server exits. An empty
+`job_id` lists these jobs with the others.
+
 ### `cancel_job`
 
 Stop a background `execute_code_headless` job: its process and everything it
@@ -807,14 +826,21 @@ behind).
 
 The reply is the job's status with its last output. A job that had already
 finished is reported as finished, with its exit code. An id that is not a
-headless job is an invalid-input error.
+headless job is an invalid-input error; for a `call-` job the message says
+FreeCAD cannot stop work already running in its window.
 
 ### `execute_code_headless`
 
 Run a Python script in a separate `freecadcmd` process, isolated from the
 running GUI.
 
-- `code` (string, required): a complete Python script for `freecadcmd`.
+- `code` (string): a complete Python script for `freecadcmd`. Pass exactly one
+  of `code` and `path`.
+- `path` (string): the absolute path of a `.py` file on the computer running
+  this MCP server, run where it is instead of `code`. The file is never copied
+  or deleted, and `__file__` is its path. A missing file is a not-found error
+  and a relative path or a folder an invalid-input error, each naming the
+  path.
 - `timeout` (number, optional, up to 604800 seconds, a week): seconds to wait
   before killing the process; partial output is kept on timeout. Omitted, it
   is 600 seconds and the call waits for the script (foreground). A timeout you

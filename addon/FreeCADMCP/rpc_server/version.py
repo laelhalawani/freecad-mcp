@@ -2,7 +2,7 @@
 
 # The freecad-mcp binary embeds this addon, so the two always ship together.
 # Keep in step with <version> in ../package.xml.
-__version__ = "0.4.3"
+__version__ = "0.4.4"
 
 # Bump when the RPC contract changes in a way the MCP server must know about:
 # a method or parameter is added or removed, or a response shape or meaning
@@ -39,4 +39,6 @@ __version__ = "0.4.3"
 #    headless job of that session runs; it also tells the banner over the 3D
 #    view about the job); check_printability options add an optional plate
 #    corner, origin [x, y].
-PROTOCOL_VERSION = 7
+# 8: execute_file and execute_file_async are added (run a script file);
+#    get_rpc_status reports background_after_minutes.
+PROTOCOL_VERSION = 8

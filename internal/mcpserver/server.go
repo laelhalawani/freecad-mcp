@@ -22,6 +22,11 @@ type Server struct {
 	fc        *connector
 	remote    remoteToolsState // whether release_session and close_freecad are listed (visibility.go)
 	jobs      *headless.Jobs   // background execute_code_headless jobs
+	calls     *callJobs        // calls that moved to the background (tools_call_jobs.go)
+
+	// backgroundAfterHook, when above zero, replaces the addon's
+	// background_after_minutes. Tests set it; it is not a setting.
+	backgroundAfterHook time.Duration
 }
 
 // New creates a new MCP server with the given config and registers its tools.
@@ -32,6 +37,7 @@ func New(config Config) *Server {
 		launcher: launcher,
 		fc:       newConnector(config.FreeCAD, config.Version, launcher),
 		jobs:     headless.NewJobs(),
+		calls:    newCallJobs(),
 		mcpServer: mcp.NewServer(
 			&mcp.Implementation{
 				Name:    "freecad",
@@ -63,7 +69,9 @@ func New(config Config) *Server {
 	srv.registerStatusTools()
 	srv.registerPrompts()
 	srv.setRemoteTools(initialRemoteTools(config.FreeCAD))
-	srv.mcpServer.AddReceivingMiddleware(invalidArguments, srv.sessionIdentity)
+	// The first is outermost: the background wrapper runs inside the session
+	// identity, so the call it detaches keeps it.
+	srv.mcpServer.AddReceivingMiddleware(invalidArguments, srv.sessionIdentity, srv.backgroundLongCalls)
 
 	return srv
 }

@@ -664,13 +664,7 @@ func (c *connector) probe(ctx context.Context) probeResult {
 		// Adopt the run budgets and version notice from the status this call
 		// already fetched, instead of a second get_rpc_status round trip
 		// (what CheckAddonVersion would otherwise make).
-		ceiling := freecad.DefaultMaxExecuteCodeTime
-		if f, ok := freecad.IsBudget(m["execute_code_timeout"], ceiling); ok {
-			conn.ExecuteCodeTimeout = f
-		}
-		if f, ok := freecad.IsBudget(m["max_execute_code_timeout"], ceiling); ok {
-			conn.MaxExecuteCodeTimeout = f
-		}
+		conn.AdoptBudgets(m)
 		c.commitConnection(conn, freecad.AddonVersionWarning(m, c.version), identityMismatchWarning(c.settings.Host, m))
 	}
 	c.recordStatus(m)

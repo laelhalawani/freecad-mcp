@@ -19,6 +19,8 @@ const (
 	KeyAuthToken      = "auth_token"              // string, default "" (no password)
 	KeySessionTimeout = "session_timeout_minutes" // int, 1 to 1440, default 30
 	KeyListenerPort   = "listener_port"           // int, 1 to 65535, default 9876
+	// KeyBackgroundAfter is a general setting, not a remote access one.
+	KeyBackgroundAfter = "background_after_minutes" // int, 1 to 1440, default 30
 )
 
 // Defaults and ranges of the remote access settings.
@@ -29,6 +31,36 @@ const (
 	MaxSessionTimeoutMinutes     = 1440
 	DefaultListenerPort          = 9876
 )
+
+// Default and range of the background limit: minutes a call may keep the
+// agent waiting before the MCP server hands it a job id to poll instead.
+const (
+	DefaultBackgroundAfterMinutes = 30
+	MinBackgroundAfterMinutes     = 1
+	MaxBackgroundAfterMinutes     = 1440
+)
+
+// GeneralSettings are the settings of one FreeCAD user data directory that
+// are not about remote access, with defaults for keys that are missing or out
+// of range.
+type GeneralSettings struct {
+	BackgroundAfterMinutes int
+}
+
+// ReadGeneralSettings reads the general settings of t. A missing file gives
+// the defaults; a file that is not a JSON object is an error; a key that is
+// missing, of the wrong type or out of range takes its default.
+func ReadGeneralSettings(t Target) (GeneralSettings, error) {
+	s := GeneralSettings{BackgroundAfterMinutes: DefaultBackgroundAfterMinutes}
+	values, err := readSettings(SettingsPath(t))
+	if err != nil {
+		return s, err
+	}
+	if v, ok := wholeNumber(values[KeyBackgroundAfter]); ok && v >= MinBackgroundAfterMinutes && v <= MaxBackgroundAfterMinutes {
+		s.BackgroundAfterMinutes = v
+	}
+	return s, nil
+}
 
 // RemoteSettings are the remote access settings of one FreeCAD user data
 // directory, with defaults for keys that are missing or out of range.

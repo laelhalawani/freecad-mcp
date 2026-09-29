@@ -2,6 +2,13 @@
 
 Use a tool when one exists. Use code only for what no tool covers.
 
+## Scripts
+
+- Build in small steps: one part or one feature per call. Print progress.
+- A script longer than about 30 lines goes in a .py file. Write it with your own file tools and run it with path instead of code. To fix it, edit the file and run it again. Never send the whole script again.
+- execute_code and execute_code_async read path on the computer running FreeCAD. With remote access that may not be your computer: then pass code instead. execute_code_headless reads path on the computer running this MCP server.
+- A call that runs longer than the limit (30 minutes unless the user sets another) moves to the background and returns a job_id starting with call-. Poll get_async_status with it every minute or two. When the call ends, it returns the call's own reply. FreeCAD cannot stop such a call: cancel_job refuses it.
+
 ## execute_code
 
 - Runs Python on FreeCAD's GUI thread. FreeCAD, FreeCADGui and the documents are available.
@@ -26,7 +33,7 @@ Use a tool when one exists. Use code only for what no tool covers.
 - After it saves a file that is open in FreeCAD, call reload_document.
 - A script that may take minutes runs in the background: pass background true, or a timeout over 120 seconds. The call returns a job_id at once and the output streams to a file. Call get_async_status with the job_id every 30 to 60 seconds: it reports running or finished, the exit code, the elapsed seconds and the last 200 lines of output. Pass cancel true to stop the job. A finished job's output file is removed after you read it.
 - Print progress in a long script, so get_async_status shows how far it got. Keep foreground calls short.
-- A failed script still returns everything it printed before the error, then the traceback. The script runs as __main__ with __file__ set to a temporary file that is deleted afterwards, so do not look for files beside it.
+- A failed script still returns everything it printed before the error, then the traceback. The script runs as __main__ with __file__ set to its own path. Code you pass runs from a temporary file that is deleted afterwards, so do not look for files beside it; a script you pass as path stays where it is.
 
 ## Printable threads
 

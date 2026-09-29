@@ -43,6 +43,7 @@ Rules for every call:
 - Use the object name each reply returns; FreeCAD may rename (Box001).
 - Paths are on the computer running FreeCAD; nothing is transferred.
 - Use execute_code only for what no tool covers.
+- A call that runs past the user's background limit returns a job_id starting with call-: poll get_async_status with it.
 - With remote access, your first call claims FreeCAD for you: save, then call release_session or close_freecad when you stop.`
 
 // toolText is the text of one tool.
@@ -117,6 +118,10 @@ const (
 	readPathText = "absolute path of the file on the computer running FreeCAD"
 	objPropsText = `properties. Lengths in mm and angles in degrees may be numbers; other quantities are strings with a unit ("100 N", "210 GPa"): a bare Force 100 is 0.1 N. A string starting with "=" is an expression ("=Params.h"); "=" alone removes it. Links take object names: "Box" or ["Box", "Cylinder"]. References: a list of {"object_name": "Box", "face": "Face1"}, {"object_name": "Box", "faces": ["Face1", "Face2"]}, ["Box", "Face1"] or ["Box", ["Face1", "Face2"]]; names from list_subelements. Placement: {"Base": {"x": 0, "y": 0, "z": 0}, "Rotation": {"Axis": {"x": 0, "y": 0, "z": 1}, "Angle": 45}}; one part: "Placement.Base.z": 5 or "=Params.h". Color: {"ViewObject": {"ShapeColor": [0.8, 0.2, 0.2, 1]}}.`
 )
+
+// pathText is the description of the path parameter of execute_code and
+// execute_code_async.
+const pathText = "absolute path of a .py file on the computer running FreeCAD, run instead of code. Pass exactly one of code and path"
 
 // noScreenshotText replaces include_screenshot's shared text on the read-only
 // tools that default to none.
@@ -401,9 +406,10 @@ FEM: create Fem::AnalysisPython first; pass analysis_name for its material, cons
 
 	// Code.
 	"execute_code": {
-		Description: `Run Python in FreeCAD's GUI thread and return what it prints; FreeCAD, FreeCADGui and the documents are available. Use it only for what no other tool covers, and only for quick changes: it freezes FreeCAD while it runs. Work that may take more than a few seconds (booleans or distances between complex parts, threads, fillets, meshing) goes to execute_code_headless. It has a time budget to start and another to run (90 s each by default); pass timeout for slower work. Use execute_code_async for long pure-geometry work on shapes already fetched. File paths are on the computer running FreeCAD. Set include_screenshot false for code that does not change the model.`,
+		Description: `Run Python in FreeCAD's GUI thread and return what it prints; FreeCAD, FreeCADGui and the documents are available. Use it only for what no other tool covers, and only for quick changes: it freezes FreeCAD while it runs. Work that may take more than a few seconds (booleans or distances between complex parts, threads, fillets, meshing) goes to execute_code_headless. It has a time budget to start and another to run (90 s each by default); pass timeout for slower work. Use execute_code_async for long pure-geometry work on shapes already fetched. A script longer than about 30 lines goes in a .py file, run with path. File paths, path included, are on the computer running FreeCAD. Set include_screenshot false for code that does not change the model.`,
 		Params: map[string]string{
-			"code":    "Python code; print what you need back",
+			"code":    "Python code; print what you need back. Pass exactly one of code and path",
+			"path":    pathText,
 			"timeout": "seconds to wait to start and again to run (default: the addon's budget, 90 unless it sets another)",
 		},
 	},
@@ -414,27 +420,29 @@ FEM: create Fem::AnalysisPython first; pass analysis_name for its material, cons
         obj.Shape = fused
         doc.recompute()
     commit(apply)
-Scripts share one namespace across calls. Fuse many additions together first, then apply one boolean to the heavy shape. File paths are on the computer running FreeCAD.`,
+Scripts share one namespace across calls. Fuse many additions together first, then apply one boolean to the heavy shape. File paths, path included, are on the computer running FreeCAD.`,
 		Params: map[string]string{
-			"code": "background-safe Python; send every document or view write through commit(fn)",
+			"code": "background-safe Python; send every document or view write through commit(fn). Pass exactly one of code and path",
+			"path": pathText,
 		},
 	},
 	"execute_code_headless": {
-		Description: `Run a Python script in a separate freecadcmd process without GUI, so an OpenCascade crash kills only that process; use it for helical threads, lofts, sweeps, many-tool booleans and long rebuilds. It runs on the computer running this MCP server, not on the computer running FreeCAD, and shares nothing with execute_code: import FreeCAD and Part, open files with FreeCAD.openDocument(path), save with doc.save() or Shape.exportBrep(), print progress. __file__ is the script's path. A failed script still returns everything it printed, then the traceback. A script that may take minutes runs in the background: the call returns a job_id at once and get_async_status reports it. After it saves an .FCStd open in the GUI, call reload_document.`,
+		Description: `Run a Python script in a separate freecadcmd process without GUI, so an OpenCascade crash kills only that process; use it for helical threads, lofts, sweeps, many-tool booleans and long rebuilds. It runs on the computer running this MCP server, not on the computer running FreeCAD, and shares nothing with execute_code: import FreeCAD and Part, open files with FreeCAD.openDocument(path), save with doc.save() or Shape.exportBrep(), print progress. __file__ is the script's path. Its path parameter is a file on that same computer. A failed script still returns everything it printed, then the traceback. A script that may take minutes runs in the background: the call returns a job_id at once and get_async_status reports it. After it saves an .FCStd open in the GUI, call reload_document.`,
 		Params: map[string]string{
-			"code":       "complete Python script for freecadcmd",
+			"code":       "complete Python script for freecadcmd. Pass exactly one of code and path",
+			"path":       "absolute path of a .py file on the computer running this MCP server, run where it is instead of code. Pass exactly one of code and path",
 			"timeout":    "seconds before the process is killed; partial output is kept; omitted: 600 s in the foreground; a timeout over 120 runs in the background unless background is false",
 			"background": "true: return a job_id at once and run the script in the background, its output streaming to a file; poll get_async_status; false: wait for the script whatever the timeout (default: background only for a timeout over 120)",
 		},
 	},
 	"get_async_status": {
-		Description: `Report background jobs: execute_code_async jobs (running, done or failed, with error and traceback) and execute_code_headless jobs (running, finished or cancelled, exit code, elapsed seconds, the last 200 lines of output). Answers while a job runs. Async jobs are kept until FreeCAD exits; headless jobs until the MCP server exits or a day after they finish. Stop a headless job with cancel_job.`,
+		Description: `Report background jobs: execute_code_async jobs (running, done or failed, with error and traceback) and execute_code_headless jobs (running, finished or cancelled, exit code, elapsed seconds, the last 200 lines of output). Answers while a job runs. Async jobs are kept until FreeCAD exits; headless jobs until the MCP server exits or a day after they finish. Stop a headless job with cancel_job. A call- job is a call that ran past the background limit: it returns that call's own reply when it ends.`,
 		Params: map[string]string{
-			"job_id": "job_id from execute_code_async or execute_code_headless (default: all running jobs and up to 20 recent ones)",
+			"job_id": "job_id from execute_code_async, execute_code_headless or a call that moved to the background (default: all running jobs and up to 20 recent ones)",
 		},
 	},
 	"cancel_job": {
-		Description: `Stop a background execute_code_headless job: its process and everything it started end. The reply is the job's status with its last output. A job that had already finished is reported as finished, with its exit code.`,
+		Description: `Stop a background execute_code_headless job: its process and everything it started end. The reply is the job's status with its last output. A job that had already finished is reported as finished, with its exit code. A call- job cannot be stopped: FreeCAD ends it when the work finishes.`,
 		Params: map[string]string{
 			"job_id": "job_id of a headless job, from execute_code_headless or get_async_status",
 		},
