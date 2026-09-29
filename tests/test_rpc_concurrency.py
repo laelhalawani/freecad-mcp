@@ -159,7 +159,9 @@ def test_stopping_does_not_wait_for_an_in_flight_request() -> None:
         server.shutdown()
         loop.join(timeout=5)
         server.server_close()
-        assert time.monotonic() - started < 2.0
+        # The request is held for 30 s: stopping that does not wait for it is
+        # far under that, however loaded the machine is.
+        assert time.monotonic() - started < 10.0
         assert not loop.is_alive()
     finally:
         interface.release.set()

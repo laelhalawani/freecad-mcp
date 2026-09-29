@@ -1,6 +1,8 @@
 """Tick guards may delay GUI tasks, but must not wedge dispatch or hide why."""
 
-from test_gui_dispatch import FakeApplication, ThreadedWaker, load_gui_dispatch
+import types
+
+from test_gui_dispatch import FakeApplication, load_gui_dispatch
 
 
 class HeldMouse(FakeApplication):
@@ -59,14 +61,16 @@ def test_stale_mouse_state_cannot_wedge_dispatch() -> None:
 def test_queue_timeout_names_the_guard_that_held_the_call() -> None:
     with load_gui_dispatch() as gui_dispatch:
         gui_dispatch.QtWidgets.QApplication = ModalOpen
-        waker = ThreadedWaker(gui_dispatch)
-        gui_dispatch._waker = waker
+        # The tick runs inside the wake, so the guard is known before the call
+        # starts waiting: no thread has to be scheduled within the timeout.
+        gui_dispatch._waker = types.SimpleNamespace(
+            wake=lambda: gui_dispatch.process_gui_tasks(reschedule=False)
+        )
         ran: list[bool] = []
 
         result = gui_dispatch.dispatch_to_gui(
             lambda: ran.append(True), timeout=0.2, operation_name="execute_code"
         )
-        waker.join()
 
         assert result["success"] is False
         assert "waiting for 'execute_code' to start" in result["error"]

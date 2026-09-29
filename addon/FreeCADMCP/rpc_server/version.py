@@ -2,7 +2,7 @@
 
 # The freecad-mcp binary embeds this addon, so the two always ship together.
 # Keep in step with <version> in ../package.xml.
-__version__ = "0.4.6"
+__version__ = "0.4.7"
 
 # Bump when the RPC contract changes in a way the MCP server must know about:
 # a method or parameter is added or removed, or a response shape or meaning

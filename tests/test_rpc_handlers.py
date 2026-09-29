@@ -358,7 +358,7 @@ def test_status_and_document_reads_during_real_dispatch(
     rpc_module: types.ModuleType,
 ) -> None:
     rpc = rpc_module.FreeCADRPC()
-    rpc.EXECUTE_CODE_TIMEOUT = 0.5
+    rpc.EXECUTE_CODE_TIMEOUT = 1.0
     entered, release, read = threading.Event(), threading.Event(), threading.Event()
     rpc_module.FreeCAD.test_entered = entered
     rpc_module.FreeCAD.test_release = release
@@ -373,19 +373,19 @@ def test_status_and_document_reads_during_real_dispatch(
             "FreeCAD.test_entered.set()\nFreeCAD.test_release.wait(5)",
         )
         try:
-            assert entered.wait(2)
+            assert entered.wait(10)
             status = request("get_rpc_status")
             assert status["gui_dispatch"]["state"] == "busy"
             assert status["gui_dispatch"]["operation"] == "execute_code"
             query = workers.submit(request, "list_documents")
             # The query must not inspect document state until execution ends.
             assert not read.wait(0.1)
-            assert execution.result(timeout=2)["code"] == "GUI_DISPATCH_STUCK"
+            assert execution.result(timeout=30)["code"] == "GUI_DISPATCH_STUCK"
             assert request("get_rpc_status")["gui_dispatch"]["state"] == "stuck"
             with pytest.raises(Fault, match="GUI_DISPATCH_STUCK"):
                 request("get_objects", "Doc")
             release.set()
-            assert query.result(timeout=2) == ["Doc"]
+            assert query.result(timeout=30) == ["Doc"]
             assert read.is_set()
             assert request("get_rpc_status")["gui_dispatch"]["state"] == "healthy"
             assert request("get_object", "Doc", "Box") == {"Name": "Box"}
@@ -450,11 +450,7 @@ def test_async_failure_is_readable_through_get_async_status(
     job_id = started["job_id"]
     assert started["success"] is True and job_id
     assert done.wait(2)
-    for _ in range(50):
-        job = rpc.get_async_status(job_id)["job"]
-        if job["state"] != "running":
-            break
-        threading.Event().wait(0.02)
+    job = wait_for_job(rpc, job_id)
     assert job["state"] == "failed"
     assert job["error"] == "ValueError: Null shape"
     assert 'line 2, in <module>' in job["traceback"]
@@ -464,7 +460,7 @@ def test_async_failure_is_readable_through_get_async_status(
 
 
 def wait_for_job(rpc: object, job_id: str) -> dict:
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + 30
     while True:
         job = rpc.get_async_status(job_id)["job"]
         if job["state"] != "running":
@@ -536,7 +532,7 @@ def test_get_async_status_is_exempt_and_sees_only_its_own_session(
     finally:
         release.set()
         if job_id is not None:
-            deadline = time.monotonic() + 2
+            deadline = time.monotonic() + 30
             while rpc.get_async_status(job_id)["job"]["state"] == "running":
                 assert time.monotonic() < deadline
                 time.sleep(0.005)

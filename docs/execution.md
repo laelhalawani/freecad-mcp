@@ -122,16 +122,18 @@ signal; the tool reports it by name, for example `EXCEPTION_ACCESS_VIOLATION`.
 
 ## Agent banner
 
-While an agent works, FreeCAD shows a banner along the top edge of the 3D view
-area: the agent's name (the lock holder's, with remote access on), what it is
-doing in plain words, how long it has run, and "An agent is changing this
-model; please don't edit until it finishes." It never blocks the mouse or the
+While an agent works, FreeCAD shows a compact, slightly translucent two-line
+banner along the top edge of the 3D view area: the agent's name (the lock
+holder's, with remote access on), what it is doing in plain words and how long
+it has run, then "An agent is changing this model; please don't edit until it
+finishes." It never blocks the mouse or the
 keyboard and takes no focus. It appears when a GUI-thread call has run about a
 second, or at once, before the call starts, for the calls that may block the
 GUI thread for long (`execute_code`, `recompute_document`, `run_fem_analysis`,
 `import_file`, `export_document`, `repair_mesh`, `mesh_to_solid`,
 `solid_to_mesh`, `analyze_mesh`, `check_printability`, `open_document` and
-`reload_document`), which add "FreeCAD may not respond until this finishes".
+`reload_document`), which put "FreeCAD may not respond." first on the second
+line. Each line is cut with an ellipsis at the end when the view is too narrow.
 Because these draw the banner before they know how long they will take, even a
 short one shows it briefly and starts about 80 ms later. The banner takes its
 background from the colour FreeCAD's main window is drawn in, with dark or light
