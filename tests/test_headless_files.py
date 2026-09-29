@@ -166,15 +166,34 @@ def test_a_genuine_failure_is_a_developer_warning_not_a_popup(headless_files, tm
 @pytest.fixture
 def camera_calls(monkeypatch: pytest.MonkeyPatch) -> list:
     """The camera side of the module, recording what is asked of it."""
-    calls: list = []
+    class Calls(list):
+        # The sizes the view reports, one per check; the last one repeats.
+        sizes = [(1000, 700)]
+        # The view's camera: FreeCAD's text (which carries the near and far
+        # distances and the aspect ratio), its orientation and position, and
+        # whether set_view runs a mode.
+        camera = "camera 0"
+        orientation = (0.0, 0.0, 0.0, 1.0)
+        position = (0.0, 0.0, 10.0)
+        running = False
+
+    calls = Calls()
     view = types.SimpleNamespace(
-        isAnimationEnabled=lambda: True, setAnimationEnabled=lambda on: calls.append(("animation", on))
+        isAnimationEnabled=lambda: True,
+        setAnimationEnabled=lambda on: calls.append(("animation", on)),
+        getSize=lambda: calls.sizes.pop(0) if len(calls.sizes) > 1 else calls.sizes[0],
+        getCamera=lambda: calls.camera,
     )
     view_mode = types.SimpleNamespace(
         import_coin=lambda: None,
         drawn_objects=lambda _doc: ["drawn"],
         fit_pose=lambda _view, objects: calls.append(("fit", objects)) or "pose",
         apply_pose=lambda _view, pose: calls.append(("apply", pose)),
+        status=lambda _name: {"running": calls.running},
+        camera_node=lambda _view: types.SimpleNamespace(
+            orientation=types.SimpleNamespace(getValue=lambda: types.SimpleNamespace(getValue=lambda: calls.orientation)),
+            position=types.SimpleNamespace(getValue=lambda: types.SimpleNamespace(getValue=lambda: calls.position)),
+        ),
     )
     view_manager = types.SimpleNamespace(
         _document_capture_view=lambda _gui_doc: view,
@@ -204,6 +223,185 @@ def test_a_file_with_gui_data_keeps_its_saved_camera(headless_files, camera_call
     doc = types.SimpleNamespace(Name="h", Objects=objects(gui_doc))
     module.show_stored_visibility(doc, write_fcstd(tmp_path / "gui.FCStd", gui_data=True))
     assert camera_calls == []
+
+
+class Watched:
+    """The observer installed against a stub FreeCAD, with the Qt timer replaced by a queue
+    the test drains: what FreeCAD does when a document opens, without FreeCAD."""
+
+    def __init__(self, module, gui_doc, tmp_path: Path) -> None:
+        self.module, self.gui_doc, self.tmp_path = module, gui_doc, tmp_path
+        self.queue: list = []
+        self.docs: dict = {}
+        self.freecad = sys.modules["FreeCAD"]
+        self.freecad.getDocument = lambda name: self.docs[name]
+        self.freecad.addDocumentObserver = lambda observer: setattr(self, "observer", observer)
+        module._later = lambda _ms, callback: self.queue.append(callback)
+        module.install()
+
+    def open(self, name: str, *, gui_data: bool):
+        """A document FreeCAD opened from a file, and activated."""
+        path = write_fcstd(self.tmp_path / f"{name}.FCStd", gui_data=gui_data)
+        doc = types.SimpleNamespace(Name=name, FileName=path, Objects=objects(self.gui_doc))
+        self.docs[name] = doc
+        self.observer.slotActivateDocument(doc)
+        return doc
+
+    def drain(self) -> None:
+        while self.queue:
+            self.queue.pop(0)()
+
+
+@pytest.fixture
+def watched(headless_files, camera_calls: list, tmp_path: Path) -> Watched:
+    module, gui_doc = headless_files
+    return Watched(module, gui_doc, tmp_path)
+
+
+def visible_names(doc) -> list[str]:
+    return [o.Name for o in doc.Objects if o.ViewObject.Visibility]
+
+
+def test_a_document_opened_by_anything_else_is_restored_once_its_view_is_laid_out(
+    watched: Watched, camera_calls: list
+) -> None:
+    doc = watched.open("h", gui_data=False)
+    assert visible_names(doc) == []  # nothing happens inside the call that opened it
+    watched.queue.pop(0)()
+    assert visible_names(doc) == ["Box", "NoFlag"]  # Hidden stores false, an Origin keeps its default
+    assert camera_calls == []  # the view is not known to be laid out yet
+    watched.drain()
+    assert camera_calls == [
+        ("animation", False), ("orient", "Isometric"), ("fit", ["drawn"]), ("apply", "pose"), ("animation", True),
+    ]
+    assert watched.gui_doc.Modified is False
+
+
+def test_the_observer_waits_until_the_view_size_settles(watched: Watched, camera_calls: list) -> None:
+    camera_calls.sizes[:] = [(640, 480), (900, 600), (1000, 700)]
+    watched.open("h", gui_data=False)
+    watched.drain()
+    # 640x480 and 900x600 are still changing; the framing came at 1000x700, read twice.
+    assert camera_calls.count(("apply", "pose")) == 1 and camera_calls.sizes == [(1000, 700)]
+
+
+def test_the_observer_frames_after_the_last_check_when_the_size_never_settles(
+    watched: Watched, camera_calls: list
+) -> None:
+    camera_calls.sizes[:] = [(i, i) for i in range(1, watched.module.LAYOUT_CHECKS + 5)]
+    watched.open("h", gui_data=False)
+    watched.drain()
+    assert camera_calls.count(("apply", "pose")) == 1
+
+
+def test_a_moved_camera_is_left_alone(watched: Watched, camera_calls: list) -> None:
+    for change in ({"orientation": (0.0, 0.7071, 0.0, 0.7071)}, {"position": (5.0, 0.0, 10.0)}):
+        camera_calls.orientation, camera_calls.position = (0.0, 0.0, 0.0, 1.0), (0.0, 0.0, 10.0)
+        doc = watched.open("h", gui_data=False)
+        watched.queue.pop(0)()
+        assert visible_names(doc) == ["Box", "NoFlag"]
+        for field, value in change.items():  # the person moved the view, or an agent set one
+            setattr(camera_calls, field, value)
+        watched.drain()
+        assert camera_calls == []
+        watched.observer.slotDeletedDocument(doc)
+        watched.queue.clear()
+
+
+def test_a_camera_that_only_freecad_touched_is_still_framed(watched: Watched, camera_calls: list) -> None:
+    doc = watched.open("h", gui_data=False)
+    watched.queue.pop(0)()
+    # Its text changes by itself (near, far, aspect ratio) on the first redraw and on a
+    # resize; orientation and position are the same to well under a millionth.
+    camera_calls.camera = "camera 0, nearDistance 1.5 farDistance 900 aspectRatio 2.1"
+    camera_calls.position = (0.0, 0.0, 10.0 + 1e-9)
+    watched.drain()
+    assert camera_calls.count(("apply", "pose")) == 1 and visible_names(doc) == ["Box", "NoFlag"]
+
+
+def test_a_set_view_between_the_open_and_the_restore_is_kept(watched: Watched, camera_calls: list) -> None:
+    doc = watched.open("h", gui_data=False)  # the pose is recorded as the document opens
+    camera_calls.orientation = (0.5, 0.5, 0.5, 0.5)  # set_view lands before the restore runs
+    watched.drain()
+    assert visible_names(doc) == ["Box", "NoFlag"] and camera_calls == []
+
+
+def test_a_running_orbit_or_tour_is_not_reframed(watched: Watched, camera_calls: list) -> None:
+    watched.open("h", gui_data=False)
+    watched.queue.pop(0)()
+    camera_calls.running = True
+    watched.drain()
+    assert camera_calls == []
+
+
+def test_an_object_the_person_hides_after_the_restore_stays_hidden(watched: Watched, camera_calls: list) -> None:
+    doc = watched.open("h", gui_data=False)
+    watched.drain()
+    assert visible_names(doc) == ["Box", "NoFlag"]
+    doc.Objects[0].ViewObject.Visibility = False
+    framed = list(camera_calls)
+    watched.observer.slotActivateDocument(doc)  # a tab switch, an activation
+    watched.drain()
+    assert visible_names(doc) == ["NoFlag"] and camera_calls == framed
+
+
+def test_a_failure_inside_the_observer_stays_quiet(watched: Watched, camera_calls: list) -> None:
+    printed = sys.modules["FreeCADGui"].printed
+    broken = types.SimpleNamespace(Name="b", Objects=[])  # no FileName: reading it raises
+    watched.docs["b"] = broken
+    watched.observer.slotActivateDocument(broken)
+    watched.drain()  # would raise into Qt's timer handler
+    # A view that cannot be measured fails the framing the same way.
+    doc = watched.open("h", gui_data=False)
+    watched.queue.pop(0)()
+    sys.modules["rpc_server.view_manager"]._document_capture_view = lambda _gui_doc: types.SimpleNamespace(
+        getCamera=lambda: camera_calls.camera, getSize=lambda: 1 / 0
+    )
+    watched.drain()
+    kinds = [kind for kind, _ in printed]
+    assert kinds and set(kinds) == {"PrintDeveloperWarning"}  # no PrintWarning, no PrintError
+    assert visible_names(doc) == ["Box", "NoFlag"] and camera_calls == []
+
+
+def test_a_document_with_gui_data_is_left_as_freecad_restored_it(watched: Watched, camera_calls: list) -> None:
+    doc = watched.open("g", gui_data=True)
+    watched.drain()
+    assert visible_names(doc) == [] and camera_calls == []
+    assert watched.gui_doc.Modified is False
+
+
+def test_open_document_and_the_observer_do_not_restore_twice(watched: Watched, camera_calls: list) -> None:
+    doc = watched.open("h", gui_data=False)  # FreeCAD activates it while open_document is still running
+    watched.module.show_stored_visibility(doc, doc.FileName)  # open_document's own restore
+    framed = list(camera_calls)
+    assert framed and visible_names(doc) == ["Box", "NoFlag"]
+    watched.drain()
+    assert camera_calls == framed
+    watched.observer.slotActivateDocument(doc)  # switching back to the tab later
+    assert watched.queue == []
+
+
+def test_a_document_opened_hidden_is_restored_when_it_gets_a_view(watched: Watched, camera_calls: list) -> None:
+    gui_document = sys.modules["FreeCADGui"].getDocument
+    sys.modules["FreeCADGui"].getDocument = lambda _name: (_ for _ in ()).throw(RuntimeError("no GUI document"))
+    doc = watched.open("h", gui_data=False)
+    watched.drain()
+    assert visible_names(doc) == [] and camera_calls == []
+    assert sys.modules["FreeCADGui"].printed == []
+    sys.modules["FreeCADGui"].getDocument = gui_document
+    watched.observer.slotActivateDocument(doc)
+    watched.drain()
+    assert visible_names(doc) == ["Box", "NoFlag"] and camera_calls
+
+
+def test_a_closed_document_that_opens_again_is_restored_again(watched: Watched, camera_calls: list) -> None:
+    doc = watched.open("h", gui_data=False)
+    watched.drain()
+    watched.observer.slotDeletedDocument(doc)
+    again = watched.open("h", gui_data=False)
+    watched.drain()
+    assert visible_names(again) == ["Box", "NoFlag"]
+    assert camera_calls.count(("apply", "pose")) == 2
 
 
 def test_a_file_with_gui_data_keeps_what_freecad_restored(headless_files, tmp_path: Path) -> None:
