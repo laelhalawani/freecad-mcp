@@ -9,6 +9,7 @@ package mcpserver
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -112,7 +113,54 @@ func sessionLabel(ss *mcp.ServerSession) string {
 	if err != nil || host == "" {
 		host = "unknown host"
 	}
-	return capRunes(stripUnprintable(name+" on "+host), maxLabelRunes)
+	tag := sessionTag(sessionID(ss))
+	return capRunes(stripUnprintable(name+" on "+host), maxLabelRunes-len(tag)) + tag
+}
+
+// sessionTag is the short stable tag ending a session's label (" #a3f2"): four
+// hex characters of the session id's hash, so two sessions of the same app on
+// the same computer, which share "<client name> on <hostname>", read
+// differently wherever the lock holder is shown.
+func sessionTag(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return " #" + hex.EncodeToString(sum[:2])
+}
+
+// upperFirst returns s with its first letter in upper case.
+func upperFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	r := []rune(s)
+	return strings.ToUpper(string(r[:1])) + string(r[1:])
+}
+
+// labelWithoutTag is label without its session tag, or label itself when it
+// has none (a client from before session tags).
+func labelWithoutTag(label string) string {
+	if i := strings.LastIndex(label, " #"); i >= 0 && len(label)-i == len(" #")+4 {
+		return label[:i]
+	}
+	return label
+}
+
+// holderWho words the holder of the lock when it is not the calling session
+// itself: "another session", with the holder's label, and this session's own
+// label when both share a name (two windows of one app on one computer, or
+// this agent before a restart), so the two can be told apart by their tags.
+// A label equal to the caller's own is from a client without session tags.
+func holderWho(holder, ownLabel string) string {
+	switch {
+	case ownLabel == "":
+		return fmt.Sprintf("another session (%s)", holder)
+	case holder == ownLabel:
+		return fmt.Sprintf("another session with the same name (%s), for example this agent before a restart, "+
+			"or another window of the same app", holder)
+	case labelWithoutTag(holder) == labelWithoutTag(ownLabel):
+		return fmt.Sprintf("another session (%s; this session is %s)", holder, ownLabel)
+	default:
+		return fmt.Sprintf("another session (%s)", holder)
+	}
 }
 
 // stripUnprintable removes every rune that is not printable (unicode.IsPrint)
@@ -277,29 +325,18 @@ const sessionReleasedHint = "Call get_rpc_status with {} to see who holds FreeCA
 // label is not necessarily this same agent from before a restart: the label
 // is "<client name> on <hostname>" (sessionLabel), so two windows of the
 // same AI client on one computer, or two agents the same client started,
-// share it too, and the label is sender-chosen besides (live-fixes review
-// L2). Naming it as "an earlier session of this agent" would tell agent 2,
+// share it too, and the label is sender-chosen besides. Naming it as "an earlier session of this agent" would tell agent 2,
 // wrongly, that it is reading its own stale hold while agent 1 is working
 // right now; say only that the name is shared, with both plausible reasons.
 func sessionInUseMessage(e *freecad.SessionInUseError, ownLabel string) string {
-	if ownLabel != "" && e.Holder == ownLabel {
-		who := fmt.Sprintf("another session with the same name (%s), for example this agent before a restart, "+
-			"or another window of the same app", e.Holder)
-		if e.Busy {
-			return fmt.Sprintf("FreeCAD is in use by %s, working now. It frees %s after that agent's last call, "+
-				"or sooner if it releases it. The person at the FreeCAD computer can also free it with Force "+
-				"release.", who, formatFreesDuration(e.FreesInSeconds))
-		}
-		return fmt.Sprintf("FreeCAD is in use by %s, idle %s. It frees in %s if that agent stays idle, or sooner "+
-			"if it releases it.", who, formatIdleDuration(e.IdleSeconds), formatFreesDuration(e.FreesInSeconds))
-	}
+	who := holderWho(e.Holder, ownLabel)
 	if e.Busy {
-		return fmt.Sprintf("FreeCAD is in use by another agent (%s, working now). It frees %s after that agent's "+
-			"last call, or sooner if it releases it. The person at the FreeCAD computer can also free it with "+
-			"Force release.", e.Holder, formatFreesDuration(e.FreesInSeconds))
+		return fmt.Sprintf("FreeCAD is in use by %s, working now. It frees %s after that agent's last call, "+
+			"or sooner if it releases it. The person at the FreeCAD computer can also free it with Force "+
+			"release.", who, formatFreesDuration(e.FreesInSeconds))
 	}
-	return fmt.Sprintf("FreeCAD is in use by another agent (%s, idle %s). It frees in %s if that agent stays "+
-		"idle, or sooner if it releases it.", e.Holder, formatIdleDuration(e.IdleSeconds), formatFreesDuration(e.FreesInSeconds))
+	return fmt.Sprintf("FreeCAD is in use by %s, idle %s. It frees in %s if that agent stays idle, or sooner "+
+		"if it releases it.", who, formatIdleDuration(e.IdleSeconds), formatFreesDuration(e.FreesInSeconds))
 }
 
 // callerLabel returns the label this call's own context carries

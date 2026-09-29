@@ -12,6 +12,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sairaph/freecad-mcp/internal/freecad"
 	"github.com/sairaph/freecad-mcp/internal/headless"
+	"github.com/sairaph/freecad-mcp/internal/remote"
+	"github.com/sairaph/freecad-mcp/internal/winsession"
 )
 
 // Server wraps the MCP server and the FreeCAD connection.
@@ -24,6 +26,14 @@ type Server struct {
 	jobs      *headless.Jobs   // background execute_code_headless jobs
 	calls     *callJobs        // calls that moved to the background (tools_call_jobs.go)
 
+	// sessionOf returns the Windows session of a process (winsession.Of);
+	// tests replace it.
+	sessionOf func(pid int) (uint32, error)
+	// desktopListener finds the freecad-mcp listener on this computer that
+	// start_freecad goes through when this process has no desktop
+	// (localListenerEndpoint); tests replace it.
+	desktopListener func(ctx context.Context, token string) remote.Endpoint
+
 	// backgroundAfterHook, when above zero, replaces the addon's
 	// background_after_minutes. Tests set it; it is not a setting.
 	backgroundAfterHook time.Duration
@@ -33,11 +43,13 @@ type Server struct {
 func New(config Config) *Server {
 	launcher := freecad.NewLauncher(config.FreeCAD)
 	srv := &Server{
-		config:   config,
-		launcher: launcher,
-		fc:       newConnector(config.FreeCAD, config.Version, launcher),
-		jobs:     headless.NewJobs(),
-		calls:    newCallJobs(),
+		config:          config,
+		launcher:        launcher,
+		fc:              newConnector(config.FreeCAD, config.Version, launcher),
+		jobs:            headless.NewJobs(),
+		calls:           newCallJobs(),
+		sessionOf:       winsession.Of,
+		desktopListener: localListenerEndpoint,
 		mcpServer: mcp.NewServer(
 			&mcp.Implementation{
 				Name:    "freecad",
@@ -70,8 +82,10 @@ func New(config Config) *Server {
 	srv.registerPrompts()
 	srv.setRemoteTools(initialRemoteTools(config.FreeCAD))
 	// The first is outermost: the background wrapper runs inside the session
-	// identity, so the call it detaches keeps it.
-	srv.mcpServer.AddReceivingMiddleware(invalidArguments, srv.sessionIdentity, srv.backgroundLongCalls)
+	// identity, so the call it detaches keeps it, and the error log is
+	// innermost, so it also sees the result of a call that moved to the
+	// background.
+	srv.mcpServer.AddReceivingMiddleware(invalidArguments, srv.sessionIdentity, srv.backgroundLongCalls, logToolErrors)
 
 	return srv
 }

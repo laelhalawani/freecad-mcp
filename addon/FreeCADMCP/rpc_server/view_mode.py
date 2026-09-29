@@ -26,6 +26,7 @@ from typing import Any
 import FreeCAD
 import FreeCADGui
 
+from rpc_server.agent_log import agent_warning
 from rpc_server.errors import INVALID_INPUT, NOT_FOUND, fail, tool_call
 
 # Timer interval and the longest step of progress one tick may take, so a stall
@@ -352,7 +353,7 @@ class _Engine:
             self.clock = now
             self.step(view, dt)
         except Exception as e:
-            FreeCAD.Console.PrintWarning(f"MCP RPC: {self.kind} stopped: {type(e).__name__}: {e}\n")
+            agent_warning(f"MCP RPC: {self.kind} stopped: {type(e).__name__}: {e}\n")
             stop_mode(self.doc_name, "error")
 
     def step(self, view: Any, dt: float) -> None:

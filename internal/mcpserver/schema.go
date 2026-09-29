@@ -18,6 +18,15 @@ var ViewNames = []any{"Isometric", "Front", "Top", "Right", "Back", "Left", "Bot
 
 const defaultView = "Isometric"
 
+// orientationNames returns ViewNames as strings, for withEnum.
+func orientationNames() []string {
+	names := make([]string, len(ViewNames))
+	for i, v := range ViewNames {
+		names[i] = v.(string)
+	}
+	return names
+}
+
 // maxViewSize bounds get_view's width and height, as the addon clamps them
 // (MAX_SCREENSHOT_EDGE in view_manager.py). A larger image rarely fits the
 // 1 MiB a reply carries; imageBudget checks the actual size.

@@ -152,6 +152,10 @@ func (s *Server) startFreeCAD(ctx context.Context, _ *mcp.CallToolRequest, in st
 		return render.ErrorResult(*rerr), nil, nil
 	}
 
+	if s.inHiddenSession() {
+		return s.startThroughDesktopListener(ctx, file, in.File)
+	}
+
 	state, err := s.launcher.Launch(ctx, file)
 	if err != nil {
 		if errors.Is(err, freecad.ErrLaunchUnavailable) {

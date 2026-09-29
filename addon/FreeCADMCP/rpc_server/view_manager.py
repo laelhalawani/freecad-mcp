@@ -10,6 +10,7 @@ import FreeCAD
 import FreeCADGui
 
 from rpc_server import view_mode
+from rpc_server.agent_log import agent_warning
 from rpc_server.errors import UNAVAILABLE, fail, tool_call
 from rpc_server.gui_dispatch import _flush_gui_events, dispatch_to_gui
 from rpc_server.lookup import require_document
@@ -106,7 +107,7 @@ def apply_view_orientation(view: Any, view_name: str) -> None:
         if cmd:
             FreeCADGui.runCommand(cmd)
         else:
-            FreeCAD.Console.PrintWarning(
+            agent_warning(
                 f"apply_view_orientation: no method or command for '{view_name}'\n"
             )
 
@@ -274,6 +275,36 @@ def _restore_selection(saved: list[tuple[str, str, tuple[str, ...]]]) -> None:
                 pass
 
 
+def _screenshot_reply(data: bytes, app_doc: Any) -> Any:
+    """The GUI task's result for captured PNG ``data``: the reply tuple, or the
+    error string get_active_screenshot turns into a Fault."""
+    if not data:
+        return "could not save the screenshot: FreeCAD wrote an empty image"
+    return ({
+        "success": True,
+        "image": base64.b64encode(data).decode("ascii"),
+        "document": app_doc.Name,
+    },)
+
+
+def _capture_current(view: Any, app_doc: Any, width: int | None, height: int | None) -> Any:
+    """Capture ``view`` exactly as it is on screen (view_name Current)."""
+    fd, tmp_path = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    try:
+        saved = save_active_screenshot(view, app_doc, tmp_path, CURRENT_VIEW, width, height)
+        if saved is not True:
+            return f"could not save the screenshot: {saved}"
+        with open(tmp_path, "rb") as f:
+            data = f.read()
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+    return _screenshot_reply(data, app_doc)
+
+
 def get_active_screenshot(
     view_name: str = "Isometric",
     width: int | None = None,
@@ -288,7 +319,8 @@ def get_active_screenshot(
     restoring the previously active MDI window afterwards) when it is not
     already the active one; not given, the active document's active view.
     Either way, the view's camera and FreeCAD's selection are restored to
-    what they were before the call.
+    what they were before the call; with ``view_name`` "Current" they are not
+    touched at all, and a running orbit or tour is captured as it runs.
     Returns ``{"success": True, "image", "document"}``, or a failure with a
     ``reason`` when there is nothing to capture (no_document,
     document_not_found, no_3d_view, not_3d_view). Any other failure, including
@@ -334,7 +366,7 @@ def get_active_screenshot(
                 view = None
             if view is None or not hasattr(view, "saveImage"):
                 view_type = type(view).__name__ if view is not None else "None"
-                FreeCAD.Console.PrintWarning(
+                agent_warning(
                     f"MCP RPC: view type '{view_type}' does not support screenshots\n"
                 )
                 return (_nothing_to_capture(
@@ -359,6 +391,20 @@ def get_active_screenshot(
                 _flush_gui_events()
             except Exception:
                 pass
+
+        if view_name == CURRENT_VIEW:
+            # As the user sees it: the camera, the selection, a running orbit
+            # or tour and the navigation animation are all left alone, so none
+            # of the pause and restore below applies. Only the window switch
+            # above is undone.
+            try:
+                return _capture_current(view, app_doc, width, height)
+            finally:
+                if switched_window and prev_window is not None:
+                    try:
+                        mw.setActiveWindow(prev_window)
+                    except Exception:
+                        pass
 
         # A camera mode running on this view (set_view's orbit or tour) is
         # paused for the capture, which moves the camera and puts it back, and
@@ -430,13 +476,7 @@ def get_active_screenshot(
                     mw.setActiveWindow(prev_window)
                 except Exception:
                     pass
-        if not data:
-            return "could not save the screenshot: FreeCAD wrote an empty image"
-        return ({
-            "success": True,
-            "image": base64.b64encode(data).decode("ascii"),
-            "document": app_doc.Name,
-        },)
+        return _screenshot_reply(data, app_doc)
 
     res = dispatch_to_gui(task, operation_name="get_active_screenshot")
     if isinstance(res, tuple):
@@ -447,5 +487,5 @@ def get_active_screenshot(
     else:
         code = "SCREENSHOT_FAILED"
         message = str(res)
-    FreeCAD.Console.PrintWarning(f"MCP RPC: screenshot failed: {message}\n")
+    agent_warning(f"MCP RPC: screenshot failed: {message}\n")
     raise Fault(1, f"{code}: {message}")

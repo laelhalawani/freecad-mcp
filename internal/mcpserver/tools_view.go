@@ -39,13 +39,25 @@ type partsFront struct {
 
 func (s *Server) registerViewTools() {
 	addTool(s.mcpServer, "get_view",
-		withRange(inputSchema[getViewInput](map[string]string{"view_name": `"Isometric"`}), 1, maxViewSize, "width", "height"), s.getView)
+		withEnum(withRange(inputSchema[getViewInput](map[string]string{"view_name": `"Isometric"`}), 1, maxViewSize, "width", "height"),
+			"view_name", append(orientationNames(), currentView)...), s.getView)
 	addTool(s.mcpServer, "insert_part_from_library", inputSchema[partInput](screenshotDefaults), s.insertPartFromLibrary)
 	addTool(s.mcpServer, "list_parts", inputSchema[struct{}](nil), s.listParts)
 	s.registerSetViewTool()
 }
 
+// currentView is the get_view view_name that captures the view exactly as it
+// is on screen (the addon's view_manager.CURRENT_VIEW).
+const currentView = "Current"
+
 func (s *Server) getView(ctx context.Context, _ *mcp.CallToolRequest, in getViewInput) (*mcp.CallToolResult, any, error) {
+	if viewString(in.ViewName) == currentView && in.FocusObject != nil && *in.FocusObject != "" {
+		return render.ErrorResult(render.Error{
+			Code:    render.CodeInvalidInput,
+			Message: "Current captures the view as it is; omit focus_object or pick an orientation.",
+			Hint:    "Call get_view again without focus_object, or with view_name Isometric (or another orientation) to frame that object.",
+		}), nil, nil
+	}
 	conn, err := s.fc.get(ctx)
 	if err != nil {
 		return failure(ctx, "get view", err, ""), nil, nil
@@ -94,6 +106,9 @@ func (s *Server) getView(ctx context.Context, _ *mcp.CallToolRequest, in getView
 	}
 	viewName := viewOrDefault(viewString(in.ViewName))
 	body := "Screenshot of the " + viewName + " view"
+	if viewName == currentView {
+		body = "Screenshot of the view as it is on screen"
+	}
 	if shot.Document != "" {
 		body += " of " + shot.Document
 	}

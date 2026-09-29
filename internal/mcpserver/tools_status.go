@@ -11,6 +11,7 @@ import (
 	"github.com/sairaph/freecad-mcp/internal/domain"
 	"github.com/sairaph/freecad-mcp/internal/freecad"
 	"github.com/sairaph/freecad-mcp/internal/procstat"
+	"github.com/sairaph/freecad-mcp/internal/winsession"
 	"github.com/sairaph/mcp-wizard/render"
 )
 
@@ -34,6 +35,9 @@ type statusFront struct {
 	// Hostname is the computer FreeCAD actually runs on (its own
 	// os.Hostname()), whenever the reply carries one (live check L11).
 	Hostname *string `yaml:"hostname,omitempty"`
+	// Desktop is "hidden" when FreeCAD runs in Windows session 0, which has no
+	// desktop; left out otherwise.
+	Desktop string `yaml:"desktop,omitempty"`
 	// CPUCores is how many cores FreeCAD's process used over a short window
 	// while its RPC server did not answer, and Busy whether that is enough to
 	// call it busy computing.
@@ -152,7 +156,15 @@ func (s *Server) getRPCStatus(ctx context.Context, _ *mcp.CallToolRequest, _ str
 		if hostname != "" {
 			summary = fmt.Sprintf("FreeCAD is running on %s and its RPC server answered.", hostname)
 		}
-		sections = append(sections, summary, jsonBlock(pr.status))
+		sections = append(sections, summary)
+		if s.hiddenDesktop(front.PID) {
+			front.Desktop = "hidden"
+			sections = append(sections, "FreeCAD runs in a hidden Windows session (started from an SSH or service "+
+				"session), so the user cannot see it. Next step: save; ask the user to start FreeCAD on their "+
+				"desktop, or to turn on sharing (`"+domain.BinaryName+" share --on`); then close_freecad when it "+
+				"is listed, and start_freecad.")
+		}
+		sections = append(sections, jsonBlock(pr.status))
 	default:
 		host := s.config.FreeCAD.Host
 		if s.fc.isListener(ctx) {
@@ -253,6 +265,18 @@ func (s *Server) getRPCStatus(ctx context.Context, _ *mcp.CallToolRequest, _ str
 	}
 
 	return s.withNotice(render.SuccessResult(front, strings.Join(sections, "\n\n"))), nil, nil
+}
+
+// hiddenDesktop reports whether the FreeCAD with process id pid runs in
+// Windows session 0, which has no desktop. It is false when FreeCAD is not on
+// this computer, when its pid is unknown or when the session cannot be read:
+// never a guess.
+func (s *Server) hiddenDesktop(pid *int) bool {
+	if pid == nil || s.sessionOf == nil || !domain.IsLoopbackHost(s.config.FreeCAD.Host) {
+		return false
+	}
+	id, err := s.sessionOf(*pid)
+	return err == nil && winsession.Hidden(id)
 }
 
 // fillDownState classifies why FreeCAD is unreachable (starting, unresponsive,

@@ -10,9 +10,11 @@ importing it registers the commands.
 """
 
 import json
+import socket
 import threading
 import urllib.error
 import urllib.request
+import xmlrpc.client
 
 import FreeCAD
 import FreeCADGui
@@ -105,15 +107,115 @@ def _probe_listener(port: int) -> None:
     ).start()
 
 
-def _report_server_command(message: str, error: bool = False) -> None:
-    """Show command feedback even when the Report View is closed."""
+def _report_server_command(message: str, error: bool = False, timeout_ms: int = 15000) -> None:
+    """Show command feedback even when the Report View is closed.
+
+    The status bar message disappears after ``timeout_ms``; 0 keeps it until
+    something else replaces it.
+    """
     printer = FreeCAD.Console.PrintError if error else FreeCAD.Console.PrintMessage
     printer(message + "\n")
     try:
-        FreeCADGui.getMainWindow().statusBar().showMessage(message, 15000)
+        FreeCADGui.getMainWindow().statusBar().showMessage(message, timeout_ms)
     except Exception:
         # Console feedback remains available if the main window is closing.
         pass
+
+
+# How long a FreeCAD that failed to take its RPC port waits for the one that
+# holds it to say who it is.
+_PEER_TIMEOUT_S = 1
+
+
+def _peer_status(port: int) -> dict | None:
+    """get_rpc_status of the freecad-mcp addon answering on 127.0.0.1:<port>,
+    or None when nothing answers it in time (another program, or an addon that
+    refuses this request).
+
+    Runs the HTTP request; the caller keeps this off the GUI thread.
+    """
+    headers = {"Content-Type": "text/xml"}
+    token = str(load_settings().get("auth_token", "") or "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/RPC2",
+        data=xmlrpc.client.dumps((), "get_rpc_status").encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with _NO_PROXY_OPENER.open(request, timeout=_PEER_TIMEOUT_S) as response:
+            params, _method = xmlrpc.client.loads(response.read())
+    except Exception:
+        return None
+    status = params[0] if params else None
+    return status if isinstance(status, dict) else None
+
+
+def port_taken_message(port: int, peer: dict | None) -> str:
+    """What this window's status bar says when its RPC server could not take
+    ``port``: which FreeCAD serves the agents instead when ``peer`` (its
+    get_rpc_status) names one running on this computer, else just that another
+    program holds the port."""
+    pid = peer.get("pid") if peer else None
+    try:
+        same_computer = bool(peer) and peer.get("hostname") == socket.gethostname()
+    except Exception:
+        same_computer = False
+    if same_computer and isinstance(pid, int):
+        return (
+            "Agents are not connected to this window: "
+            f"another FreeCAD (pid {pid}) already serves them on port {port}."
+        )
+    return f"Agents are not connected to this window: port {port} is in use by another program."
+
+
+class _PortTakenBridge(QtCore.QObject):
+    """Carries the peer probe's result back to the GUI thread, like
+    ``_ListenerProbeBridge``."""
+
+    _done = QtCore.Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self._done.connect(self._deliver, QtCore.Qt.QueuedConnection)
+
+    def report(self, message: str) -> None:
+        """Called from the worker thread once the probe finishes."""
+        self._done.emit(message)
+
+    def _deliver(self, message: str) -> None:
+        # Runs on the GUI thread (QueuedConnection).
+        try:
+            _pending_port_reports.remove(self)
+        except ValueError:
+            pass
+        _report_server_command(message, error=True, timeout_ms=0)
+
+
+# Keeps each bridge referenced until its signal is delivered, as
+# _pending_listener_probes does.
+_pending_port_reports: "list[_PortTakenBridge]" = []
+
+
+def report_port_taken(port: int, exc: BaseException) -> None:
+    """After a failed RPC server start on ``port``: when ``exc`` says the port
+    is in use, keep a message in this window's status bar (no timeout) that
+    agents are not connected to it, naming the FreeCAD that serves them when one
+    answers on that port. Any other failure is left to the caller's own report.
+
+    Called from the GUI thread; the probe of the port holder runs off it.
+    """
+    from rpc_server import rpc_server  # late import: avoids circular at module load
+
+    if not (isinstance(exc, OSError) and exc.errno in rpc_server._PORT_IN_USE_ERRNOS):
+        return
+    bridge = _PortTakenBridge()
+    _pending_port_reports.append(bridge)
+    threading.Thread(
+        target=lambda: bridge.report(port_taken_message(port, _peer_status(port))), daemon=True
+    ).start()
 
 
 def _read_settings_or_report() -> dict | None:

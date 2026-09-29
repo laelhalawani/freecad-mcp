@@ -49,6 +49,7 @@ import FreeCADGui
 from PySide import QtCore, QtWidgets
 
 from rpc_server import session_lock
+from rpc_server.agent_log import agent_error, agent_warning, quiet_notifications
 from rpc_server.dispatch_health import DispatchHealth, stuck_failure
 
 
@@ -116,7 +117,7 @@ def _warn_stale_mouse_once() -> None:
     if _stale_mouse_warned:
         return
     _stale_mouse_warned = True
-    FreeCAD.Console.PrintWarning(
+    agent_warning(
         f"MCP RPC: mouse buttons reported held for over {MOUSE_DEFER_MAX_S:.0f}s. "
         "Treating as stale Qt input state and processing queued tasks anyway.\n"
     )
@@ -277,7 +278,7 @@ def _drain_gui_tasks() -> None:
                 try:
                     task()
                 except BaseException as e:  # SystemExit/KeyboardInterrupt must not kill the drain
-                    FreeCAD.Console.PrintError(
+                    agent_error(
                         f"MCP RPC: unhandled exception in GUI task: {type(e).__name__}: {e}\n"
                         f"{traceback.format_exc()}"
                     )
@@ -399,9 +400,10 @@ def dispatch_to_gui(
         _overlay_begin(task_id, operation, agent_label)
         try:
             try:
-                res = task()
+                with quiet_notifications():
+                    res = task()
             except BaseException as e:  # sys.exit() in user code is a task error too
-                FreeCAD.Console.PrintError(
+                agent_error(
                     f"MCP RPC: GUI task raised {type(e).__name__}: {e}\n"
                     f"{traceback.format_exc()}"
                 )

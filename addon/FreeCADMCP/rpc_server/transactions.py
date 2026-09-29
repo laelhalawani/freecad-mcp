@@ -29,6 +29,8 @@ from typing import Any
 
 import FreeCAD
 
+from rpc_server.agent_log import agent_warning
+
 
 PREFIX = "MCP: "
 
@@ -184,6 +186,6 @@ def transaction(tool: str) -> Iterator[Transaction]:
             try:
                 FreeCAD.closeActiveTransaction(False, tx.id)
             except Exception as e:
-                FreeCAD.Console.PrintWarning(
+                agent_warning(
                     f"MCP RPC: could not commit transaction '{tx.name}': {type(e).__name__}: {e}\n"
                 )

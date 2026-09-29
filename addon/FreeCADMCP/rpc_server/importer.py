@@ -15,6 +15,7 @@ from typing import Any
 import FreeCAD
 
 from rpc_server import errors, gui_task
+from rpc_server.agent_log import agent_warning
 from rpc_server.errors import fail, tool_call
 from rpc_server.lookup import require_document
 from rpc_server.object_validation import invalid_objects_report
@@ -362,7 +363,7 @@ def import_file(
                 try:
                     FreeCAD.closeDocument(doc.Name)
                 except Exception as exc:
-                    FreeCAD.Console.PrintWarning(
+                    agent_warning(
                         f"MCP RPC: could not close empty import document "
                         f"'{doc.Name}': {type(exc).__name__}: {exc}\n"
                     )

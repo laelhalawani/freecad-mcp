@@ -23,6 +23,7 @@ from typing import Any
 import FreeCAD as App
 
 from rpc_server import gui_task, tessellation
+from rpc_server.agent_log import agent_warning
 from rpc_server.errors import (
     CONFLICT,
     FREECAD_ERROR,
@@ -414,7 +415,7 @@ def _export_step(objects: list, path: str, ext: str, opts: dict[str, Any]) -> No
                 try:
                     Part.setStaticValue("write.step.schema", restore_scheme)
                 except Exception as e:
-                    App.Console.PrintWarning(
+                    agent_warning(
                         "MCP RPC: could not restore the STEP schema preference to "
                         f"'{restore_scheme}': {type(e).__name__}: {e}\n"
                     )

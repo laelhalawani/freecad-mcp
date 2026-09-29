@@ -70,6 +70,22 @@ poll with `get_async_status` (see [code execution](execution.md#long-calls-move-
 `--user-data-dir <dir>` for a FreeCAD user data directory other than the first
 one found. Restart your AI client to use a changed value.
 
+## Failed tool calls
+
+Every failed tool call adds one line to `errors.log` in `~/.cache/freecad-mcp`:
+UTC time, session id, client label, tool, error code, message, hint and the
+call's arguments (each value cut to 200 characters; a token or password is
+never written). At 5 MB the file moves to `errors.log.1`, replacing the older
+copy. `freecad-mcp errors` prints the most recent entries, 50 by default;
+`--last N` changes that.
+
+## Error popups while an agent works
+
+FreeCAD's error and warning popups (the Notification Area) stay held back for
+as long as an agent's call or background job runs, which the agent banner
+shows; they come back when the last one ends. The messages are in the Report
+View meanwhile. Your notification preferences are never changed.
+
 ## Starting FreeCAD from your AI client
 
 The `start_freecad` tool starts FreeCAD's GUI on this machine when nothing
