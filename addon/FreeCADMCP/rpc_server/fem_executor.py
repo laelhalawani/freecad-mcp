@@ -6,6 +6,7 @@ import traceback
 import FreeCAD
 import ObjectsFem
 
+from rpc_server.agent_log import agent_warning
 from rpc_server.errors import INVALID_INPUT, NOT_FOUND, fail, tool_call
 from rpc_server.fem_loads import analysis_loads
 from rpc_server.transactions import active_document, transaction
@@ -103,7 +104,7 @@ def _colour_by_von_mises(analysis, result_obj, von_mises) -> dict:
             view.setNodeColorByScalars(node_numbers, list(von_mises))
         hidden = _hide_meshed_geometry(analysis)
     except Exception as e:
-        FreeCAD.Console.PrintWarning(f"MCP RPC: could not colour the FEM result: {type(e).__name__}: {e}\n")
+        agent_warning(f"MCP RPC: could not colour the FEM result: {type(e).__name__}: {e}\n")
         return {}
     return {
         "coloured": True,

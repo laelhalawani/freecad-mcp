@@ -131,13 +131,13 @@ const noScreenshotText = "return a screenshot of the 3D view (default false)"
 var toolTexts = map[string]toolText{
 	// Session and launch.
 	"start_freecad": {
-		Description: `Start FreeCAD with the MCP RPC server when it is not running, on this computer or on the shared FreeCAD computer this server is configured for. The reply returns at once: poll get_rpc_status every 3-5 s until rpc: reachable (about 15 s, longer on a first start; give up after 120 s). It launches nothing and reports already_running when FreeCAD answers, and refuses when another agent holds FreeCAD. Use open_document for a FreeCAD that already runs. When FreeCAD is not found, set FREECAD_MCP_FREECAD on the computer running FreeCAD.`,
+		Description: `Start FreeCAD with the MCP RPC server when it is not running, on this computer or on the shared FreeCAD computer this server is configured for. The reply returns at once: poll get_rpc_status every 3-5 s until rpc: reachable (about 15 s, longer on a first start; give up after 120 s). It launches nothing and reports already_running when FreeCAD answers, and refuses when another agent holds FreeCAD. Use open_document for a FreeCAD that already runs. From a Windows session without a desktop (an SSH login) it starts FreeCAD on the user's desktop through their freecad-mcp listener (sharing on), and refuses without one. When FreeCAD is not found, set FREECAD_MCP_FREECAD on the computer running FreeCAD.`,
 		Params: map[string]string{
 			"file": "absolute path of an .FCStd file on the computer running FreeCAD to open once started",
 		},
 	},
 	"get_rpc_status": {
-		Description: `Report FreeCAD's state without using its GUI thread, so it answers while FreeCAD starts, is busy or has exited: freecad (running, starting, not_running, exited, unresponsive), rpc (reachable, unreachable), who holds the session, version_check, a stuck GUI operation (gui_dispatch), and the open documents or the launch log tail. While freecad is unresponsive on this computer it samples the FreeCAD process: busy true with cpu_cores means FreeCAD is computing, so wait and poll again. Poll it after start_freecad and call it whenever another tool times out.`,
+		Description: `Report FreeCAD's state without using its GUI thread, so it answers while FreeCAD starts, is busy or has exited: freecad (running, starting, not_running, exited, unresponsive), rpc (reachable, unreachable), who holds the session, version_check, a stuck GUI operation (gui_dispatch), and the open documents or the launch log tail, and desktop hidden for a FreeCAD the user cannot see. While freecad is unresponsive on this computer it samples the FreeCAD process: busy true with cpu_cores means FreeCAD is computing, so wait and poll again. Poll it after start_freecad and call it whenever another tool times out.`,
 	},
 	"release_session": {
 		Description: `Free FreeCAD for other agents now instead of after the idle timeout. With remote access, your first call claims FreeCAD until you stay idle for the configured time; get_rpc_status shows the holder. Documents stay open and unsaved changes stay unsaved: call save_document first.`,
@@ -265,13 +265,13 @@ FEM: create Fem::AnalysisPython first; pass analysis_name for its material, cons
 		},
 	},
 	"get_view": {
-		Description: `Screenshot a document's 3D view from an orientation, leaving FreeCAD's camera and selection as they were. Use it after changes made without screenshots, or with focus_object to frame one object. Fails when the document has no 3D view (opened hidden) or, without doc_name, when the active window is not a 3D view.`,
+		Description: `Screenshot a document's 3D view from an orientation, leaving FreeCAD's camera and selection as they were. Use it after changes made without screenshots, or with focus_object to frame one object. view_name Current shows exactly what the user sees, including a running orbit or tour, and touches nothing. Fails when the document has no 3D view (opened hidden) or, without doc_name, when the active window is not a 3D view.`,
 		Params: map[string]string{
 			"doc_name":     "document to capture (default: the active document's active view)",
-			"focus_object": "object name to frame (default: fit all)",
+			"focus_object": "object name to frame (default: fit all); not with view_name Current",
 			"width":        "image width in pixels (default: the viewport's width; with width and height both omitted the longest edge is at most 1024)",
 			"height":       "image height in pixels (default: the viewport's height; with width and height both omitted the longest edge is at most 1024)",
-			"view_name":    "orientation (default Isometric)",
+			"view_name":    "orientation (default Isometric); Current captures the camera as it is, without re-framing",
 		},
 	},
 	"set_view": {

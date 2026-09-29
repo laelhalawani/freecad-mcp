@@ -44,6 +44,7 @@ Gui.addWorkbench(FreeCADMCPAddonWorkbench())
 
 
 def _auto_start_mcp():
+    port = None
     try:
         # FreeCAD runs this file with exec() inside a function
         # (Gui/FreeCADGuiInit.py, RunInitGuiPy): a plain exec() with no
@@ -67,7 +68,6 @@ def _auto_start_mcp():
         # could bind the default port before that macro runs, so the macro
         # would then report "already running" on the wrong port.
         port_env = os.environ.get("FREECAD_MCP_PORT", "").strip()
-        port = None
         if port_env:
             try:
                 parsed = int(port_env)
@@ -83,6 +83,12 @@ def _auto_start_mcp():
         FreeCAD.Console.PrintMessage(f"[MCP] Auto-start: {msg}\n")
     except Exception as e:
         FreeCAD.Console.PrintWarning(f"[MCP] Auto-start failed: {e}\n")
+        try:
+            from rpc_server import commands
+
+            commands.report_port_taken(port if port is not None else 9875, e)
+        except Exception:
+            pass
 
 
 from PySide import QtCore

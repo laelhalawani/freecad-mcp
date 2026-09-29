@@ -31,6 +31,7 @@ Use a tool when one exists. Use code only for what no tool covers.
 - Use it for helical threads, lofts, sweeps, booleans with many tools and long rebuilds.
 - It runs on the computer running this MCP server and shares nothing with execute_code. Import FreeCAD and Part, open files with FreeCAD.openDocument(path), save with doc.save() or Shape.exportBrep(), and print progress.
 - After it saves a file that is open in FreeCAD, call reload_document.
+- A headless script that builds a boolean (Cut, Fuse, Common) sets Visibility False on its inputs, so the file opens showing only the result.
 - A script that may take minutes runs in the background: pass background true, or a timeout over 120 seconds. The call returns a job_id at once and the output streams to a file. Call get_async_status with the job_id every 30 to 60 seconds: it reports running or finished, the exit code, the elapsed seconds and the last 200 lines of output. Pass cancel true to stop the job. A finished job's output file is removed after you read it.
 - Print progress in a long script, so get_async_status shows how far it got. Keep foreground calls short.
 - A failed script still returns everything it printed before the error, then the traceback. The script runs as __main__ with __file__ set to its own path. Code you pass runs from a temporary file that is deleted afterwards, so do not look for files beside it; a script you pass as path stays where it is.

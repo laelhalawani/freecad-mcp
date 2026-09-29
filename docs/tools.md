@@ -918,15 +918,21 @@ Get a screenshot of a document's 3D view from the given orientation.
 - `doc_name` (string, optional): the document whose 3D view to capture;
   default the active document's active view.
 - `view_name` (string, default `"Isometric"`): one of `Isometric`, `Front`,
-  `Top`, `Right`, `Back`, `Left`, `Bottom`, `Dimetric`, `Trimetric`.
+  `Top`, `Right`, `Back`, `Left`, `Bottom`, `Dimetric`, `Trimetric`, or
+  `Current`.
 - `width`, `height` (integers, optional, 1 to 2048 pixels).
 - `focus_object` (string, optional): an object to frame; default fit all
-  objects in the view.
+  objects in the view. Not allowed with `Current`.
+
+`Current` captures exactly what the user sees: the camera as it is, not
+re-framed, including a running `set_view` orbit or tour, which keeps running.
+Nothing is paused, moved or restored for it, and `focus_object` with it is
+refused (`invalid_input`).
 
 With `doc_name`, that document's 3D view is captured, switching to it and
 back if it is not already the active window; without it, the active
 document's active view is used. Either way, FreeCAD's camera and selection
-are left exactly as found afterwards. When `width` and `height` are both
+are left exactly as found afterwards (with `Current` they are never touched). When `width` and `height` are both
 omitted, the image has the viewport's size, scaled down to keep its aspect
 ratio when the longest edge exceeds 1024 pixels; with only one given, the
 other is the viewport's size in that direction. A reply carries at most 1
@@ -1007,6 +1013,14 @@ another FreeCAD window is already open without the RPC server, that FreeCAD
 receives the request instead (state `forwarded`). For a FreeCAD that already
 runs, use `open_document` instead of `file`.
 
+On Windows, a server that runs outside the user's desktop (started over SSH or
+as a service, in Windows session 0) never starts FreeCAD itself, since it
+would be invisible. It asks the freecad-mcp listener on the same computer,
+which runs on the user's desktop (`freecad-mcp share --on`), to start it; the
+address and password come from the addon's settings file. With no listener
+answering, the call fails with a message saying so; `execute_code_headless`
+works without a desktop.
+
 FreeCAD takes about 15 seconds to start, longer on its first start. The reply
 returns at once: call `get_rpc_status` every few seconds until it reports
 `rpc: reachable`, then continue with `list_documents`. A second call while a
@@ -1044,10 +1058,17 @@ down and remote access is known to be on regardless, since its actual state
 cannot be read without FreeCAD; left out entirely when that is not knowable
 either, because FreeCAD has not answered at all yet) and, while it is held,
 `session_holder`, `session_idle_seconds` and `session_frees_in_seconds`: who
-holds FreeCAD, or that this agent does, how long they have been idle, and
+holds FreeCAD (a label such as `claude-code on WILD-DESKTOP #a3f2`: the short
+tag ends every session's label, so two sessions of one app on one computer
+read differently, and a refusal says "another session" with both labels), or
+that this agent does, how long they have been idle, and
 when the claim frees on its own. See
 [multi-agent rules](remote-access.md#multi-agent-rules) for what claims it
 and how `release_session` and `close_freecad` manage it.
+On Windows, a reachable FreeCAD that runs in a hidden session (session 0,
+started from an SSH login or a service) adds `desktop: hidden` and says the
+user cannot see it: save, `close_freecad`, then `start_freecad`. The reply is
+unchanged otherwise.
 While reachable, the reply also names the computer FreeCAD actually runs on
 ("FreeCAD is running on \<hostname\> and its RPC server answered"). When this
 MCP server is configured to reach FreeCAD through `localhost` but another

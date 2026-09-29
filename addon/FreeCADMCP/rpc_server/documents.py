@@ -19,6 +19,7 @@ from rpc_server.errors import (
     tool_call,
 )
 from rpc_server.gui_task import resolve_timeout, run_on_gui
+from rpc_server.headless_files import show_stored_visibility
 from rpc_server.lookup import require_document
 from rpc_server.object_validation import invalid_objects_report
 from rpc_server.paths import require_absolute_path
@@ -243,6 +244,7 @@ def open_document(
             doc = FreeCAD.openDocument(expanded, hidden)
         except Exception as exc:
             return fail(FREECAD_ERROR, f"{type(exc).__name__}: {exc}")
+        show_stored_visibility(doc, expanded)
 
         if activate:
             # A document opened hidden has no view, and FreeCADGui's document

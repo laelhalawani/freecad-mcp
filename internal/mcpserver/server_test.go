@@ -21,10 +21,20 @@ import (
 // the remote-only tools are listed whenever this computer's own listener runs
 // (initialRemoteTools), which depends on the user's real remote access setup.
 // No test here needs the listener on; one that does can assign listenerRunning
-// for its own duration and restore it afterwards.
+// for its own duration and restore it afterwards. The home directory is a
+// temporary one too, so a failed tool call under test never writes to the
+// user's own error log.
 func TestMain(m *testing.M) {
 	listenerRunning = func() bool { return false }
-	os.Exit(m.Run())
+	home, err := os.MkdirTemp("", "freecad-mcp-test-home")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("USERPROFILE", home)
+	os.Setenv("HOME", home)
+	code := m.Run()
+	os.RemoveAll(home)
+	os.Exit(code)
 }
 
 var pngBytes = []byte("\x89PNG\r\n\x1a\nfake")

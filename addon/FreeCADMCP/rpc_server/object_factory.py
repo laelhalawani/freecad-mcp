@@ -14,6 +14,7 @@ object after recompute and report the actual object name.
 import FreeCAD
 import ObjectsFem
 
+from rpc_server.agent_log import agent_error, agent_warning
 from rpc_server.fem_loads import load_info
 from rpc_server.property_mapper import Object, quantity_values, set_object_property
 from rpc_server.object_validation import object_validity_error
@@ -253,7 +254,7 @@ def _creation_failure(doc: FreeCAD.Document, tx, existing: set, error: Exception
         try:
             tx.abort()
         except Exception as e:
-            FreeCAD.Console.PrintWarning(
+            agent_warning(
                 f"MCP RPC: could not abort transaction '{tx.name}': {type(e).__name__}: {e}\n"
             )
     for created in [o for o in doc.Objects if o.Name not in existing]:
@@ -281,7 +282,7 @@ def create_object_gui(doc_name: str, obj: Object):
     try:
         doc = FreeCAD.getDocument(doc_name)
     except Exception:
-        FreeCAD.Console.PrintError(f"Document '{doc_name}' not found.\n")
+        agent_error(f"Document '{doc_name}' not found.\n")
         return f"Document '{doc_name}' not found.\n"
     try:
         # active_document holds doc active for as long as its transaction can
@@ -317,7 +318,7 @@ def create_object_gui(doc_name: str, obj: Object):
         # the caller can fix it with update_object or remove it with
         # delete_object.
         if problem:
-            FreeCAD.Console.PrintError(problem + "\n")
+            agent_error(problem + "\n")
             return {
                 "success": False,
                 "object_name": created.Name,
@@ -338,12 +339,12 @@ def edit_object_gui(doc_name: str, obj: Object):
     try:
         doc = FreeCAD.getDocument(doc_name)
     except Exception:
-        FreeCAD.Console.PrintError(f"Document '{doc_name}' not found.\n")
+        agent_error(f"Document '{doc_name}' not found.\n")
         return f"Document '{doc_name}' not found.\n"
 
     obj_ins = doc.getObject(obj.name)
     if obj_ins is None:
-        FreeCAD.Console.PrintError(
+        agent_error(
             f"Object '{obj.name}' not found in document '{doc_name}'.\n"
         )
         return f"Object '{obj.name}' not found in document '{doc_name}'.\n"
@@ -360,7 +361,7 @@ def edit_object_gui(doc_name: str, obj: Object):
         # Commits above regardless of problem, so a property change that left
         # the object invalid stays applied; undo reverts it.
         if problem:
-            FreeCAD.Console.PrintError(problem + "\n")
+            agent_error(problem + "\n")
             return {
                 "success": False,
                 "object_name": obj_ins.Name,

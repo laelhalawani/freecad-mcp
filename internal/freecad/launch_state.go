@@ -14,6 +14,7 @@ import (
 
 	"github.com/sairaph/freecad-mcp/internal/domain"
 	"github.com/sairaph/freecad-mcp/internal/headless"
+	"github.com/sairaph/freecad-mcp/internal/procstat"
 )
 
 // Launch states. An empty State means this server has not launched FreeCAD.
@@ -87,6 +88,10 @@ type Launcher struct {
 	// value it captured, so an older launch's watcher cannot overwrite the
 	// state of a newer one it does not describe.
 	generation int
+	// adopted is true while state is a launch another process made (Adopt),
+	// whose pid alive checks (procstat.Alive when nil) instead of a watcher.
+	adopted bool
+	alive   func(pid int) bool
 }
 
 // NewLauncher returns a launcher for the FreeCAD the settings describe.
@@ -181,6 +186,7 @@ func (l *Launcher) Launch(ctx context.Context, file string) (LaunchState, error)
 	l.generation++
 	gen := l.generation
 	l.state = state
+	l.adopted = false
 	l.mu.Unlock()
 
 	exited := make(chan struct{})
@@ -243,10 +249,33 @@ func (l *Launcher) Launch(ctx context.Context, file string) (LaunchState, error)
 	}
 }
 
+// Adopt records a launch another freecad-mcp process on this computer made, so
+// State, LogTail and the state get_rpc_status reports follow it as they follow
+// a launch of this launcher's own. ls is that process's LaunchState; it is
+// not a child of this process, so State checks that its pid is still alive and
+// reports the launch as exited once it is not.
+func (l *Launcher) Adopt(ls LaunchState) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.generation++
+	l.state = ls
+	l.adopted = true
+}
+
 // State returns a snapshot of the launch state.
 func (l *Launcher) State() LaunchState {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.adopted && l.state.State == LaunchStarted && l.state.PID > 0 {
+		alive := l.alive
+		if alive == nil {
+			alive = procstat.Alive
+		}
+		if !alive(l.state.PID) {
+			l.state.State = LaunchExited
+			l.state.ExitedAt = time.Now()
+		}
+	}
 	return l.state
 }
 
@@ -351,7 +380,8 @@ func overrideEnv(env []string, key, value string) []string {
 // of its command line files (App/Application.cpp processFiles) whether this
 // launch started FreeCAD fresh or an already running FreeCAD received it by
 // single-instance forwarding (Gui/Application.cpp onlySingleInstance,
-// Gui/MainWindow.cpp processMessages).
+// Gui/MainWindow.cpp processMessages). When the port is taken it also says so
+// in FreeCAD's status bar (commands.report_port_taken).
 func startupMacro(port int) string {
 	return fmt.Sprintf(`# Written by freecad-mcp's start_freecad tool. Do not edit; it is
 # regenerated on every launch.
@@ -359,9 +389,14 @@ import FreeCAD
 
 try:
     from rpc_server import rpc_server
-    _mcp_msg = rpc_server.start_rpc_server(%d)
+    _mcp_msg = rpc_server.start_rpc_server(%[1]d)
 except Exception as _mcp_exc:
     FreeCAD.Console.PrintError(f"[MCP] start_freecad macro failed: {type(_mcp_exc).__name__}: {_mcp_exc}\n")
+    try:
+        from rpc_server import commands
+        commands.report_port_taken(%[1]d, _mcp_exc)
+    except Exception:
+        pass
 else:
     FreeCAD.Console.PrintMessage(f"[MCP] start_freecad: {_mcp_msg}\n")
 `, port)

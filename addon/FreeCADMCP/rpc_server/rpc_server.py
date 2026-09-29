@@ -20,6 +20,7 @@ from xmlrpc.server import resolve_dotted_attribute
 from PySide import QtCore
 
 from rpc_server import request_context, session_lock
+from rpc_server.agent_log import agent_error, quiet_notifications
 from rpc_server.commands import register_commands
 from rpc_server.errors import CONFLICT, FREECAD_ERROR, INVALID_INPUT, NOT_FOUND, fail, tool_call
 from rpc_server.fem_executor import run_fem_analysis as _run_fem_analysis
@@ -270,7 +271,7 @@ def _script_failure(error: Exception, script_path: str) -> dict[str, Any]:
         message = f"{type(error).__name__}: {error}"
         if line is not None:
             message += f" ({script_path}, line {line})"
-    FreeCAD.Console.PrintError(
+    agent_error(
         f"MCP RPC: GUI task raised {type(error).__name__}: {error}\n{traceback.format_exc()}"
     )
     return fail(FREECAD_ERROR, message)
@@ -624,7 +625,10 @@ class FreeCADRPC:
                 pass
             outcome: dict[str, Any] = {"state": "done"}
             try:
-                _exec_in_namespace(code, script_path)
+                # FreeCAD's own errors from this script (an OCC failure) stay
+                # out of the Notification Area, as for a GUI task.
+                with quiet_notifications():
+                    _exec_in_namespace(code, script_path)
             except BaseException as e:
                 # SystemExit/KeyboardInterrupt raised by a worker script must
                 # also finish its job record rather than leave it running.
@@ -650,7 +654,7 @@ class FreeCADRPC:
                     if outcome["state"] == "done":
                         FreeCAD.Console.PrintMessage("Async code execution completed.\n")
                     else:
-                        FreeCAD.Console.PrintError(
+                        agent_error(
                             f"Async code error ({job_id}): {outcome['error']}\n{outcome['traceback']}\n"
                         )
                 except Exception:
@@ -785,11 +789,11 @@ class FreeCADRPC:
             }
         if script_path is not None:
             # The file is the record of what ran; its traceback is already logged.
-            FreeCAD.Console.PrintError(f"Error executing script file {script_path}: {_err(res)['error']}\n")
+            agent_error(f"Error executing script file {script_path}: {_err(res)['error']}\n")
             return _err(res)
         # Log the offending code (truncated) to make errors traceable
         code_preview = code if len(code) <= 800 else code[:800] + "\n...(truncated)"
-        FreeCAD.Console.PrintError(
+        agent_error(
             f"Error executing Python code: {res}\n"
             f"--- code ---\n{code_preview}\n--- end ---\n"
         )
@@ -1026,7 +1030,7 @@ class FreeCADRPC:
         try:
             doc = FreeCAD.getDocument(doc_name)
         except Exception:
-            FreeCAD.Console.PrintError(f"Document '{doc_name}' not found.\n")
+            agent_error(f"Document '{doc_name}' not found.\n")
             return f"Document '{doc_name}' not found.\n"
 
         try:
@@ -1071,6 +1075,9 @@ class FreeCADRPC:
         # report the name it actually received.
         FreeCAD.closeDocument(doc_name)
         reopened = FreeCAD.openDocument(file_path)
+        from rpc_server.headless_files import show_stored_visibility
+
+        show_stored_visibility(reopened, file_path)
         FreeCAD.Console.PrintMessage(
             f"Document '{doc_name}' reloaded from '{file_path}' as "
             f"'{reopened.Name}' via RPC.\n"

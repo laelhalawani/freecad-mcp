@@ -83,22 +83,12 @@ func (s *Server) releaseSession(ctx context.Context, _ *mcp.CallToolRequest, _ s
 	case holder != "":
 		front.SessionLock = "other"
 		front.Holder = holder
-		if ownLabel := callerLabel(ctx); ownLabel != "" && holder == ownLabel {
-			// The addon only ever reports a holder different from the
-			// caller at all (a call from the session that already holds it
-			// just refreshes it instead), so an equal label is never the
-			// caller reading its own hold back; it shares the label with a
-			// genuinely different session, most likely this same agent
-			// from before a restart or another window of the same app,
-			// but possibly a concurrent one (live-fixes review L2, N2:
-			// worded the same way sessionInUseMessage, session.go, already
-			// is).
-			body = fmt.Sprintf("Another session with the same name (%s) holds FreeCAD, for example this agent "+
-				"before a restart, or another window of the same app; release_session only frees your own "+
-				"session.", holder)
-		} else {
-			body = fmt.Sprintf("Another agent (%s) holds FreeCAD; release_session only frees your own session.", holder)
-		}
+		// The addon only ever reports a holder different from the caller at
+		// all (a call from the session that already holds it just refreshes it
+		// instead), so holderWho words it as another session, the same
+		// wording sessionInUseMessage uses.
+		body = fmt.Sprintf("%s holds FreeCAD; release_session only frees your own session.",
+			upperFirst(holderWho(holder, callerLabel(ctx))))
 	default:
 		front.SessionLock = "free"
 		body = "This agent did not hold FreeCAD; nothing was released."
@@ -199,13 +189,8 @@ func sessionFront(ctx context.Context, status map[string]any) (sessionFields, st
 		if hasFrees {
 			fields.SessionFreesInSeconds = &frees
 		}
-		who := holder
-		if ownLabel := callerLabel(ctx); ownLabel != "" && holder == ownLabel {
-			// Same reasoning as release_session's own holder text above
-			// (live-fixes review L2, N2).
-			who = fmt.Sprintf("another session with the same name (%s), for example this agent before a "+
-				"restart, or another window of the same app", holder)
-		}
+		// Same wording as release_session's own holder text above.
+		who := holderWho(holder, callerLabel(ctx))
 		if boolField(session, "busy") {
 			state = fmt.Sprintf("FreeCAD is in use by %s, which is working now; it frees %d min after that "+
 				"agent's last call, unless it releases it earlier. The person at the FreeCAD computer can also "+

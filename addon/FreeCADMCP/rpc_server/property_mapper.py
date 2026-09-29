@@ -9,6 +9,8 @@ from typing import Any
 
 import FreeCAD
 
+from rpc_server.agent_log import agent_error
+
 
 @dataclass
 class Object:
@@ -294,7 +296,7 @@ def set_object_property(
                 setattr(obj, prop, val)
 
         except Exception as e:
-            FreeCAD.Console.PrintError(f"Property '{prop}' assignment error: {e}\n")
+            agent_error(f"Property '{prop}' assignment error: {e}\n")
             failures.append(f"{prop}: {e}")
 
     if failures:
