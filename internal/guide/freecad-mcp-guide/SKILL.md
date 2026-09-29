@@ -1,9 +1,9 @@
 ---
 name: freecad-mcp-guide
-description: Workflows and rules for the freecad MCP server's tools. Use when building or changing FreeCAD models through create_object and update_object, choosing faces or edges with list_subelements, setting values with units or expressions, setting up and running a FEM analysis, checking and exporting parts for 3D printing, working with files on the FreeCAD computer, or sharing one FreeCAD with other agents.
+description: Workflows and rules for the freecad MCP server's tools. Use when building or changing FreeCAD models through create_object and update_object, choosing faces or edges with list_subelements, setting values with units or expressions, setting up and running a FEM analysis, checking and exporting parts for 3D printing, designing printed fits, threads and clips for a print material such as PETG or PLA, working with files on the FreeCAD computer, or sharing one FreeCAD with other agents.
 metadata:
   generator: freecad-mcp
-  version: "0.4.4"
+  version: "0.4.5"
 ---
 
 # FreeCAD MCP guide
@@ -33,11 +33,12 @@ Call the tools of the freecad server by their bare names, such as create_object.
 ## Checklists
 
 Build a part:
-1. create_object for each solid, with Placement and dimensions in obj_properties.
-2. create_object for booleans such as Part::Cut with Base and Tool as object names.
-3. recompute_document after a series of changes. Fix each failed object with update_object.
-4. get_object to check values. get_view to look at the result.
-5. save_document_as for a new file, save_document for an existing one.
+1. For a part that will be 3D printed and has holes, fits, threads or clips, read the material file for its material first, such as material-petg.md. Ask for the material when it is not known.
+2. create_object for each solid, with Placement and dimensions in obj_properties.
+3. create_object for booleans such as Part::Cut with Base and Tool as object names.
+4. recompute_document after a series of changes. Fix each failed object with update_object.
+5. get_object to check values. get_view to look at the result.
+6. save_document_as for a new file, save_document for an existing one.
 
 Change a part:
 1. list_objects with compact true, then get_object for the object.
@@ -45,9 +46,10 @@ Change a part:
 3. recompute_document, then check the reply for invalid objects.
 
 Print a part:
-1. Lay each part flat on the plate with update_object on Placement, then check_printability with bed_x and bed_y.
-2. Fix what it reports. Read printing.md.
-3. export_document to .stl or .3mf with overwrite true when replacing.
+1. Check that fits, threads and clips follow the material file for the part's material.
+2. Lay each part flat on the plate with update_object on Placement, then check_printability with bed_x and bed_y.
+3. Fix what it reports. Read printing.md.
+4. export_document to .stl or .3mf with overwrite true when replacing.
 
 Show the user a part:
 1. set_view with view_name and focus to leave the 3D view as they should see it. Use mode orbit to turn around it, or mode tour with stops to visit objects one by one.
@@ -73,5 +75,6 @@ Share FreeCAD with other agents:
 - files.md: paths, formats, import, export, save. Read before touching a file.
 - session.md: remote access, holding and releasing FreeCAD. Read when a call is refused as in use, or when get_rpc_status shows a holder.
 - printing.md: laying parts on the plate, the layout check, export. Read before exporting for a printer.
+- material-petg.md, material-pla.md: clearances, threads, clips, strength and limits for one print material. Read the user's material before modelling parts that fit together.
 - parametric.md: spreadsheets as parameters. Read before binding a property to a cell.
 - code.md: execute_code, execute_code_async, execute_code_headless. Read before writing a script.
