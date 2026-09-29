@@ -10,6 +10,8 @@ package main
 // the ones it wrote.
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -135,6 +137,46 @@ func ownSkill(dir string) (ours, exists bool) {
 	return false, false
 }
 
+// skillIsCurrent reports whether dir holds exactly the embedded guide: the
+// same files with the same content (SKILL.md carries the generator marker), and
+// nothing else.
+func skillIsCurrent(dir string) bool {
+	want := map[string][]byte{}
+	err := fs.WalkDir(guide.FS(), ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := fs.ReadFile(guide.FS(), path)
+		want[path] = data
+		return err
+	})
+	if err != nil {
+		return false
+	}
+	have := 0
+	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if expected, ok := want[filepath.ToSlash(rel)]; !ok || !bytes.Equal(data, expected) {
+			return errSkillDiffers
+		}
+		have++
+		return nil
+	})
+	return err == nil && have == len(want)
+}
+
+var errSkillDiffers = errors.New("the skill differs from the embedded guide")
+
 // writeSkillFolder replaces dir with the embedded guide.
 func writeSkillFolder(dir string) error {
 	if err := os.RemoveAll(dir); err != nil {
@@ -182,6 +224,8 @@ func installSkills(w io.Writer, scope harness.Scope, ids []harness.ID, dryRun, p
 		switch {
 		case exists && !ours:
 			fmt.Fprintf(w, "  [skip] %s holds a skill that freecad-mcp did not write; it is left as it is.\n", target)
+		case exists && skillIsCurrent(target):
+			fmt.Fprintf(w, "  [ok]   guide skill already current: %s\n", target)
 		case dryRun:
 			fmt.Fprintf(w, "  [ok]   would write the guide skill to %s\n", target)
 		default:
@@ -319,6 +363,10 @@ func refreshSkills(w io.Writer, dryRun bool) int {
 	for _, dir := range allUserSkillFolders(home) {
 		target := filepath.Join(dir, guide.Name)
 		if ours, _ := ownSkill(target); !ours {
+			continue
+		}
+		if skillIsCurrent(target) {
+			fmt.Fprintf(w, "  guide skill already current: %s\n", target)
 			continue
 		}
 		if dryRun {

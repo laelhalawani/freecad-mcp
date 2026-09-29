@@ -239,7 +239,7 @@ func finishAddon(w io.Writer, a addonState, dryRun bool) int {
 	}
 	if dryRun {
 		for _, t := range a.Targets {
-			fmt.Fprintf(w, "  would install the FreeCAD addon into %s\n", t.AddonDir())
+			reportAddonDryRun(w, t)
 		}
 		return 0
 	}

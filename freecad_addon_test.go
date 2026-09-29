@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,6 +53,27 @@ func TestASecondInstallOfTheSameAddonWritesNothing(t *testing.T) {
 	r = installAddon(target, false)
 	if r.Err != nil || !r.Current || !r.SettingChanged || r.AutoStart {
 		t.Fatalf("install turning auto-start off = %+v", r)
+	}
+}
+
+func TestADryRunOnACurrentAddonSaysItIsCurrent(t *testing.T) {
+	target := addoninstall.Target{UserDataDir: t.TempDir()}
+	var out bytes.Buffer
+	reportAddonDryRun(&out, target)
+	if !strings.Contains(out.String(), "would install the FreeCAD addon into "+target.AddonDir()) {
+		t.Fatalf("dry run without an addon = %q", out.String())
+	}
+	if r := installAddon(target, true); r.Err != nil {
+		t.Fatal(r.Err)
+	}
+	out.Reset()
+	reportAddonDryRun(&out, target)
+	if !strings.Contains(out.String(), "already current: addon") || strings.Contains(out.String(), "would") {
+		t.Fatalf("dry run on a current addon = %q", out.String())
+	}
+	if code := installAddonReport(context.Background(), &out, []addoninstall.Target{target}, true); code != 0 ||
+		strings.Contains(out.String(), "would install") {
+		t.Fatalf("install --dry-run = %d, %q", code, out.String())
 	}
 }
 

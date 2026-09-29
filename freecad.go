@@ -186,6 +186,17 @@ func installAddon(t addoninstall.Target, autoStart bool) addonResult {
 	return installAddonWith(t, choice)
 }
 
+// reportAddonDryRun says what an install into t would do, as the real run
+// would report it: a current addon is left alone.
+func reportAddonDryRun(w io.Writer, t addoninstall.Target) {
+	if addonIsCurrent(t) {
+		version, _, _ := addoninstall.EmbeddedVersion()
+		fmt.Fprintf(w, "  [ok]   already current: addon %s\n         %s\n", version, t.AddonDir())
+		return
+	}
+	fmt.Fprintf(w, "  would install the FreeCAD addon into %s\n", t.AddonDir())
+}
+
 func installAddonWith(t addoninstall.Target, choice autoStartChoice) addonResult {
 	r := addonResult{Target: t}
 	r.Previous, _ = addoninstall.InstalledVersion(t)
@@ -309,7 +320,7 @@ func installAddonReport(ctx context.Context, w io.Writer, targets []addoninstall
 	}
 	if dryRun {
 		for _, t := range targets {
-			fmt.Fprintf(w, "  would install the FreeCAD addon into %s\n", t.AddonDir())
+			reportAddonDryRun(w, t)
 		}
 		return 0
 	}
