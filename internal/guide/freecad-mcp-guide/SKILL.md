@@ -3,7 +3,7 @@ name: freecad-mcp-guide
 description: Workflows and rules for the freecad MCP server's tools. Use when building or changing FreeCAD models through create_object and update_object, choosing faces or edges with list_subelements, setting values with units or expressions, setting up and running a FEM analysis, checking and exporting parts for 3D printing, working with files on the FreeCAD computer, or sharing one FreeCAD with other agents.
 metadata:
   generator: freecad-mcp
-  version: "0.4.1"
+  version: "0.4.3"
 ---
 
 # FreeCAD MCP guide
@@ -45,9 +45,13 @@ Change a part:
 3. recompute_document, then check the reply for invalid objects.
 
 Print a part:
-1. check_printability with bed_x, bed_y and bed_z.
+1. Lay each part flat on the plate with update_object on Placement, then check_printability with bed_x and bed_y.
 2. Fix what it reports. Read printing.md.
 3. export_document to .stl or .3mf with overwrite true when replacing.
+
+Show the user a part:
+1. set_view with view_name and focus to leave the 3D view as they should see it. Use mode orbit to turn around it, or mode tour with stops to visit objects one by one.
+2. Call set_view with mode static to stop a running orbit or tour. get_view looks without changing the view.
 
 Simulate a part (FEM):
 1. Read fem.md. Create the analysis, material and mesh with create_object and analysis_name.
@@ -68,6 +72,6 @@ Share FreeCAD with other agents:
 - fem.md: FEM from analysis to result. Read before the first FEM object.
 - files.md: paths, formats, import, export, save. Read before touching a file.
 - session.md: remote access, holding and releasing FreeCAD. Read when a call is refused as in use, or when get_rpc_status shows a holder.
-- printing.md: printability, mesh repair, export quality. Read before exporting for a printer.
+- printing.md: laying parts on the plate, the layout check, export. Read before exporting for a printer.
 - parametric.md: spreadsheets as parameters. Read before binding a property to a cell.
 - code.md: execute_code, execute_code_async, execute_code_headless. Read before writing a script.

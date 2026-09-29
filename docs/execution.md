@@ -53,6 +53,20 @@ immediately.
 
 ## Headless execution
 
+A headless script that may take minutes runs in the background: pass
+`background` true, or a `timeout` over 120 seconds. The call returns a `job_id`
+at once, the output streams to a file, and `get_async_status` reports the job
+(`running`, `finished` or `cancelled`, exit code, elapsed seconds, the last 200
+lines of output); `cancel_job` stops it. Background jobs end when the MCP
+server exits. On Windows every headless process runs in a job object, so a
+cancel, a timeout, the end of the run and even a hard kill of the MCP server end
+the whole process tree; on Linux and macOS the process group is ended by a
+cancel, a timeout and a normal exit, and a job can outlive an MCP server that
+was killed. A foreground run keeps the call open until the script ends. A
+headless exit code that only a crash produces (an exception such as
+`0xC0000005`, or `-1`) is reported as a crash of FreeCAD, with the output so
+far, not as a bare exit code.
+
 `execute_code_headless` writes the script to a file and runs it with
 `freecadcmd -c` in a separate process. Use it for OpenCascade work that may
 segfault or block the GUI for minutes: `makeHelix` + `makePipeShell` threads,
@@ -85,6 +99,26 @@ path separators, not escapes.
 On Windows a native crash ends the process with an exception code rather than a
 signal; the tool reports it by name, for example `EXCEPTION_ACCESS_VIOLATION`.
 
+## Agent banner
+
+While an agent works, FreeCAD shows a banner along the top edge of the 3D view
+area: the agent's name (the lock holder's, with remote access on), what it is
+doing in plain words, how long it has run, and "An agent is changing this
+model; please don't edit until it finishes." It never blocks the mouse or the
+keyboard and takes no focus. It appears when a GUI-thread call has run about a
+second, or at once, before the call starts, for the calls that may block the
+GUI thread for long (`execute_code`, `recompute_document`, `run_fem_analysis`,
+`import_file`, `export_document`, `repair_mesh`, `mesh_to_solid`,
+`solid_to_mesh`, `analyze_mesh`, `check_printability`, `open_document` and
+`reload_document`), which add "FreeCAD may not respond until this finishes".
+Because these draw the banner before they know how long they will take, even a
+short one shows it briefly and starts about 80 ms later. The banner takes its
+background from the colour FreeCAD's main window is drawn in, with dark or light
+text by that colour, so it follows a light or a dark theme. It also shows while a background job runs (an `execute_code_async`
+job, or a headless job of the MCP server), with its timer ticking. It hides when
+the work ends. Reads and `set_view` show nothing. Its text is plain text, and it
+works whether or not remote access is on.
+
 ## GUI dispatch timeouts
 
 GUI-thread operations run one at a time in FIFO order. Calls have separate queue
@@ -98,8 +132,11 @@ dispatch as stuck.
 | --- | --- | --- | --- |
 | `execute_code` | 90 seconds (or `timeout`) | 90 seconds (or `timeout`) | At least `2 * timeout + 30` seconds; 210 seconds by default |
 | `run_fem_analysis` | Requested `timeout` (1 to 604800 seconds, default 600) | Requested `timeout` | At least `2 * timeout + 30` seconds |
-| `import_file`, `export_document`, `check_printability`, `repair_mesh`, `mesh_to_solid`, `solid_to_mesh` | 300 seconds (or `timeout`) | 300 seconds (or `timeout`) | At least `2 * timeout + 30` seconds; 630 seconds by default |
+| `import_file`, `export_document`, `repair_mesh`, `mesh_to_solid`, `solid_to_mesh` | 300 seconds (or `timeout`) | 300 seconds (or `timeout`) | At least `2 * timeout + 30` seconds; 630 seconds by default |
+| `check_printability` | 120 seconds (or `timeout`) | 120 seconds (or `timeout`) | At least `2 * timeout + 30` seconds; 270 seconds by default |
 | `open_document`, `save_document`, `save_document_as`, `recompute_document`, `analyze_mesh` | 120 seconds (or `timeout`) | 120 seconds (or `timeout`) | At least `2 * timeout + 30` seconds; 270 seconds by default |
+
+Every call is bounded by the MCP server's own deadline, the reply timeout above. When FreeCAD does not answer within it, the call fails with "Failed to <action>: FreeCAD did not answer within N s; it may be busy computing." and the hint "Call get_rpc_status with {}: it answers while FreeCAD computes and says whether FreeCAD is busy. Wait and poll it; do not repeat the call while FreeCAD is busy." This deadline hint replaces the larger-timeout hint, which stays only for the addon's own run-budget timeout. That tool tells a FreeCAD that is busy computing (its process is using CPU over a short window) from one that is stuck behind a dialog, and its last known documents show how old the reading is.
 
 Every other tool, including `undo`, `redo`, `measure`, `get_selection`,
 `get_spreadsheet_cells` and `update_spreadsheet_cells`, uses a fixed 60-second

@@ -2,7 +2,7 @@
 
 [Back to README](../README.md) · [Installation](installation.md) · [Configuration](configuration.md) · [Code execution](execution.md) · [Remote access](remote-access.md)
 
-FreeCAD MCP exposes 40 tools, grouped below by task; two of them,
+FreeCAD MCP exposes 42 tools, grouped below by task; two of them,
 `release_session` and `close_freecad`, are listed only while
 [remote access](remote-access.md) is on, since they manage the multi-agent
 session lock that comes with it. Every tool that changes a document records
@@ -552,6 +552,10 @@ without any dialog.
   format.
 - `object_names` (array of strings, optional): objects to export; default the
   visible top-level objects with geometry.
+- `per_object` (boolean, default `false`): write one file per object in
+  `object_names` into the folder `path`, named after each object's label.
+- `format` (string): with `per_object`, the extension of every file, one of the
+  export formats below, such as `stl` or `step`; refused without `per_object`.
 - `overwrite` (boolean, default `false`)
 - `include_hidden` (boolean, default `false`): include hidden top-level
   objects in the default set.
@@ -584,6 +588,11 @@ reply's `companion_file`. `.brep`/`.brp` write the exact shape. `.FCStd`
 writes a copy of the document. `.dxf` and `.svg` write 2D geometry projected
 on the XY plane.
 
+With `per_object`, one export runs per object and the reply lists every
+file with its size and says when it created the folder; a name clash between
+labels gets a number suffix, characters a file name cannot hold become an
+underscore, and a Windows device name such as `CON` gets a leading underscore.
+
 Without `object_names`, the visible top-level objects with geometry are
 exported, so a Body is written once, not once per feature. The reply gives the
 file, its size, the exported and skipped objects and, for meshes, the facet
@@ -597,40 +606,37 @@ before exporting for a printer.
 
 ### `check_printability`
 
-Check whether objects are ready for 3D printing, before `export_document`
-writes them to STL or 3MF.
+Check a print layout before `export_document` writes it: every listed part
+lies inside the plate and no two parts overlap. Lay each part flat on the
+plate with its `Placement` first (the plate is x 0 to `bed_x`, y 0 to `bed_y`,
+z up from 0, unless you move its corner with `bed_origin_x` and `bed_origin_y`), then call this. It does no meshing, so it is fast.
 
 - `doc_name` (string, required)
 - `object_names` (array of strings, optional): default the visible top-level
-  solids and meshes.
-- `bed_x`, `bed_y`, `bed_z` (numbers, optional, up to 10000 mm each): printer
-  bed dimensions; give all three together to check the fit, or omit all
-  three.
-- `build_direction` (string, default `"+Z"`, one of `+Z`, `-Z`, `+X`, `-X`,
-  `+Y`, `-Y`): the model axis that points up on the printer.
-- `overhang_angle_deg` (number, default 45, 0 to 89 degrees): overhangs
-  downward faces that lean more than this from vertical count as needing
-  support.
-- `check_self_intersections` (boolean, default `true`): also look for
-  self-intersecting triangles, slower on large meshes.
-- `quality` (string, default `"standard"`, one of `coarse`, `standard`,
-  `fine`): tessellation preset for the mesh checks.
-- `linear_deflection`, `angular_deflection_deg` (numbers, optional): override
-  the preset.
-- `timeout` (number, optional, default 300, up to 1800 seconds).
+  solids.
+- `bed_x`, `bed_y` (numbers, required, up to 10000 mm): plate width and depth.
+- `bed_z` (number, optional, up to 10000 mm): build height; default not
+  checked.
+- `bed_origin_x`, `bed_origin_y` (numbers, optional, default 0, in mm): the
+  plate's corner, so a second plate laid beside the first can be checked with
+  its real size; the plate then spans x from `bed_origin_x` to `bed_origin_x +
+  bed_x` and y likewise. The build height still starts at z 0.
+- `timeout` (number, optional, default 120, up to 1800 seconds).
 
-For each object, the reply reports whether its shape is valid, closed and how
-many solids it has, FreeCAD's full shape check, whether its tessellated mesh
-is closed without non-manifold edges or self-intersections, its size along
-the build axes, the area of overhangs needing support and, with the bed
-dimensions given, whether it fits (turned by 90 degrees if needed). The size,
-the overhang area and the bed fit are reported for every object, including
-those ready to print. `printable`
-is true only when at least one object was checked and none of them has an
-issue; it is false, not vacuously true, when `object_names` names nothing or
-no visible top-level solid or mesh exists to check. Mesh objects are checked
-as they are; fix them with `repair_mesh`. Invalid shapes usually come from a
-failed feature; `recompute_document` shows which one.
+For each part, the reply gives its object name (and its label when that
+differs), its size (tight bounding box), its free margin to the plate edges
+(the distance from the nearest side of its box to a plate edge in x and y, and
+to the build height when `bed_z` is given; the side that sits on the plate is
+not counted; a sign shows only when the part is outside), and which parts it
+overlaps. Space the parts apart before calling it: overlapping complex parts,
+such as threads, make the intersection slow. Overlap is the volume
+of the parts' solid intersection, so a part sitting in another part's cavity
+does not overlap it. `printable` is true only when at least one part was
+checked, every part is inside the plate and none overlaps; it is false, not
+vacuously true, when nothing was checked. Move parts with `update_object` on
+`Placement` until it is true. Invalid shapes usually come from a failed
+feature; `recompute_document` shows which one, and `analyze_mesh` checks mesh
+defects.
 
 ## FEM analysis
 
@@ -730,10 +736,12 @@ background job tracking, and GUI dispatch timeout handling in detail.
 
 ### `execute_code`
 
-Execute Python code in FreeCAD on its GUI thread and wait for the result. The
-safe default for automation the other tools do not cover: `FreeCAD`,
-`FreeCADGui` and the document are available, and whatever the code prints is
-returned.
+Execute Python code in FreeCAD on its GUI thread and wait for the result. For
+what the other tools do not cover: `FreeCAD`, `FreeCADGui` and the document
+are available, and whatever the code prints is returned. Use it for quick
+changes only, since it freezes FreeCAD while it runs: work that may take more
+than a few seconds (booleans or distances between complex parts, threads,
+fillets, meshing) goes to `execute_code_headless`.
 
 - `code` (string, required): the Python code to execute.
 - `timeout` (number, optional, up to 1800 seconds): seconds for each of the
@@ -770,15 +778,36 @@ long-running OCCT geometry or other CPU-bound work that would exceed
 
 ### `get_async_status`
 
-Report the state of background jobs started by `execute_code_async`.
+Report the state of background jobs started by `execute_code_async` and by
+`execute_code_headless`.
 
 - `job_id` (string, optional): the job to report on; omit to list all running
-  jobs and up to 20 recently finished ones.
+  jobs and up to 20 recently finished ones, plus the headless jobs.
 
-Reports whether a job is running, done or failed, with the error and
-traceback of a failed job. It does not use the GUI thread, so it answers even
-while a job runs. History is held in memory until FreeCAD exits. An unknown
-`job_id` is a not-found error.
+For an `execute_code_async` job it reports whether the job is running, done or
+failed, with the error and traceback of a failed job; history is held in
+memory until FreeCAD exits. For a headless job (its id starts with
+`headless-`) it reports `running`, `finished` or `cancelled`, the exit code,
+the elapsed seconds and the last 200 lines of output; see
+`execute_code_headless`. It does not use the GUI thread, so it answers even
+while a job runs, and a headless job's status does not need FreeCAD to be
+running. An unknown `job_id` is a not-found error. `cancel_job` stops a
+headless job.
+
+### `cancel_job`
+
+Stop a background `execute_code_headless` job: its process and everything it
+started end (on Windows the process tree lives in a job object that ends with
+it, even when the MCP server itself is killed; on Linux and macOS the process
+group is ended, and a hard kill of the MCP server can leave a running job
+behind).
+
+- `job_id` (string, required): the id of a headless job, from
+  `execute_code_headless` or `get_async_status`.
+
+The reply is the job's status with its last output. A job that had already
+finished is reported as finished, with its exit code. An id that is not a
+headless job is an invalid-input error.
 
 ### `execute_code_headless`
 
@@ -786,9 +815,14 @@ Run a Python script in a separate `freecadcmd` process, isolated from the
 running GUI.
 
 - `code` (string, required): a complete Python script for `freecadcmd`.
-- `timeout` (number, optional, default 600, up to 604800 seconds, a week):
-  seconds to wait before killing the process; partial output is kept on
-  timeout.
+- `timeout` (number, optional, up to 604800 seconds, a week): seconds to wait
+  before killing the process; partial output is kept on timeout. Omitted, it
+  is 600 seconds and the call waits for the script (foreground). A timeout you
+  pass over 120 runs the script in the background unless `background` is
+  `false`; an explicit 600 therefore runs in the background.
+- `background` (boolean): `true` returns a `job_id` at once and runs the script
+  in the background; `false` waits whatever the timeout. Omitted, only a
+  timeout over 120 makes it a background run.
 
 Use this for OCCT work that can crash or block FreeCAD: helical threads
 (`makeHelix` + `makePipeShell`), lofts and sweeps, booleans with many or
@@ -805,7 +839,51 @@ from the `execute_code` namespace is available. Print progress to stdout; it
 is returned when the process ends. After the script saves a `.FCStd` that is
 open in the GUI, call `reload_document` to show the result.
 
+A background run returns a `job_id` (`headless-` and eight hex digits) and the
+path of the file its output streams to. `get_async_status` with the id reports
+`running`, `finished` or `cancelled`, the exit code, the elapsed seconds and the
+last 200 lines of output; `cancel_job` stops the job's process. The
+first status of a finished job hands out the final output and removes the file;
+later statuses repeat that output, and a finished job that nobody reads is
+removed with its file after a day. Jobs end with the MCP server. While a
+headless job runs (in the foreground or the background) and remote access is
+on, the server keeps its session's lock alive, so the session does not look idle
+to other agents; when the job ends, normal idle timing resumes. A foreground
+run stays as it was: the call waits for the script and returns its output.
+
 ## View and screenshots
+
+### `set_view`
+
+Set what the user sees in a document's 3D view and leave it there. It changes
+the view, not the model: nothing is added to the undo history and the document
+gets no unsaved-changes mark.
+
+- `doc_name` (string, optional): default the active document; its tab is
+  brought to the front.
+- `view_name` (string, optional): orientation, as for `get_view`; default keep
+  the current one.
+- `focus` (array of strings, optional): objects to frame; default everything
+  visible.
+- `show`, `hide`, `isolate` (arrays of strings, optional): visibility;
+  `isolate` shows the listed objects and hides every other visible one.
+- `transparency` (object of object name to 0 to 100), `display_mode` (object
+  of object name to a mode such as `Flat Lines`).
+- `mode` (string, default `"static"`, one of `static`, `orbit`, `tour`).
+- `degrees_per_second` (number, default 15): orbit speed, negative turns the
+  other way.
+- `stops` (array, optional): tour stops with `focus`, `dwell_seconds` (default
+  2) and `view_name`; default each visible object.
+- `move_seconds` (number, default 2): travel time between tour stops.
+- `loop` (boolean, default `false`): repeat the tour.
+- `reset` (boolean, default `false`): restore what earlier calls changed and
+  stop any running mode.
+- `include_screenshot` (boolean, default `true`): attach a screenshot of the
+  view as set.
+
+An orbit or tour runs on FreeCAD's GUI thread until the user moves the view,
+the next `set_view`, `reset` or the document closing. `get_view` pauses it for
+the capture and resumes it. The reply states the camera and any running mode.
 
 ### `get_view`
 
@@ -926,7 +1004,13 @@ operation still stuck) and `version_check` (`ok`, or whether the addon or this
 server needs updating), and the open documents. While not reachable, it
 carries the process id, elapsed time since `start_freecad`, exit code and
 launch log tail known so far, plus the documents last seen before FreeCAD
-stopped answering.
+stopped answering. While `freecad` is `unresponsive` and FreeCAD runs on this
+computer (the configured host is loopback and the process id came from this
+computer's own status reading), the tool samples the FreeCAD process's CPU
+over 2 seconds and adds `cpu_cores`; `busy: true` (about 0.5 cores or more)
+means FreeCAD is computing, not stuck behind a dialog, and the advice is to
+wait and poll again. The last known documents say how long ago they were read;
+the reading is refreshed after every create, open, close, import and save as.
 
 With [remote access](remote-access.md) on, the reply also carries
 `session_lock` (`off`, `free`, `yours` or `other`; `unknown` while FreeCAD is

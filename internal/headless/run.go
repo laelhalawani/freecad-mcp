@@ -131,54 +131,112 @@ func joinOutput(parts ...string) string {
 	return strings.Join(kept, "\n")
 }
 
-// Run executes code with `command -c "exec(open(script).read())"`, waiting at
-// most timeout seconds. A nil command is auto-detected.
-func Run(ctx context.Context, code string, timeout float64, command []string) Result {
+// bootstrapCode runs the script file as __main__ in its own namespace, with
+// __file__ set to its path, as a normal script runs. freecadcmd
+// drops what a script printed when the script raises, so a failure flushes the
+// output first, then prints the traceback (without this wrapper's own frame)
+// and exits 1.
+const bootstrapCode = `import sys as _sys, traceback as _traceback
+try:
+    _sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
+_ns = {'__name__': '__main__', '__file__': SCRIPT, '__builtins__': __builtins__}
+try:
+    with open(SCRIPT, encoding='utf-8') as _f:
+        _source = _f.read()
+    exec(compile(_source, SCRIPT, 'exec'), _ns)
+except SystemExit:
+    _sys.stdout.flush()
+    raise
+except BaseException as _e:
+    _sys.stdout.flush()
+    print(''.join(_traceback.format_exception(type(_e), _e, _e.__traceback__.tb_next)), file=_sys.stderr, end='')
+    _sys.stderr.flush()
+    _sys.exit(1)
+_sys.stdout.flush()
+`
+
+// bootstrap returns the -c program that runs the script file at path.
+func bootstrap(script string) string {
+	return "SCRIPT = " + pyString(script) + "\n" + bootstrapCode
+}
+
+// prepare checks timeout, finds the freecadcmd command (command, or detected)
+// and its script directory. msg is the error text, "" when all is well.
+func prepare(ctx context.Context, timeout float64, command []string) (cmd []string, dir string, msg string) {
 	if math.IsNaN(timeout) || math.IsInf(timeout, 0) || timeout <= 0 {
-		return Result{Error: "timeout must be a positive finite number"}
+		return nil, "", "timeout must be a positive finite number"
 	}
 	if timeout > MaxTimeout {
-		return Result{Error: fmt.Sprintf("timeout must be a positive finite number of at most %g s", MaxTimeout)}
+		return nil, "", fmt.Sprintf("timeout must be a positive finite number of at most %g s", MaxTimeout)
 	}
 	if len(command) == 0 {
 		command = Detect(ctx)
 	}
 	if len(command) == 0 {
-		return Result{Error: "freecadcmd not found: install FreeCAD, or set FREECAD_MCP_FREECADCMD to the command that starts it"}
+		return nil, "", "freecadcmd not found: install FreeCAD, or set FREECAD_MCP_FREECADCMD to the command that starts it"
 	}
 	dir, err := scriptDirFor(command[0])
 	if err != nil {
-		return Result{Error: fmt.Sprintf("could not prepare the script directory: %v", err)}
+		return nil, "", fmt.Sprintf("could not prepare the script directory: %v", err)
 	}
+	return command, dir, ""
+}
+
+// writeScript writes code to a new script file in dir.
+func writeScript(dir, code string) (path, msg string) {
 	f, err := os.CreateTemp(dir, "script-*.py")
 	if err != nil {
-		return Result{Error: fmt.Sprintf("could not write the script: %v", err)}
+		return "", fmt.Sprintf("could not write the script: %v", err)
 	}
-	script := f.Name()
-	defer os.Remove(script)
 	_, werr := f.WriteString(code)
 	cerr := f.Close()
 	if werr != nil || cerr != nil {
-		return Result{Error: fmt.Sprintf("could not write the script: %v", errors.Join(werr, cerr))}
+		os.Remove(f.Name())
+		return "", fmt.Sprintf("could not write the script: %v", errors.Join(werr, cerr))
 	}
+	return f.Name(), ""
+}
+
+// crashMessage words a native crash. name is the signal or exception name, ""
+// when the exit code alone shows the crash.
+func crashMessage(name string, code int) string {
+	if name == "" {
+		return fmt.Sprintf("FreeCAD crashed (exit code %d; the GUI is unaffected)", code)
+	}
+	return fmt.Sprintf("headless FreeCAD crashed with %s (OCCT native crash; the GUI is unaffected)", name)
+}
+
+// Run executes code as a script file through freecadcmd -c with bootstrap,
+// waiting at most timeout seconds. A nil command is auto-detected.
+func Run(ctx context.Context, code string, timeout float64, command []string) Result {
+	command, dir, msg := prepare(ctx, timeout, command)
+	if msg != "" {
+		return Result{Error: msg}
+	}
+	script, msg := writeScript(dir, code)
+	if msg != "" {
+		return Result{Error: msg}
+	}
+	defer os.Remove(script)
 
 	limit := time.Duration(timeout * float64(time.Second))
 	runCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	args := append(append([]string{}, command[1:]...), "-c", "exec(open("+pyString(script)+", encoding='utf-8').read())")
+	args := append(append([]string{}, command[1:]...), "-c", bootstrap(script))
 	cmd := exec.CommandContext(runCtx, command[0], args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	// A helper that inherited the pipes must not keep Wait from returning.
 	cmd.WaitDelay = 2 * time.Second
-	// A wrapper script's own children are ended too where the OS allows it.
-	killTree(cmd)
 
-	runErr := cmd.Run()
-	var exitErr *exec.ExitError
-	if runErr != nil && !errors.As(runErr, &exitErr) && cmd.ProcessState == nil {
+	kill, runErr := startTree(cmd)
+	if runErr != nil {
 		return Result{Error: fmt.Sprintf("could not start headless FreeCAD: %v", runErr)}
 	}
+	runErr = cmd.Wait()
+	kill() // whatever the script left running ends with it
 	partial := func() string { return joinOutput(clean(stdout.Bytes()), clean(stderr.Bytes())) }
 	if runErr != nil && ctx.Err() != nil {
 		// The caller gave up (the MCP request was cancelled): a kill we
@@ -203,7 +261,7 @@ func Run(ctx context.Context, code string, timeout float64, command []string) Re
 			// As Python reports it: minus the signal number.
 			res.ReturnCode = &number
 		}
-		res.Error = fmt.Sprintf("headless FreeCAD crashed with %s (OCCT native crash; the GUI is unaffected)", signal)
+		res.Error = crashMessage(signal, code0)
 		return res
 	}
 	if !res.Success {

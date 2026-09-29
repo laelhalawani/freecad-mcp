@@ -3,12 +3,14 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sairaph/freecad-mcp/internal/domain"
 	"github.com/sairaph/freecad-mcp/internal/freecad"
+	"github.com/sairaph/freecad-mcp/internal/procstat"
 	"github.com/sairaph/mcp-wizard/render"
 )
 
@@ -32,6 +34,11 @@ type statusFront struct {
 	// Hostname is the computer FreeCAD actually runs on (its own
 	// os.Hostname()), whenever the reply carries one (live check L11).
 	Hostname *string `yaml:"hostname,omitempty"`
+	// CPUCores is how many cores FreeCAD's process used over a short window
+	// while its RPC server did not answer, and Busy whether that is enough to
+	// call it busy computing.
+	CPUCores *float64 `yaml:"cpu_cores,omitempty"`
+	Busy     bool     `yaml:"busy,omitempty"`
 
 	// The session lock fields, filled from sessionFront's fields (kept as
 	// plain fields rather than an embedded sessionFields so this struct never
@@ -173,7 +180,7 @@ func (s *Server) getRPCStatus(ctx context.Context, _ *mcp.CallToolRequest, _ str
 						host, domain.BinaryName))
 			}
 			if docs, active, ok := s.fc.lastKnownDocuments(ls); ok {
-				sections = append(sections, lastKnownDocumentsBlock(docs, active))
+				sections = append(sections, lastKnownDocumentsBlock(docs, active, s.fc.lastStatusAge()))
 			}
 		} else {
 			ls := s.launcher.State()
@@ -184,7 +191,22 @@ func (s *Server) getRPCStatus(ctx context.Context, _ *mcp.CallToolRequest, _ str
 			} else {
 				sessionKnown = false
 			}
-			sections = append(sections, nextStepFor(front.Freecad, ls, host, everAnswered))
+			next := nextStepFor(front.Freecad, ls, host, everAnswered)
+			// An unresponsive FreeCAD that is using its CPU is computing, not
+			// waiting behind a dialog: say so, and advise waiting.
+			if front.Freecad == "unresponsive" {
+				if pid := s.fc.knownPID(ls); pid > 0 {
+					if cores, err := procstat.Cores(ctx, pid, procstat.Window); err == nil {
+						rounded := math.Round(cores*10) / 10
+						front.CPUCores = &rounded
+						if cores >= procstat.BusyCores {
+							front.Busy = true
+							next = busyNextStep(rounded)
+						}
+					}
+				}
+			}
+			sections = append(sections, next)
 			if ls.LogPath != "" {
 				if tail := s.launcher.LogTail(4 << 10); tail != "" {
 					sections = append(sections, fmt.Sprintf("Last launch log (`%s`):", ls.LogPath), textBlock(tail))
@@ -197,7 +219,7 @@ func (s *Server) getRPCStatus(ctx context.Context, _ *mcp.CallToolRequest, _ str
 			// against ls.StartedAt, so a new launch never shows a previous
 			// process's documents as this one's.
 			if docs, active, ok := s.fc.lastKnownDocuments(ls); ok {
-				sections = append(sections, lastKnownDocumentsBlock(docs, active))
+				sections = append(sections, lastKnownDocumentsBlock(docs, active, s.fc.lastStatusAge()))
 			}
 		}
 	}
@@ -286,6 +308,15 @@ func fillDownState(front *statusFront, ls freecad.LaunchState, timedOut, everAns
 	}
 }
 
+// busyNextStep is the next step for an unresponsive FreeCAD whose process is
+// using its CPU (about cores cores): a long operation holds its GUI thread.
+func busyNextStep(cores float64) string {
+	return fmt.Sprintf("FreeCAD is busy computing (about %.1f cores of CPU over %d s): a long operation holds its GUI "+
+		"thread, so its RPC server cannot answer. Wait and call get_rpc_status with {} again every 10 to 30 seconds; "+
+		"send no other call meanwhile. If it stays busy far longer than the operation should take, close FreeCAD "+
+		"from its window or the task manager, then call start_freecad with {}.", cores, int(procstat.Window/time.Second))
+}
+
 // nextStepFor states what to do next for a freecad state get_rpc_status
 // reported while FreeCAD was unreachable. host is this server's configured
 // FreeCAD host (config.FreeCAD.Host): not_running only suggests start_freecad
@@ -362,12 +393,13 @@ func nextStepForRemote(state string, ls freecad.LaunchState, host string, everAn
 
 // lastKnownDocumentsBlock renders the documents get_rpc_status last saw while
 // FreeCAD was reachable, for a reply made while it is down.
-func lastKnownDocumentsBlock(docs []map[string]any, active string) string {
+func lastKnownDocumentsBlock(docs []map[string]any, active string, age time.Duration) string {
 	if len(docs) == 0 {
-		return "Last known state (before FreeCAD stopped answering): no document was open."
+		return fmt.Sprintf("Last known state (%s ago, before FreeCAD stopped answering): no document was open.", age.Round(time.Second))
 	}
 	var b strings.Builder
-	b.WriteString("Last known open documents (as of the last time FreeCAD answered; may be stale now):\n\n")
+	fmt.Fprintf(&b, "Last known open documents (%s ago, the last time FreeCAD answered or a document was created, opened, closed, imported or saved as; may be stale now):\n\n",
+		age.Round(time.Second))
 	b.WriteString("| document | label | file | active |\n|---|---|---|---|\n")
 	for _, d := range docs {
 		name, _ := d["name"].(string)

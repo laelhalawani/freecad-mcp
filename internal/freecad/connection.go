@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -51,6 +52,21 @@ type Connection struct {
 	// status (a listener's X-FreeCAD-MCP-Listener). Set it before the first
 	// call.
 	OnHeaders func(h http.Header)
+	// OnDocumentsChanged, when set, is told after a call succeeded that
+	// changed which documents are open (create, open, close, import, save as),
+	// so the caller can refresh what it remembers of them. Set it before the
+	// first call.
+	OnDocumentsChanged func(ctx context.Context)
+}
+
+// documentSetMethods are the addon methods that change which documents are
+// open or where they are saved.
+var documentSetMethods = map[string]bool{
+	"create_document":  true,
+	"open_document":    true,
+	"close_document":   true,
+	"import_file":      true,
+	"save_document_as": true,
 }
 
 // NewConnection returns a connection to the addon at host:port (or to a
@@ -95,12 +111,48 @@ func (c *Connection) Close() { c.rpc.CloseIdle() }
 // a session lock refusal comes back as *SessionInUseError or
 // *SessionReleasedError (see sessionFault).
 func (c *Connection) call(ctx context.Context, timeout time.Duration, method string, params ...any) (any, error) {
+	if timeout <= 0 {
+		timeout = c.timeout
+	}
 	v, err := c.rpc.Call(ctx, timeout, method, params...)
 	if err != nil {
+		// This server's own deadline for the call ran out while the caller's
+		// context was still alive: the addon never answered (a long call
+		// holding Python's interpreter lock stops even its RPC thread).
+		if ctx.Err() == nil && (errors.Is(err, context.DeadlineExceeded) || isNetTimeout(err)) {
+			return nil, &TimeoutError{Method: method, After: timeout}
+		}
 		return nil, sessionFault(err)
+	}
+	if c.OnDocumentsChanged != nil && documentSetMethods[method] {
+		c.OnDocumentsChanged(ctx)
 	}
 	return v, nil
 }
+
+func isNetTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// TimeoutError reports that FreeCAD did not reply to a call within the
+// deadline this server sets for it (the call's budgets plus a margin). It
+// counts as a timeout for every check that asks.
+type TimeoutError struct {
+	Method string
+	After  time.Duration
+}
+
+func (e *TimeoutError) Error() string {
+	return fmt.Sprintf("FreeCAD did not answer %s within %d s", e.Method, int(e.After.Round(time.Second)/time.Second))
+}
+
+// Timeout and Temporary make it a net.Error that timed out.
+func (e *TimeoutError) Timeout() bool   { return true }
+func (e *TimeoutError) Temporary() bool { return true }
+
+// Unwrap lets errors.Is find context.DeadlineExceeded.
+func (e *TimeoutError) Unwrap() error { return context.DeadlineExceeded }
 
 func (c *Connection) callMap(ctx context.Context, timeout time.Duration, method string, params ...any) (map[string]any, error) {
 	v, err := c.call(ctx, timeout, method, params...)

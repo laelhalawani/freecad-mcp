@@ -9,6 +9,7 @@ from xmlrpc.client import Fault
 import FreeCAD
 import FreeCADGui
 
+from rpc_server import view_mode
 from rpc_server.errors import UNAVAILABLE, fail, tool_call
 from rpc_server.gui_dispatch import _flush_gui_events, dispatch_to_gui
 from rpc_server.lookup import require_document
@@ -75,6 +76,10 @@ def _resolve_screenshot_size(
     return _clamp_edge(resolved_width), _clamp_edge(resolved_height)
 
 
+# The view_name that captures the view as the user sees it, changing nothing
+# (set_view's screenshot).
+CURRENT_VIEW = "Current"
+
 _STD_COMMAND_DISPATCH = {
     "Isometric": "Std_ViewIsometric",
     "Front": "Std_ViewFront",
@@ -128,6 +133,12 @@ def save_active_screenshot(
     try:
         if not hasattr(view, "saveImage"):
             return "Current view does not support screenshots"
+
+        if view_name == CURRENT_VIEW:
+            # As the user sees it: no orientation, no framing, no camera change.
+            resolved_width, resolved_height = _resolve_screenshot_size(view, width, height)
+            view.saveImage(save_path, resolved_width, resolved_height, "Current")
+            return True
 
         apply_view_orientation(view, view_name)
 
@@ -349,6 +360,11 @@ def get_active_screenshot(
             except Exception:
                 pass
 
+        # A camera mode running on this view (set_view's orbit or tour) is
+        # paused for the capture, which moves the camera and puts it back, and
+        # resumed in the finally block below.
+        mode_token = view_mode.pause(app_doc.Name)
+
         try:
             saved_camera = view.getCamera()
         except Exception:
@@ -408,6 +424,7 @@ def get_active_screenshot(
                     view.setAnimationEnabled(anim_was_enabled)
                 except Exception:
                     pass
+            view_mode.resume(mode_token)
             if switched_window and prev_window is not None:
                 try:
                     mw.setActiveWindow(prev_window)

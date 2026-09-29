@@ -2,7 +2,7 @@
 
 # The freecad-mcp binary embeds this addon, so the two always ship together.
 # Keep in step with <version> in ../package.xml.
-__version__ = "0.4.1"
+__version__ = "0.4.3"
 
 # Bump when the RPC contract changes in a way the MCP server must know about:
 # a method or parameter is added or removed, or a response shape or meaning
@@ -31,4 +31,12 @@ __version__ = "0.4.1"
 #    view exists, the von Mises colouring (coloured, colour_range_MPa,
 #    hidden_objects); a quantity property is shown in FreeCAD's preferred
 #    units everywhere.
-PROTOCOL_VERSION = 5
+# 6: set_view is added (static, orbit and tour camera control on the GUI
+#    thread); check_printability takes only bed_x, bed_y and bed_z and
+#    replies with the layout check (margins, overlaps) instead of mesh
+#    results; object replies and sizes carry tight bound boxes.
+# 7: keep_alive is added (the MCP server keeps the session lock alive while a
+#    headless job of that session runs; it also tells the banner over the 3D
+#    view about the job); check_printability options add an optional plate
+#    corner, origin [x, y].
+PROTOCOL_VERSION = 7

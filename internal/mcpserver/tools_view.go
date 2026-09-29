@@ -42,6 +42,7 @@ func (s *Server) registerViewTools() {
 		withRange(inputSchema[getViewInput](map[string]string{"view_name": `"Isometric"`}), 1, maxViewSize, "width", "height"), s.getView)
 	addTool(s.mcpServer, "insert_part_from_library", inputSchema[partInput](screenshotDefaults), s.insertPartFromLibrary)
 	addTool(s.mcpServer, "list_parts", inputSchema[struct{}](nil), s.listParts)
+	s.registerSetViewTool()
 }
 
 func (s *Server) getView(ctx context.Context, _ *mcp.CallToolRequest, in getViewInput) (*mcp.CallToolResult, any, error) {

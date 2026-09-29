@@ -298,6 +298,34 @@ def request_shutdown() -> None:
         _heartbeat_chain += 1
 
 
+def _agent_label() -> str:
+    try:
+        from rpc_server import agent_overlay
+
+        return agent_overlay.caller_label()
+    except Exception:
+        return "An agent"
+
+
+def _overlay_begin(task_id: int, operation: str, label: str) -> None:
+    """Tell the banner a task starts on the GUI thread; never fails the task."""
+    try:
+        from rpc_server import agent_overlay
+
+        agent_overlay.task_begin(task_id, operation, label)
+    except Exception:
+        pass
+
+
+def _overlay_end(task_id: int) -> None:
+    try:
+        from rpc_server import agent_overlay
+
+        agent_overlay.task_end(task_id)
+    except Exception:
+        pass
+
+
 def get_dispatch_status() -> dict[str, Any]:
     """Return GUI dispatch health without touching FreeCAD's GUI thread."""
     return _dispatch_health.snapshot()
@@ -342,6 +370,11 @@ def dispatch_to_gui(
     if operation == "<lambda>":
         operation = "GUI operation"
 
+    # Read here, on the RPC thread that serves the request: the GUI thread
+    # that runs the task has no request context of its own. Only the banner
+    # (agent_overlay) uses it.
+    agent_label = _agent_label()
+
     response_queue: "queue.Queue[Any]" = queue.Queue(maxsize=1)
     state_lock = threading.Lock()
     started_event = threading.Event()
@@ -363,6 +396,7 @@ def dispatch_to_gui(
             started_event.set()
         missing = object()
         res = missing
+        _overlay_begin(task_id, operation, agent_label)
         try:
             try:
                 res = task()
@@ -375,6 +409,7 @@ def dispatch_to_gui(
             finally:
                 # Publish completion atomically with clearing health, so a deadline
                 # racing with completion cannot report a missing successful result.
+                _overlay_end(task_id)
                 with state_lock:
                     _dispatch_health.finish(task_id)
                     if res is not missing:

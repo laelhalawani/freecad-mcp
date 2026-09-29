@@ -93,7 +93,7 @@ var snakeToken = regexp.MustCompile(`\b[a-z]+(?:_[a-z0-9]+)+\b`)
 // Every other snake_case word must be a tool or a parameter, so a misspelt or
 // invented tool name fails here.
 var otherWords = map[string]bool{
-	"already_running": true, "not_running": true, "version_check": true, "gui_dispatch": true,
+	"already_running": true, "not_running": true, "version_check": true, "gui_dispatch": true, "cpu_cores": true,
 	"asset_creation_strategy": true, "object_name": true, "object_names": true,
 	"parts_library": true,
 }

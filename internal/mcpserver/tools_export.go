@@ -14,6 +14,8 @@ type exportDocumentInput struct {
 	DocName              string   `json:"doc_name"`
 	Path                 string   `json:"path"`
 	ObjectNames          []string `json:"object_names,omitempty"`
+	PerObject            *bool    `json:"per_object,omitempty"`
+	Format               *string  `json:"format,omitempty"`
 	Overwrite            *bool    `json:"overwrite,omitempty"`
 	IncludeHidden        *bool    `json:"include_hidden,omitempty"`
 	Recompute            *bool    `json:"recompute,omitempty"`
@@ -29,7 +31,7 @@ type exportDocumentInput struct {
 
 func (s *Server) registerExportTools() {
 	schema := inputSchema[exportDocumentInput](map[string]string{
-		"overwrite": "false", "include_hidden": "false", "recompute": "true", "quality": `"standard"`,
+		"overwrite": "false", "include_hidden": "false", "recompute": "true", "quality": `"standard"`, "per_object": "false",
 		"relative": "false", "ascii": "false", "timeout": "300"})
 	schema = withEnum(schema, "quality", "coarse", "standard", "fine")
 	schema = withEnum(schema, "step_unit", "MM", "M", "INCH")
@@ -103,6 +105,16 @@ func (s *Server) exportDocument(ctx context.Context, _ *mcp.CallToolRequest, in 
 	conn, err := s.fc.get(ctx)
 	if err != nil {
 		return failure(ctx, "export document", err, ""), nil, nil
+	}
+	if in.Format != nil && !boolOr(in.PerObject, false) {
+		return render.ErrorResult(render.Error{
+			Code:    render.CodeInvalidInput,
+			Message: "format applies only with per_object true.",
+			Hint:    "The extension of path picks the format for a single file; pass per_object true for one file per object.",
+		}), nil, nil
+	}
+	if boolOr(in.PerObject, false) {
+		return s.withNotice(s.exportEach(ctx, conn, in)), nil, nil
 	}
 	res, err := conn.ExportDocument(ctx, in.DocName, in.Path, exportOptionsMap(in), in.Timeout)
 	if err != nil {
