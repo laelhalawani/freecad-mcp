@@ -2,10 +2,12 @@ package addoninstall
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io/fs"
 	"os"
 	"path"
@@ -135,7 +137,10 @@ func Install(t Target) (replaced bool, err error) {
 	return replaced, nil
 }
 
-func writeTree(dest string) error {
+// walkEmbedded visits every embedded addon entry Install writes, in a fixed
+// order: rel is its slash path below the addon folder ("" for the folder
+// itself) and p its path in addon.Files.
+func walkEmbedded(visit func(p, rel string, d fs.DirEntry) error) error {
 	return fs.WalkDir(addon.Files, addon.Name, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -146,7 +151,120 @@ func writeTree(dest string) error {
 			}
 			return nil
 		}
-		rel := strings.TrimPrefix(strings.TrimPrefix(p, addon.Name), "/")
+		return visit(p, strings.TrimPrefix(strings.TrimPrefix(p, addon.Name), "/"), d)
+	})
+}
+
+// contentHashFile records, in an installed addon, the hash of the embedded
+// files it was written from. Its name starts with a dot, so it is never part
+// of the hash itself.
+const contentHashFile = ".content-sha256"
+
+// EmbeddedContentHash is the SHA-256 of the files Install writes: each path
+// and content, in order. Two builds with the same version number but
+// different files differ here.
+func EmbeddedContentHash() (string, error) {
+	h := sha256.New()
+	err := walkEmbedded(func(p, rel string, d fs.DirEntry) error {
+		if d.IsDir() {
+			return nil
+		}
+		data, err := fs.ReadFile(addon.Files, p)
+		if err != nil {
+			return err
+		}
+		addToHash(h, rel, data)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// addToHash adds one file to a content hash.
+func addToHash(h hash.Hash, rel string, data []byte) {
+	fmt.Fprintf(h, "%s\x00%d\x00", rel, len(data))
+	h.Write(data)
+}
+
+// embeddedExtensions are the file extensions the embedded addon has (.py,
+// .xml, ...), so a stray such as desktop.ini or Thumbs.db an operating system
+// adds to the folder is not taken for a difference.
+func embeddedExtensions() (map[string]bool, error) {
+	exts := map[string]bool{}
+	err := walkEmbedded(func(_, rel string, d fs.DirEntry) error {
+		if !d.IsDir() {
+			exts[strings.ToLower(path.Ext(rel))] = true
+		}
+		return nil
+	})
+	return exts, err
+}
+
+// installedContentHash is EmbeddedContentHash over the files actually in dir,
+// skipping what Install never writes (bytecode FreeCAD leaves, dot-files, and
+// files whose extension the embedded addon does not have).
+func installedContentHash(dir string) (string, error) {
+	exts, err := embeddedExtensions()
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if p != dir && skipped(d.Name()) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() || !exts[strings.ToLower(filepath.Ext(d.Name()))] {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		addToHash(h, filepath.ToSlash(rel), data)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// SameContent reports whether the addon installed in t is the embedded one:
+// it carries the record Install writes, that record names the files embedded
+// now, and the files in the folder still hash to it (no stale, missing or
+// edited file). A copy without the record (installed by an earlier release)
+// counts as different, so refresh replaces it once.
+func SameContent(t Target) bool {
+	want, err := EmbeddedContentHash()
+	if err != nil {
+		return false
+	}
+	got, err := os.ReadFile(filepath.Join(t.AddonDir(), contentHashFile))
+	if err != nil || strings.TrimSpace(string(got)) != want {
+		return false
+	}
+	have, err := installedContentHash(t.AddonDir())
+	return err == nil && have == want
+}
+
+func writeTree(dest string) error {
+	hash, err := EmbeddedContentHash()
+	if err != nil {
+		return err
+	}
+	err = walkEmbedded(func(p, rel string, d fs.DirEntry) error {
 		target := filepath.Join(dest, filepath.FromSlash(rel))
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
@@ -157,6 +275,10 @@ func writeTree(dest string) error {
 		}
 		return os.WriteFile(target, data, 0o644)
 	})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dest, contentHashFile), []byte(hash+"\n"), 0o644)
 }
 
 // Uninstall removes the addon from t. It reports false when none was there.

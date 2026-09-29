@@ -70,8 +70,8 @@ def _radius_of(shape: Any, Part: Any) -> float | None:
 
 
 def _not_found_hint(doc: Any, name: str) -> str:
-    return ("Call " + tool_call("get_object", {"doc_name": doc.Name, "obj_name": name})
-            + " to see its face, edge and vertex counts.")
+    return ("Call " + tool_call("list_subelements", {"doc_name": doc.Name, "obj_name": name})
+            + " to see its faces and edges with their names.")
 
 
 def _path_owner(top_name: str, sub: str) -> str:

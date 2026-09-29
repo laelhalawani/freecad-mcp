@@ -13,9 +13,9 @@ import (
 )
 
 type femInput struct {
-	DocName      string `json:"doc_name" jsonschema:"the name of the FreeCAD document"`
-	AnalysisName string `json:"analysis_name" jsonschema:"the name of the Fem::AnalysisPython object"`
-	Timeout      *int   `json:"timeout,omitempty" jsonschema:"seconds to wait for the solver, from 1 to 3600 (an hour); default 600"`
+	DocName      string `json:"doc_name"`
+	AnalysisName string `json:"analysis_name"`
+	Timeout      *int   `json:"timeout,omitempty"`
 	screenshotOptions
 }
 
@@ -54,45 +54,15 @@ type femFront struct {
 	Transaction     string   `yaml:"transaction,omitempty"`
 }
 
-// maxFEMTimeout bounds the solver wait, matching the addon's own cap
-// (rpc_server.py MAX_FEM_ANALYSIS_TIMEOUT): a caller that follows this
-// schema's maximum must never get the addon's bare "timeout must be at
-// most 3600 seconds" instead of this tool's own, better-explained error.
-const maxFEMTimeout = 3600
-
-const femDescription = `Run the CalculiX solver on an existing FEM analysis container and return summary results.
-
-Prerequisites in the document, all created with create_object:
-- A Part-derived solid (e.g. Part::Box, PartDesign::Body) acting as the geometry.
-- A Fem::AnalysisPython container.
-- A Fem::MaterialCommon assigned to the geometry, added to the analysis.
-- A Fem::FemMeshGmsh referencing the geometry, added to the analysis (the mesh is generated automatically when created).
-- At least one Fem::ConstraintFixed and one Fem::ConstraintForce (or ConstraintPressure) bound to faces of the geometry, added to the analysis.
-
-A CalculiX solver already in the analysis is reused; a SolverCcxTools is created when it has none. The solver runs synchronously on the FreeCAD GUI thread, so every other tool that needs the GUI thread waits until it finishes; do not send parallel requests. get_rpc_status and get_async_status do not use the GUI thread and stay answerable while it runs.
-
-Returns the maximum and minimum von Mises stress (MPa), the maximum displacement (mm), the node count, the name of the result object, and the working directory CalculiX wrote to. On failure it returns the prerequisite check or solver error with the working directory for triage; list_objects shows what the analysis holds.`
+// maxFEMTimeout bounds the solver wait (a week), so the reply timeout derived
+// from it stays a sane duration.
+const maxFEMTimeout = 7 * 24 * 3600
 
 func (s *Server) registerStatusTools() {
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name: "get_rpc_status",
-		Description: "Check FreeCAD's health without using its GUI thread, so it answers even while FreeCAD has not " +
-			"started yet, is still starting, has exited, or a GUI operation elsewhere is stuck. Reports freecad " +
-			"(running, starting, not_running, exited or unresponsive) and rpc (reachable or unreachable); when " +
-			"reachable, the full status (including gui_dispatch, which names a GUI operation still stuck, and " +
-			"version_check: \"ok\" or whether the addon or this server needs updating) and the open documents; " +
-			"when not, the process id, elapsed time since start_freecad, exit code and launch log tail known so " +
-			"far. This is the tool to poll after start_freecad until it reports rpc: reachable, and to call " +
-			"whenever another tool times out or FreeCAD's state is unclear. Once it reports running, use " +
-			"list_documents for the full per-document detail.",
-		InputSchema: inputSchema[struct{}](nil),
-	}, s.getRPCStatus)
-
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name:        "run_fem_analysis",
-		Description: femDescription,
-		InputSchema: withPositiveMax(inputSchema[femInput](mergeDefaults(screenshotDefaults, map[string]string{"timeout": "600"})), "timeout", maxFEMTimeout),
-	}, s.runFEMAnalysis)
+	addTool(s.mcpServer, "get_rpc_status", inputSchema[struct{}](nil), s.getRPCStatus)
+	addTool(s.mcpServer, "run_fem_analysis",
+		withPositiveMax(inputSchema[femInput](mergeDefaults(screenshotDefaults, map[string]string{"timeout": "600"})), "timeout", maxFEMTimeout),
+		s.runFEMAnalysis)
 }
 
 // getRPCStatus never errors because FreeCAD is down: it probes for FreeCAD
@@ -434,6 +404,42 @@ func femFailureHint(res map[string]any, larger string) string {
 	return "Check the prerequisites listed in this tool's description with list_objects; the details that follow include the working directory."
 }
 
+// femLoadsText lists each force and pressure of the analysis with its
+// magnitude and the direction it acts in, or "" when the reply has none.
+func femLoadsText(res map[string]any) string {
+	loads, _ := res["loads"].([]any)
+	var b strings.Builder
+	for _, item := range loads {
+		if load, ok := item.(map[string]any); ok {
+			fmt.Fprintf(&b, "\n- %s: %s", str(load, "name"), str(load, "text"))
+		}
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return "\n\nLoads:" + b.String()
+}
+
+// femColourText says the screenshot is coloured by von Mises stress and over
+// what range, or "" when the addon did not colour the result.
+func femColourText(res map[string]any) string {
+	if !boolField(res, "coloured") {
+		return ""
+	}
+	rng, _ := res["colour_range_MPa"].([]any)
+	if len(rng) != 2 {
+		return ""
+	}
+	text := fmt.Sprintf("\n\nThe view colours the %s from %s to %s. The colour bar is labelled in Pa (1e6 Pa = 1 MPa).",
+		str(res, "colour_field"), formatMeasure(rng[0], "MPa"), formatMeasure(rng[1], "MPa"))
+	if hidden := stringItems(res["hidden_objects"]); len(hidden) > 0 {
+		text += fmt.Sprintf(" %s hidden so the result shows; show one again with update_object and "+
+			"{\"ViewObject\": {\"Visibility\": true}}. A shown solid covers the stress colours: hide it again, or use get_view to look.",
+			strings.Join(hidden, ", "))
+	}
+	return text
+}
+
 func (s *Server) runFEMAnalysis(ctx context.Context, _ *mcp.CallToolRequest, in femInput) (*mcp.CallToolResult, any, error) {
 	timeout := 600
 	if in.Timeout != nil {
@@ -485,7 +491,7 @@ func (s *Server) runFEMAnalysis(ctx context.Context, _ *mcp.CallToolRequest, in 
 	}
 	res["summary"] = fmt.Sprintf("FEM analysis '%s' solved. max von Mises = %s, max displacement = %s (%v nodes).",
 		in.AnalysisName, formatMeasure(res["max_von_mises_MPa"], "MPa"), formatMeasure(res["max_displacement_mm"], "mm"), res["node_count"])
-	body := transactionNote(res["summary"].(string)+"\n\n"+jsonBlock(res), txName, txMerged)
+	body := transactionNote(res["summary"].(string)+femLoadsText(res)+femColourText(res)+"\n\n"+jsonBlock(res), txName, txMerged)
 	out := render.SuccessResult(front, body)
 	return s.withNotice(s.screenshot(ctx, conn, out, in.IncludeScreenshot, viewString(in.ViewName), in.DocName)), nil, nil
 }

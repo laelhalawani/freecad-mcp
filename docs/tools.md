@@ -2,7 +2,7 @@
 
 [Back to README](../README.md) · [Installation](installation.md) · [Configuration](configuration.md) · [Code execution](execution.md) · [Remote access](remote-access.md)
 
-FreeCAD MCP exposes 39 tools, grouped below by task; two of them,
+FreeCAD MCP exposes 40 tools, grouped below by task; two of them,
 `release_session` and `close_freecad`, are listed only while
 [remote access](remote-access.md) is on, since they manage the multi-agent
 session lock that comes with it. Every tool that changes a document records
@@ -10,6 +10,14 @@ its change as one named transaction, next to edits made by hand in FreeCAD,
 so `undo` and `redo` cover it. Placements use degrees: a `Rotation`'s `Angle`
 is given to `create_object` and `update_object` in degrees, and `get_object`
 and `list_objects` report it in degrees.
+
+Every tool carries a title and behaviour hints (read-only, changes something,
+runs code) that clients use for approval prompts, and the server sends short
+instructions that name the rules shared by all tools: units, expressions,
+links, finding faces with `list_subelements`, paths and the session. The
+`freecad-mcp-guide` skill (see [installation](installation.md#the-guide-skill))
+adds workflows across tools, and the `asset_creation_strategy` prompt returns
+its home text.
 
 Most tools take a `doc_name`, the internal name `list_documents` shows (not
 necessarily the document's label), and many take `obj_name` the same way from
@@ -25,7 +33,7 @@ hosting the MCP server, so its paths are on that computer instead.
 
 - [Document lifecycle](#document-lifecycle)
 - [Objects](#objects)
-- [Measurement and selection](#measurement-and-selection)
+- [Measurement and selection](#measurement-and-selection) (`measure`, `get_selection`, `list_subelements`)
 - [Mesh operations](#mesh-operations)
 - [Spreadsheets](#spreadsheets)
 - [Import and export](#import-and-export)
@@ -132,7 +140,8 @@ Save an open document to a new `.FCStd` file at an absolute path.
 - `timeout` (number, optional, default 120, up to 1800 seconds).
 
 Without `copy`, the document then uses that file and its label becomes the
-file name. A file another open document already uses is refused. Use
+file name. A missing folder in `path` is created, and the reply says so. A
+file another open document already uses is refused. Use
 `export_document` for STEP, STL, 3MF and other exchange formats.
 
 ### `close_document`
@@ -144,7 +153,8 @@ Close an open document and its tabs.
   changes, losing them.
 
 A document with unsaved changes is refused unless `discard_changes` is true;
-call `save_document` or `save_document_as` first to keep them. The reply names
+call `save_document` first to keep them, or `save_document_as` when the
+document was never saved (the refusal says which). The reply names
 the document active afterwards, or says none is. FreeCAD asks no questions, so
 nothing waits for a person.
 
@@ -188,11 +198,67 @@ Label instead; always use the returned name in later calls. A `Placement`'s
 The reply names the created object and, unless `include_screenshot` is false,
 carries a screenshot. An object that was created but failed to compute still
 stays in the document under its name, reported as an error naming it, with a
-hint to fix it with `update_object` or remove it with `delete_object`.
+hint to fix it with `update_object` or remove it with `delete_object`. When
+creating the object or setting one of its properties raises an error, nothing
+is left behind: the call's transaction is discarded (or, when the call joined a
+transaction already open in FreeCAD, the new objects are removed by hand), and
+the error ends with "Nothing was created." An object that was created but
+does not compute stays and the reply names it, as above.
+
+A `Fem::ConstraintForce` acts along the outward normal of its first face (or
+along its `Direction` link when set) and a `Fem::ConstraintPressure` acts into
+its face; `Reversed` true flips either. A load with no face referenced yet
+says "no face is referenced yet, so no direction is known yet". The reply of
+`create_object` and
+`update_object` for such a constraint states the direction as a vector in
+global coordinates and in words, for example "Force 500.00 N acts along (0, 0,
+1): the outward normal of Face3." and "Pressure 2000.00 kPa acts along (0, 0,
+-1): into the face, against the outward normal of Face6."
+
+#### Property values
+
+The same forms apply to `create_object` and `update_object`:
+
+- Numbers on a quantity property (length, force, pressure and so on) are in
+  FreeCAD's base units: `{"Force": 100}` is 100 mm\*kg/s^2, which is 0.1 N. Pass
+  units as strings instead: `"100 N"`, `"5 mm"`, `"210 GPa"`. The reply lists
+  every quantity property the call set, and `get_object` and `list_objects`
+  show every quantity, in the units FreeCAD prefers for it (its own property
+  editor's units), for example `Force: 100.00 N` and `Pressure: 2000.00 kPa`.
+- A string map property, such as the `Material` of `Fem::MaterialCommon`, takes
+  numbers as well as strings: `{"Material": {"Name": "Steel", "YoungsModulus":
+  "210 GPa", "PoissonRatio": 0.3, "Density": "7900 kg/m^3"}}`. FreeCAD stores
+  each value as text.
+- A dotted name sets one part of a compound property and leaves the rest:
+  `{"Placement.Base.z": 5}`, `{"Placement.Rotation.Angle": 30}` (degrees). It
+  reads the property, changes the part and assigns it back. `Rotation.Angle`
+  turns about the current axis (`(0, 0, 1)` for an object not turned yet); set
+  a whole `Rotation` to change the axis. The settable parts of a Placement are
+  `Base.x`, `Base.y`, `Base.z`, `Rotation.Angle`, `Rotation.Yaw`,
+  `Rotation.Pitch` and `Rotation.Roll` (degrees) and `Rotation.Axis.x`, `.y`
+  and `.z` (FreeCAD renormalises the axis); a part takes a number or an
+  expression, not a dict. A dotted name gets no quantity line in the reply.
+  A dotted name also
+  takes an expression, `{"Placement.Base.z": "=Params.thickness"}`, which calls
+  `setExpression` on that path, and a bare `"="` removes it. A part name the
+  property lacks is an error naming the path.
+- A link property takes an object name: any `App::PropertyLink*` property
+  (`Base`, `Tool`, `Source`, `Profile`, and so on) takes a string, and any
+  `App::PropertyLinkList*` property (`Shapes` of `Part::MultiFuse` and
+  `Part::MultiCommon`, `Group`, and so on) takes a list of strings. A name that
+  is not in the document is an error.
+- A string starting with `=` binds an expression, as the spreadsheet tools do:
+  `{"Height": "=Params.thickness"}` calls `setExpression("Height",
+  "Params.thickness")`. A bare `"="` removes the binding.
+- `References` takes a list whose entries are `{"object_name": "Box", "face":
+  "Face1"}`, `{"object_name": "Box", "faces": ["Face1", "Face2"]}`, `["Box",
+  "Face1"]` or `["Box", ["Face1", "Face2"]]`; any other entry is an error that
+  lists these four forms. `list_subelements` shows which face is which.
 
 ### `update_object`
 
-Set properties of an existing object, in the same form `create_object` takes.
+Set properties of an existing object, in the same form `create_object` takes
+(see [property values](#property-values)).
 
 - `doc_name` (string, required)
 - `obj_name` (string, required): the object to update.
@@ -200,7 +266,8 @@ Set properties of an existing object, in the same form `create_object` takes.
 - `include_screenshot`, `view_name`: see [screenshot options](#screenshot-options).
 
 Use it when `create_object` cannot set a property at creation time, then
-verify the result with `get_object`.
+verify the result with `get_object`. The reply lists the quantity properties
+the call set with their resulting values and units.
 
 ### `delete_object`
 
@@ -220,9 +287,9 @@ List every object in a document with its type and properties.
 - `doc_name` (string, required)
 - `compact` (boolean, default `false`): short rows (name, label, type, state,
   valid, parent, visible) instead of every property.
-- `include_screenshot`, `view_name`: see [screenshot options](#screenshot-options).
-  With `compact`, the screenshot is off unless `include_screenshot` is passed
-  as `true`, since the point of a compact call is a quick, cheap read.
+- `include_screenshot` (boolean, default `false`), `view_name`: see
+  [screenshot options](#screenshot-options). The screenshot is off unless
+  `include_screenshot` is passed as `true`.
 
 Use it before changing a document to see what exists and which names to pass
 to `get_object`, `update_object` and `delete_object`. An unknown document
@@ -234,11 +301,16 @@ Get one object with its type and all its properties.
 
 - `doc_name` (string, required)
 - `obj_name` (string, required)
-- `include_screenshot`, `view_name`: see [screenshot options](#screenshot-options).
+- `include_screenshot` (boolean, default `false`), `view_name`: see
+  [screenshot options](#screenshot-options). The screenshot is off unless
+  `include_screenshot` is passed as `true`.
 
 Use it to check the values `update_object` or `create_object` set, or to see
-which properties an object has before updating it. A missing object is a
-not-found error naming `list_objects` and `list_documents` as next steps.
+which properties an object has before updating it. Its `Shape` block gives
+the volume, area, vertex, edge, face and solid counts (`SolidCount`, so a fused
+result shown as one Compound of two solids is clear), the bounding box and the
+centre of mass; quantities are in FreeCAD's preferred units. A missing object
+is a not-found error naming `list_objects` and `list_documents` as next steps.
 
 ## Measurement and selection
 
@@ -267,7 +339,8 @@ element on the top object instead. Without `sub`, the whole object is used.
 
 The reply gives the value and its unit (`mm`, `deg`, `mm^2`, `mm^3`), and for
 `distance` the two closest points. A `sub` naming no face, edge or vertex of an
-object that does resolve to a shape is a not-found error; `volume` on an
+object that does resolve to a shape is a not-found error whose hint points to
+`list_subelements` for the object's face and edge names; `volume` on an
 object with no solid is an invalid-input error. `get_object`'s bounding box
 also helps size an object without a full measurement.
 
@@ -282,6 +355,25 @@ The reply is a table of document, object, label, type and sub-elements
 (`Face6`, `Edge12`, and so on), plus the picked points. Use it when the user
 refers to "this face" or "the selected edge", then pass the names to `measure`
 or `update_object`. An empty result means nothing is selected.
+
+### `list_subelements`
+
+List the faces and edges of an object with their names and geometry. It reads
+the document and changes nothing.
+
+- `doc_name` (string, required)
+- `obj_name` (string, required)
+- `kind` (string, default `"faces"`, one of `faces`, `edges`, `all`).
+
+The reply is a table per kind, in global coordinates, lengths in mm and areas
+in mm^2. Each face row gives its name (`Face1`), surface type (`plane`,
+`cylinder`, `cone`, `sphere`, `torus` or `other`), area and centre of mass,
+plus the normal of a plane and the radius and axis of a cylinder or sphere.
+Each edge row gives its name (`Edge1`), curve type (`line`, `circle` or
+`other`) and length, plus the radius and centre of a circle. Use it to find the
+face to pass to `measure` as a `sub`, or to a `References` entry such as a FEM
+constraint's. An object with no shape, or an unknown object or document, is an
+error.
 
 ## Mesh operations
 
@@ -405,7 +497,10 @@ dependent objects update.
   objects update.
 
 The reply shows each changed cell's new value and any objects that became
-invalid; undo reverts the whole change in one step. A bad address or alias in
+invalid; undo reverts the whole change in one step. Its content column is
+FreeCAD's stored text: an expression or a number with a unit starts with `=`
+(`=5 mm`), text starts with `'`, and a plain number has no mark; the reply says
+so. A bad address or alias in
 the batch (already used, syntactically invalid, or a reserved word such as a
 unit or a constant) is rejected before anything is changed. A failure caught
 only once FreeCAD applies it rolls this call's own changes back: when it
@@ -493,7 +588,8 @@ Without `object_names`, the visible top-level objects with geometry are
 exported, so a Body is written once, not once per feature. The reply gives the
 file, its size, the exported and skipped objects and, for meshes, the facet
 count and whether the mesh is closed. An existing file is only replaced with
-`overwrite` true; a missing target directory is an invalid-input error. Use
+`overwrite` true. A missing folder in `path` is created and the reply says so;
+a folder that cannot be created is an invalid-input error. Use
 `save_document_as` to save the document itself, and `check_printability`
 before exporting for a printer.
 
@@ -513,7 +609,8 @@ writes them to STL or 3MF.
 - `build_direction` (string, default `"+Z"`, one of `+Z`, `-Z`, `+X`, `-X`,
   `+Y`, `-Y`): the model axis that points up on the printer.
 - `overhang_angle_deg` (number, default 45, 0 to 89 degrees): overhangs
-  steeper than this from vertical count as needing support.
+  downward faces that lean more than this from vertical count as needing
+  support.
 - `check_self_intersections` (boolean, default `true`): also look for
   self-intersecting triangles, slower on large meshes.
 - `quality` (string, default `"standard"`, one of `coarse`, `standard`,
@@ -525,8 +622,10 @@ writes them to STL or 3MF.
 For each object, the reply reports whether its shape is valid, closed and how
 many solids it has, FreeCAD's full shape check, whether its tessellated mesh
 is closed without non-manifold edges or self-intersections, its size along
-the build axes and, with the bed dimensions given, whether it fits (turned by
-90 degrees if needed), and the area of overhangs needing support. `printable`
+the build axes, the area of overhangs needing support and, with the bed
+dimensions given, whether it fits (turned by 90 degrees if needed). The size,
+the overhang area and the bed fit are reported for every object, including
+those ready to print. `printable`
 is true only when at least one object was checked and none of them has an
 issue; it is false, not vacuously true, when `object_names` names nothing or
 no visible top-level solid or mesh exists to check. Mesh objects are checked
@@ -542,7 +641,7 @@ summary results.
 
 - `doc_name` (string, required)
 - `analysis_name` (string, required): the `Fem::AnalysisPython` object.
-- `timeout` (integer, optional, default 600, 1 to 3600 seconds, an hour).
+- `timeout` (integer, optional, default 600, 1 to 604800 seconds, a week).
 - `include_screenshot`, `view_name`: see [screenshot options](#screenshot-options).
 
 Prerequisites in the document, all created with `create_object`:
@@ -563,8 +662,17 @@ send parallel requests. `get_rpc_status` and `get_async_status` stay
 answerable while it runs.
 
 The reply gives the maximum and minimum von Mises stress (MPa), the maximum
-displacement (mm), the node count, the result object's name, and the working
-directory CalculiX wrote to. On failure it returns the prerequisite check or
+displacement (mm), the node count, the result object's name, the working
+directory CalculiX wrote to, and every force and pressure of the analysis with
+its magnitude and direction. With a 3D view the screenshot is coloured by von
+Mises stress the way FreeCAD shows a result (the result pipeline's von Mises
+field, with its colour bar, which is labelled in Pa: 1e6 Pa = 1 MPa), the reply
+gives the range of the scale in MPa, and
+the meshed solid and the mesh are hidden so the result shows; show them again
+with `update_object` and `{"ViewObject": {"Visibility": true}}` (a shown solid
+covers the stress colours: hide it again, or use `get_view`; the tool
+description says so up front). Without a 3D view the reply carries the numbers
+only. On failure it returns the prerequisite check or
 solver error with the working directory for triage; `list_objects` shows what
 the analysis holds.
 
@@ -736,7 +844,7 @@ change: `create_object`, `update_object`, `delete_object`, `list_objects`,
 
 | Parameter | Default | Purpose |
 | --- | --- | --- |
-| `include_screenshot` | `true` (`false` for a compact `list_objects` call) | Set to `false` for text-only feedback, such as analytical scripts or intermediate steps. |
+| `include_screenshot` | `true` (`false` for `list_objects` and `get_object`, which only read) | Set to `false` for text-only feedback, such as analytical scripts or intermediate steps; set to `true` on `list_objects` or `get_object` to see the model. |
 | `view_name` | `"Isometric"` | Orient the returned screenshot, for example `"Front"`, `"Top"`, or `"Right"`. |
 
 The [`FREECAD_MCP_ONLY_TEXT_FEEDBACK` setting](configuration.md#text-feedback-and-screenshots)

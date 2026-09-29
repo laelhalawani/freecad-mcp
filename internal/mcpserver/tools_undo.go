@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sairaph/mcp-wizard/render"
 )
@@ -13,30 +14,18 @@ import (
 const maxUndoSteps = 100
 
 type undoInput struct {
-	DocName string `json:"doc_name" jsonschema:"the name of an open document, as list_documents shows it"`
-	Steps   *int   `json:"steps,omitempty" jsonschema:"how many transactions to walk, 1 to 100 (default 1)"`
+	DocName string `json:"doc_name"`
+	Steps   *int   `json:"steps,omitempty"`
 	screenshotOptions
 }
 
 func (s *Server) registerUndoTools() {
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name: "undo",
-		Description: "Undo the last changes to a FreeCAD document, one transaction per step. Every tool that " +
-			"changes a document records its changes as one transaction named after the tool, such as " +
-			"'MCP: create_object', next to the edits made by hand in FreeCAD. The reply names the transactions " +
-			"undone and those left to undo or redo; redo reapplies them. Refused while a task panel is open in FreeCAD.",
-		InputSchema: withRange(inputSchema[undoInput](mergeDefaults(screenshotDefaults, map[string]string{"steps": "1"})),
-			1, maxUndoSteps, "steps"),
-	}, s.undo)
-
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name: "redo",
-		Description: "Redo changes to a FreeCAD document that undo reverted, one transaction per step, in the order " +
-			"they were undone. A new change after an undo clears what can be redone. The reply names the " +
-			"transactions redone and those left to undo or redo. Refused while a task panel is open in FreeCAD.",
-		InputSchema: withRange(inputSchema[undoInput](mergeDefaults(screenshotDefaults, map[string]string{"steps": "1"})),
-			1, maxUndoSteps, "steps"),
-	}, s.redo)
+	stepped := func() *jsonschema.Schema {
+		return withRange(inputSchema[undoInput](mergeDefaults(screenshotDefaults, map[string]string{"steps": "1"})),
+			1, maxUndoSteps, "steps")
+	}
+	addTool(s.mcpServer, "undo", stepped(), s.undo)
+	addTool(s.mcpServer, "redo", stepped(), s.redo)
 }
 
 // undoFront is the front matter shared by undo and redo; only the field for

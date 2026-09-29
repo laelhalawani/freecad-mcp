@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -329,6 +330,52 @@ func transactionNote(body, name string, merged bool) string {
 	}
 	return body + fmt.Sprintf("\n\nThe changes joined FreeCAD's open '%s' transaction (a command or task panel "+
 		"is active); they are undone together with it.", name)
+}
+
+// createdFolderNote is the sentence saying a write created its missing
+// folder, or "" when the folder already existed.
+func createdFolderNote(res map[string]any) string {
+	dir := str(res, "created_directory")
+	if dir == "" {
+		return ""
+	}
+	return fmt.Sprintf(" The folder '%s' did not exist, so it was created.", dir)
+}
+
+// loadNote appends what a force or pressure constraint acts along, when the
+// reply describes one.
+func loadNote(body string, res map[string]any) string {
+	load, _ := res["load"].(map[string]any)
+	if text := str(load, "text"); text != "" {
+		return body + "\n\n" + text
+	}
+	return body
+}
+
+// quantityNote appends the quantity properties a create or update call set,
+// with the value and unit FreeCAD gives them, to body. A number on a quantity
+// property is in FreeCAD's base units, so this shows the caller what was
+// actually stored.
+func quantityNote(body string, res map[string]any) string {
+	quantities, _ := res["quantities"].(map[string]any)
+	if len(quantities) == 0 {
+		return body
+	}
+	names := make([]string, 0, len(quantities))
+	for name := range quantities {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		if v, ok := quantities[name].(string); ok {
+			parts = append(parts, name+": "+v)
+		}
+	}
+	if len(parts) == 0 {
+		return body
+	}
+	return body + "\n\nQuantity properties now: " + strings.Join(parts, ", ") + "."
 }
 
 // invalidObjectsCount reads how many objects are invalid: the addon's

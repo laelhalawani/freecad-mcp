@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -15,6 +16,16 @@ import (
 	"github.com/sairaph/freecad-mcp/internal/domain"
 	"github.com/sairaph/freecad-mcp/internal/xmlrpc/xmlrpctest"
 )
+
+// TestMain keeps the tests independent of the machine they run on: without it
+// the remote-only tools are listed whenever this computer's own listener runs
+// (initialRemoteTools), which depends on the user's real remote access setup.
+// No test here needs the listener on; one that does can assign listenerRunning
+// for its own duration and restore it afterwards.
+func TestMain(m *testing.M) {
+	listenerRunning = func() bool { return false }
+	os.Exit(m.Run())
+}
 
 var pngBytes = []byte("\x89PNG\r\n\x1a\nfake")
 
@@ -106,7 +117,7 @@ func TestToolsAreListedWithTheirSchemas(t *testing.T) {
 		"create_document", "create_object", "delete_object", "execute_code",
 		"execute_code_async", "execute_code_headless", "export_document", "get_async_status", "get_object",
 		"get_rpc_status", "get_selection", "get_spreadsheet_cells", "get_view", "import_file",
-		"insert_part_from_library", "list_documents", "list_objects", "list_parts", "measure",
+		"insert_part_from_library", "list_documents", "list_objects", "list_parts", "list_subelements", "measure",
 		"mesh_to_solid", "open_document", "recompute_document", "redo", "reload_document", "repair_mesh",
 		"run_fem_analysis", "save_document", "save_document_as", "solid_to_mesh", "start_freecad", "undo",
 		"update_object", "update_spreadsheet_cells"}
@@ -437,7 +448,7 @@ func TestPromptIsServed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text := res.Messages[0].Content.(*mcp.TextContent).Text; !strings.Contains(text, "Asset Creation Strategy") {
+	if text := res.Messages[0].Content.(*mcp.TextContent).Text; !strings.Contains(text, "# FreeCAD MCP guide") {
 		t.Fatalf("prompt = %q", text)
 	}
 }

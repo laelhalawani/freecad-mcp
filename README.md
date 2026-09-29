@@ -48,7 +48,12 @@ your `PATH` and starts the setup wizard, which:
    machine that has FreeCAD, use the app's Connect page or `freecad-mcp
    connect` afterwards);
 4. registers the `freecad` server with the selected clients, then installs
-   the addon and applies what you chose.
+   the addon and applies what you chose. It also writes the
+   `freecad-mcp-guide` skill (workflows and rules for the tools) into the
+   skill folder each selected client reads, such as `~/.claude/skills` for
+   Claude Code or `~/.agents/skills` for Codex and Gemini CLI; Claude Desktop
+   takes skills only as an upload, so it gets a note instead (see the
+   [installation guide](docs/installation.md#the-guide-skill)).
 
 Nothing is written until step 4, so cancelling earlier leaves your machine as
 it was.

@@ -13,12 +13,6 @@ import (
 	"github.com/sairaph/freecad-mcp/internal/freecad"
 )
 
-// filePathsNote ends the description of every tool that takes or writes file
-// paths: they are paths on the computer running FreeCAD.
-const filePathsNote = "Paths are on the computer running FreeCAD, which with remote access is another " +
-	"computer than this one; this connection transfers no files, so copy files to or from that computer by " +
-	"other means (for example scp) when needed."
-
 // Server wraps the MCP server and the FreeCAD connection.
 type Server struct {
 	mcpServer *mcp.Server
@@ -42,15 +36,7 @@ func New(config Config) *Server {
 				Version: config.Version,
 			},
 			&mcp.ServerOptions{
-				Instructions: "FreeCAD integration through the Model Context Protocol. " +
-					"If FreeCAD is not running, call start_freecad, then poll get_rpc_status every few seconds " +
-					"until it reports rpc: reachable. Start with list_documents or list_objects to see the " +
-					"current state; open_document, import_file and export_document handle files on disk, and " +
-					"undo/redo, recompute_document, check_printability, the mesh tools, the spreadsheet tools, " +
-					"and measure/get_selection cover the rest of the model lifecycle. Read the " +
-					"asset_creation_strategy prompt for the recommended workflow. When several agents share " +
-					"one FreeCAD (remote access), get_rpc_status shows who holds it; save your work and call " +
-					"release_session or close_freecad when you stop.",
+				Instructions: serverInstructions,
 			},
 		),
 	}

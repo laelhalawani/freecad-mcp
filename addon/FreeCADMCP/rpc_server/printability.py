@@ -309,7 +309,7 @@ def _check_object(
         size = _axis_size(bb, build_direction)
         fits_bed = _fits_bed(size, bed)
         if fits_bed is False:
-            issues.append("does not fit the bed in any orientation")
+            issues.append("does not fit the bed, even turned about the build axis")
 
         if not budget_ok():
             issues.append("overhang check skipped: the remaining time budget is low")

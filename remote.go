@@ -192,6 +192,10 @@ func applyShare(ctx context.Context, w io.Writer, targets []addoninstall.Target,
 func shareOnResultLine(w io.Writer, port int, allowedIPs string) {
 	fmt.Fprintf(w, "  [ok] Remote access on: other devices connect to %s; allowed: %s\n",
 		shareAddressLine(port), allowedIPs)
+	if prefixes, err := domain.ParseAllowedIPs(allowedIPs); err == nil && domain.LoopbackOnly(prefixes) {
+		fmt.Fprintln(w, "  Only this computer (or an SSH tunnel) may connect; no LAN subnet was set or detected.")
+	}
+	fmt.Fprintln(w, "  Change which devices may connect in freecad-mcp > Share this PC > Advanced.")
 	if runtime.GOOS == "windows" {
 		fmt.Fprintln(w, "  Windows may ask whether to allow freecad-mcp. Allow it for the network type this "+
 			"computer uses (Private or Public), or other devices cannot connect.")
@@ -791,6 +795,25 @@ func suggestedAllowedIPs() []string {
 		return []string{subnet}
 	}
 	return lanSubnets()
+}
+
+// initialAllowedIPs is the allowed-IP list a share starts from, shared by the
+// install wizard and the Share page. A saved list is kept, except when there
+// is nothing deliberately chosen to keep: never saved, or nothing but the
+// plain default while remote access is off (still a first time). While remote
+// access is on, a saved plain default is the loopback-only SSH-tunnel setup,
+// chosen on purpose, and is kept so it is never widened to the LAN. When
+// nothing is saved and no network is detected the result is the loopback
+// default.
+func initialAllowedIPs(s addoninstall.RemoteSettings) string {
+	ips := s.AllowedIPs
+	if ips == "" || (ips == addoninstall.DefaultAllowedIPs && !s.RemoteEnabled) {
+		ips = strings.Join(suggestedAllowedIPs(), ", ")
+	}
+	if ips == "" {
+		ips = addoninstall.DefaultAllowedIPs
+	}
+	return ips
 }
 
 // lanAddresses are this computer's own LAN IP addresses (not subnets), used

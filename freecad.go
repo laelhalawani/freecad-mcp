@@ -58,7 +58,7 @@ func registerFreeCADCommands(r *command.Registry) {
 			fs := flag.NewFlagSet("install-addon", flag.ContinueOnError)
 			dir := fs.String("user-data-dir", "", "FreeCAD user data directory (default: ask FreeCAD)")
 			noAuto := fs.Bool("no-autostart", false, "turn off starting the RPC server with FreeCAD (default: keep the current setting, on for a new install)")
-			refresh := fs.Bool("refresh", false, "only update existing installs, keeping their settings (used by update)")
+			refresh := fs.Bool("refresh", false, "only update existing installs, keeping their settings, and rewrite the guide skill where it was installed (used by update)")
 			dryRun := fs.Bool("dry-run", false, "show where the addon would go without writing")
 			if err := fs.Parse(args); err != nil {
 				return 2
@@ -68,7 +68,7 @@ func registerFreeCADCommands(r *command.Registry) {
 				targets = []addoninstall.Target{{UserDataDir: *dir, Source: "flag"}}
 			}
 			if *refresh {
-				return refreshAddon(ctx, os.Stdout, targets, *dryRun)
+				return max(refreshAddon(ctx, os.Stdout, targets, *dryRun), refreshSkills(os.Stdout, *dryRun))
 			}
 			var opts []installOption
 			if *noAuto {
@@ -312,13 +312,17 @@ func refreshAddon(ctx context.Context, w io.Writer, targets []addoninstall.Targe
 		// a pre-release can share the version number but not the protocol.
 		// One whose version cannot be read is replaced too.
 		got, protocol, err := addoninstall.InstalledRelease(t)
-		if errors.Is(err, os.ErrNotExist) || err == nil && addoninstall.SameRelease(got, protocol) {
+		// A copy is current only when its files are the embedded ones: the
+		// same version number can come from a different build.
+		if errors.Is(err, os.ErrNotExist) || err == nil && addoninstall.SameRelease(got, protocol) && addoninstall.SameContent(t) {
 			continue
 		}
 		if dryRun {
 			from := got
 			if err != nil {
 				from = "an unreadable copy"
+			} else if got == want && protocol == wantProtocol {
+				from = got + " (other files)"
 			} else if got == want {
 				from = fmt.Sprintf("%s (protocol %d)", got, protocol)
 			}
@@ -481,6 +485,9 @@ func (c addonCheck) Run(ctx context.Context) doctor.Result {
 			// A pre-release can share the version number but not the protocol.
 			problem = fmt.Sprintf("%s is %s with protocol %d, this server ships %s with protocol %d",
 				t.AddonDir(), got, protocol, want, wantProtocol)
+		case !addoninstall.SameContent(t):
+			problem = fmt.Sprintf("%s is %s but its files differ from the ones this server ships (a rebuild with the same version); run `%s install-addon`",
+				t.AddonDir(), got, domain.BinaryName)
 		default:
 			auto := "manual start"
 			if on, set := addoninstall.AutoStartSetting(t); !set {

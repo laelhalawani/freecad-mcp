@@ -35,7 +35,7 @@ from rpc_server.errors import (
 from rpc_server.lookup import require_document
 from rpc_server.object_validation import object_validity_error
 from rpc_server.options import check_options
-from rpc_server.paths import require_absolute_path
+from rpc_server.paths import ensure_parent_directory, require_absolute_path
 from rpc_server.serialize import bound_box_list, serialize_int, visibility_of
 
 
@@ -247,25 +247,6 @@ def _verify_written(path: str, before: tuple[int, int, int] | None) -> tuple[boo
     if before is not None and after == before:
         return False, 0
     return True, st.st_size
-
-
-def _check_target_directory(path: str) -> dict[str, Any] | None:
-    """A fail() reply when ``path``'s directory does not exist, else None.
-
-    Mesh.export, ImportGui.export and doc.saveCopy do not raise a catchable
-    error for a missing directory on every platform; without this check the
-    write silently does nothing and ``_verify_written`` reports only the
-    generic "The exporter wrote no file" as `freecad_error`, with no
-    actionable hint.
-    """
-    directory = os.path.dirname(path)
-    if directory and not os.path.isdir(directory):
-        return fail(
-            INVALID_INPUT,
-            f"the directory '{directory}' does not exist",
-            f"Create '{directory}' first, then call export_document with this path again.",
-        )
-    return None
 
 
 def _units_for(ext: str, opts: dict[str, Any]) -> str:
@@ -554,7 +535,7 @@ def _export_fcstd(doc: Any, path: str, opts: dict[str, Any]) -> dict[str, Any]:
                 f"'{path}' is already the file of open document '{other_name}'.",
                 "Call " + tool_call("close_document", {"doc_name": other_name}) + " first, or choose another path.",
             )
-    dir_error = _check_target_directory(path)
+    created_directory, dir_error = ensure_parent_directory(path)
     if dir_error is not None:
         return dir_error
     if os.path.exists(path) and not opts["overwrite"]:
@@ -572,7 +553,7 @@ def _export_fcstd(doc: Any, path: str, opts: dict[str, Any]) -> dict[str, Any]:
     ok, size = _verify_written(path, before)
     if not ok:
         return fail(FREECAD_ERROR, "The exporter wrote no file")
-    return {
+    reply: dict[str, Any] = {
         "success": True,
         "document": doc.Name,
         "file_name": os.path.abspath(path),
@@ -584,6 +565,9 @@ def _export_fcstd(doc: Any, path: str, opts: dict[str, Any]) -> dict[str, Any]:
         "units": "mm",
         "warnings": warnings,
     }
+    if created_directory:
+        reply["created_directory"] = created_directory
+    return reply
 
 
 def _export(doc_name: str, path: str, ext: str, opts: dict[str, Any]) -> dict[str, Any]:
@@ -729,7 +713,7 @@ def _export(doc_name: str, path: str, ext: str, opts: dict[str, Any]) -> dict[st
 
     # Checked immediately before writing (not earlier, on the RPC thread),
     # since the object resolution above can itself take time.
-    dir_error = _check_target_directory(path)
+    created_directory, dir_error = ensure_parent_directory(path)
     if dir_error is not None:
         return dir_error
     if os.path.exists(path) and not opts["overwrite"]:
@@ -805,6 +789,8 @@ def _export(doc_name: str, path: str, ext: str, opts: dict[str, Any]) -> dict[st
         reply["mesh"] = mesh_info
     if companion_file is not None:
         reply["companion_file"] = companion_file
+    if created_directory:
+        reply["created_directory"] = created_directory
     return reply
 
 
@@ -818,7 +804,9 @@ def export_document(
 
     Reply: ``{"success", "document", "file_name", "format", "exporter",
     "bytes", "objects", "skipped", "units", "warnings", "mesh"?,
-    "companion_file"?}``. ``companion_file`` (``{"path", "bytes"}``) is the
+    "companion_file"?, "created_directory"?}``. ``created_directory`` is the
+    folder this call created because ``path``'s folder was missing.
+    ``companion_file`` (``{"path", "bytes"}``) is the
     separate .bin buffer a .gltf export writes next to it; ``bytes`` above
     counts ``file_name`` alone. GUI thread, default timeout
     ``EXPORT_TIMEOUT``. No transaction.

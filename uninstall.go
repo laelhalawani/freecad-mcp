@@ -37,6 +37,9 @@ func runUninstallAll(ctx context.Context, detector *harness.Detector, cmd cli.Co
 	clientsCode := runUnattended(ctx, detector, harness.Scope{}, nil, cmd, harness.Absent)
 	code := clientsCode
 
+	fmt.Fprintln(w, "\n  Guide skill")
+	code = max(code, removeAllUserSkills(w, cmd.DryRun))
+
 	fmt.Fprintln(w, "\n  FreeCAD addon")
 	// The addon folder goes wherever the addon is installed. Its settings
 	// file, which can hold the password, goes from every FreeCAD data

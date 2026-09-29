@@ -2,7 +2,7 @@
 
 # The freecad-mcp binary embeds this addon, so the two always ship together.
 # Keep in step with <version> in ../package.xml.
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 # Bump when the RPC contract changes in a way the MCP server must know about:
 # a method or parameter is added or removed, or a response shape or meaning
@@ -24,4 +24,11 @@ __version__ = "0.4.0"
 #    access on, a session lock refuses other sessions with Fault 4230 (4231
 #    once after a forced release); release_session and close_freecad are
 #    added; get_rpc_status reports session; replies carry X-FreeCAD-MCP-Lock.
-PROTOCOL_VERSION = 4
+# 5: list_subelements is added; create_object and update_object replies may
+#    carry quantities (each quantity property set, with its value and unit)
+#    and load (the direction of a force or pressure constraint); objects
+#    report SolidCount; run_fem_analysis replies carry loads and, when a 3D
+#    view exists, the von Mises colouring (coloured, colour_range_MPa,
+#    hidden_objects); a quantity property is shown in FreeCAD's preferred
+#    units everywhere.
+PROTOCOL_VERSION = 5

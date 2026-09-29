@@ -14,25 +14,19 @@ import (
 const maxBedSize = 10000
 
 type checkPrintabilityInput struct {
-	DocName                string   `json:"doc_name" jsonschema:"the name of an open document, as list_documents shows it"`
-	ObjectNames            []string `json:"object_names,omitempty" jsonschema:"names of the objects to check, as list_objects shows them (default: the visible top-level solids and meshes)"`
-	BedX                   *float64 `json:"bed_x,omitempty" jsonschema:"printer bed width in mm; give bed_x, bed_y and bed_z together to check the fit"`
-	BedY                   *float64 `json:"bed_y,omitempty" jsonschema:"printer bed depth in mm"`
-	BedZ                   *float64 `json:"bed_z,omitempty" jsonschema:"printer build height in mm"`
-	BuildDirection         *string  `json:"build_direction,omitempty" jsonschema:"the model axis that points up on the printer (default +Z)"`
-	OverhangAngleDeg       *float64 `json:"overhang_angle_deg,omitempty" jsonschema:"overhangs steeper than this angle from vertical, in degrees from 0 to 89, count as needing support (default 45)"`
-	CheckSelfIntersections *bool    `json:"check_self_intersections,omitempty" jsonschema:"also look for self-intersecting triangles, which is slower on large meshes (default true)"`
-	Quality                *string  `json:"quality,omitempty" jsonschema:"tessellation preset for the mesh checks (default standard)"`
-	LinearDeflection       *float64 `json:"linear_deflection,omitempty" jsonschema:"largest distance in mm between the surface and its triangles, 0.001 to 100; overrides the preset"`
-	AngularDeflectionDeg   *float64 `json:"angular_deflection_deg,omitempty" jsonschema:"largest angle in degrees between neighbouring triangles, 0.5 to 90; overrides the preset"`
-	Timeout                *float64 `json:"timeout,omitempty" jsonschema:"seconds for each of the queue and GUI execution budgets, more than 0 and at most 1800; default 300"`
+	DocName                string   `json:"doc_name"`
+	ObjectNames            []string `json:"object_names,omitempty"`
+	BedX                   *float64 `json:"bed_x,omitempty"`
+	BedY                   *float64 `json:"bed_y,omitempty"`
+	BedZ                   *float64 `json:"bed_z,omitempty"`
+	BuildDirection         *string  `json:"build_direction,omitempty"`
+	OverhangAngleDeg       *float64 `json:"overhang_angle_deg,omitempty"`
+	CheckSelfIntersections *bool    `json:"check_self_intersections,omitempty"`
+	Quality                *string  `json:"quality,omitempty"`
+	LinearDeflection       *float64 `json:"linear_deflection,omitempty"`
+	AngularDeflectionDeg   *float64 `json:"angular_deflection_deg,omitempty"`
+	Timeout                *float64 `json:"timeout,omitempty"`
 }
-
-const checkPrintabilityDescription = `Check whether objects of a FreeCAD document are ready for 3D printing, before export_document writes them to STL or 3MF.
-
-For each object it reports: whether the shape is valid and closed and how many solids it has, FreeCAD's full shape check, whether its tessellated mesh is a closed solid without non-manifold edges or self-intersections, its size along the build axes and, with bed_x, bed_y and bed_z, whether it fits the printer (turned by 90 degrees if needed), and the area of overhangs steeper than overhang_angle_deg that need support. printable is true only when at least one object was checked and none of them has an issue; it is false, not vacuously true, when object_names names nothing or no visible top-level solid or mesh exists.
-
-Mesh objects are checked as they are; fix them with repair_mesh. Invalid shapes usually come from a failed feature: recompute_document shows which one.`
 
 type printabilityFront struct {
 	Document    string `yaml:"document"`
@@ -56,11 +50,37 @@ func (s *Server) registerPrintabilityTools() {
 	for _, name := range []string{"bed_x", "bed_y", "bed_z"} {
 		schema = withPositiveMax(schema, name, maxBedSize)
 	}
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name:        "check_printability",
-		Description: checkPrintabilityDescription,
-		InputSchema: withPositiveMax(schema, "timeout", freecad.DefaultMaxExecuteCodeTime),
-	}, s.checkPrintability)
+	addTool(s.mcpServer, "check_printability", withPositiveMax(schema, "timeout", freecad.DefaultMaxExecuteCodeTime), s.checkPrintability)
+}
+
+// printabilityFacts lists what a check found for one object whatever its
+// issues: the bounding box size, whether it fits the bed when one was given,
+// and the overhang area.
+func printabilityFacts(obj map[string]any, in checkPrintabilityInput) []string {
+	var facts []string
+	if size, ok := obj["size"].([]any); ok && len(size) == 3 {
+		facts = append(facts, fmt.Sprintf("size %s x %s x %s mm (the last along the build direction)",
+			formatNumber(size[0]), formatNumber(size[1]), formatNumber(size[2])))
+	}
+	if in.BedX != nil && in.BedY != nil && in.BedZ != nil {
+		if fits, ok := obj["fits_bed"].(bool); ok {
+			bed := fmt.Sprintf("%g x %g x %g mm bed", *in.BedX, *in.BedY, *in.BedZ)
+			if fits {
+				facts = append(facts, "fits the "+bed)
+			} else {
+				facts = append(facts, "does not fit the "+bed+", even turned about the build axis")
+			}
+		}
+	}
+	if area, ok := number(obj["overhang_area_mm2"]); ok {
+		if area > 0 {
+			fraction, _ := number(obj["overhang_fraction"])
+			facts = append(facts, fmt.Sprintf("overhang area %.1f mm^2, %.0f%% of surface area; plan supports", area, fraction*100))
+		} else {
+			facts = append(facts, "no overhang area needing support")
+		}
+	}
+	return facts
 }
 
 func (s *Server) checkPrintability(ctx context.Context, _ *mcp.CallToolRequest, in checkPrintabilityInput) (*mcp.CallToolResult, any, error) {
@@ -140,9 +160,8 @@ func (s *Server) checkPrintability(ctx context.Context, _ *mcp.CallToolRequest, 
 		} else {
 			fmt.Fprintf(&body, "\n- %s (%s): ready to print", name, label)
 		}
-		if area, ok := number(obj["overhang_area_mm2"]); ok && area > 0 {
-			fraction, _ := number(obj["overhang_fraction"])
-			fmt.Fprintf(&body, " (overhang area %.1f mm^2, %.0f%% of surface area; plan supports)", area, fraction*100)
+		if facts := printabilityFacts(obj, in); len(facts) > 0 {
+			fmt.Fprintf(&body, "\n  %s.", strings.Join(facts, "; "))
 		}
 	}
 

@@ -11,15 +11,15 @@ import (
 )
 
 type getViewInput struct {
-	DocName     *string   `json:"doc_name,omitempty" jsonschema:"the document whose 3D view to capture (default: the active document's active view)"`
-	ViewName    *ViewName `json:"view_name,omitempty" jsonschema:"the view orientation of the screenshot (default Isometric)"`
-	Width       *int      `json:"width,omitempty" jsonschema:"the width of the screenshot in pixels, 1 to 2048 (default: see the tool description)"`
-	Height      *int      `json:"height,omitempty" jsonschema:"the height of the screenshot in pixels, 1 to 2048 (default: see the tool description)"`
-	FocusObject *string   `json:"focus_object,omitempty" jsonschema:"the name of an object to focus on (default: fit all objects in the view)"`
+	DocName     *string   `json:"doc_name,omitempty"`
+	ViewName    *ViewName `json:"view_name,omitempty"`
+	Width       *int      `json:"width,omitempty"`
+	Height      *int      `json:"height,omitempty"`
+	FocusObject *string   `json:"focus_object,omitempty"`
 }
 
 type partInput struct {
-	RelativePath string `json:"relative_path" jsonschema:"the path of the part inside the parts library, as list_parts shows it"`
+	RelativePath string `json:"relative_path"`
 	screenshotOptions
 }
 
@@ -38,39 +38,10 @@ type partsFront struct {
 }
 
 func (s *Server) registerViewTools() {
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name: "get_view",
-		Description: "Get a screenshot of a FreeCAD document's 3D view from the given orientation (default Isometric). " +
-			"With doc_name, that document's 3D view is captured, switching to it and back if it is not already " +
-			"the active window; without it, the active document's active view is used. Either way FreeCAD's " +
-			"camera and selection are left exactly as found afterwards. Use it to inspect the model after changes " +
-			"made with include_screenshot false, choosing the most informative angle, or with focus_object to " +
-			"frame one object from list_objects. When width and height are both omitted, the image has the " +
-			"viewport's size, scaled down to keep its aspect ratio when the longest edge exceeds 1024 pixels; " +
-			"when only one is given, the other is the viewport's size in that direction. width and height go up " +
-			"to 2048, and an image too large for one reply (about 740 KiB of PNG) is refused with a hint to ask " +
-			"for a smaller one. Fails when no document is open, doc_name is not an open document, that document " +
-			"has no 3D view (opened hidden, or all its 3D views closed), or (without doc_name) the active window " +
-			"is not a 3D view, such as a TechDraw page or a spreadsheet.",
-		InputSchema: withRange(inputSchema[getViewInput](map[string]string{"view_name": `"Isometric"`}),
-			1, maxViewSize, "width", "height"),
-	}, s.getView)
-
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name: "insert_part_from_library",
-		Description: "Insert a part from the FreeCAD parts library addon into the active document. Call " +
-			"list_parts first to find the part's relative path, then position it with update_object and check " +
-			"it with get_object.",
-		InputSchema: inputSchema[partInput](screenshotDefaults),
-	}, s.insertPartFromLibrary)
-
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name: "list_parts",
-		Description: "List the parts available in the FreeCAD parts library addon, as relative paths for " +
-			"insert_part_from_library. The list is empty when the parts_library addon is not installed in FreeCAD; " +
-			"then build the shape with create_object instead.",
-		InputSchema: inputSchema[struct{}](nil),
-	}, s.listParts)
+	addTool(s.mcpServer, "get_view",
+		withRange(inputSchema[getViewInput](map[string]string{"view_name": `"Isometric"`}), 1, maxViewSize, "width", "height"), s.getView)
+	addTool(s.mcpServer, "insert_part_from_library", inputSchema[partInput](screenshotDefaults), s.insertPartFromLibrary)
+	addTool(s.mcpServer, "list_parts", inputSchema[struct{}](nil), s.listParts)
 }
 
 func (s *Server) getView(ctx context.Context, _ *mcp.CallToolRequest, in getViewInput) (*mcp.CallToolResult, any, error) {
