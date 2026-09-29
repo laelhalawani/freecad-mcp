@@ -124,7 +124,7 @@ def rpc_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.ModuleType]:
                 yield module
             finally:
                 for thread in async_threads:
-                    thread.join(timeout=2)
+                    thread.join(timeout=30)
                     assert not thread.is_alive()
                 waker.join()
 
@@ -157,7 +157,7 @@ def test_async_scripts_share_variables_without_replacing_dispatch(
     assert rpc.execute_code_async(
         "dispatch_to_gui = None\nshared_value += 2\nFreeCAD.async_done.set()"
     )["success"] is True
-    assert done.wait(2)
+    assert done.wait(30)
     assert rpc_module.dispatch_to_gui is original_dispatch
     result = rpc.execute_code(
         "assert App is FreeCAD\nassert Gui is FreeCADGui\nprint(shared_value)"
@@ -183,7 +183,7 @@ def test_async_commit_runs_document_writes_on_the_gui_thread(
         "FreeCAD.test_threads['result'] = commit(apply)\n"
         "FreeCAD.async_done.set()"
     )["success"] is True
-    assert done.wait(2)
+    assert done.wait(30)
     threads = rpc_module.FreeCAD.test_threads
     assert threads["result"] == "applied"
     # The worker runs off-thread; commit hands the write to the dispatch thread.
@@ -208,7 +208,7 @@ def test_async_commit_reports_dispatch_failure_to_the_script(
         "    FreeCAD.test_error = str(exc)\n"
         "FreeCAD.async_done.set()"
     )["success"] is True
-    assert done.wait(2)
+    assert done.wait(30)
     error = rpc_module.FreeCAD.test_error
     assert error is not None and "commit() failed" in error
     assert "'execute_code' timed out" in error
@@ -226,13 +226,13 @@ def test_saved_functions_can_commit_in_later_async_scripts(
         "    return commit(lambda: shared_value)\n"
         "FreeCAD.async_done.set()"
     )["success"] is True
-    assert done.wait(2)
+    assert done.wait(30)
     assert rpc.execute_code("shared_value = 99")["success"] is True
     done.clear()
     assert rpc.execute_code_async(
         "FreeCAD.test_result = apply_later()\nFreeCAD.async_done.set()"
     )["success"] is True
-    assert done.wait(2)
+    assert done.wait(30)
     assert rpc_module.FreeCAD.test_result == 99
 
 
@@ -248,15 +248,15 @@ def test_async_completion_preserves_concurrent_writes_and_deletions(
     )
     assert rpc.execute_code("shared_value = 1\nobsolete = True")["success"] is True
     assert rpc.execute_code_async(
-        "FreeCAD.test_entered.set()\nFreeCAD.test_release.wait(2)\n"
+        "FreeCAD.test_entered.set()\nFreeCAD.test_release.wait(30)\n"
         "del obsolete\nasync_value = 42"
     )["success"] is True
     try:
-        assert entered.wait(2)
+        assert entered.wait(30)
         assert rpc.execute_code("shared_value = 99")["success"] is True
     finally:
         release.set()
-    assert done.wait(2)
+    assert done.wait(30)
     result = rpc.execute_code(
         "assert shared_value == 99\nassert 'obsolete' not in globals()\nassert async_value == 42"
     )
@@ -270,7 +270,7 @@ def test_async_exception_preserves_completed_assignments(
     rpc_module.FreeCAD.Console.PrintError = lambda _message: done.set()
     rpc = rpc_module.FreeCADRPC()
     assert rpc.execute_code_async("partial_result = 42\nraise ValueError('failed')")["success"]
-    assert done.wait(2)
+    assert done.wait(30)
     assert rpc.execute_code("print(partial_result)")["message"].endswith("42\n")
 
 
@@ -289,7 +289,7 @@ def test_commit_rejects_gui_thread_use_without_dispatching(
         errors: list[str] = []
         rpc_module.FreeCAD.Console.PrintError = lambda message: (errors.append(message), done.set())
         assert rpc.execute_code_async(code)["success"]
-        assert done.wait(2)
+        assert done.wait(30)
         assert any("only available inside execute_code_async" in error for error in errors)
 
 
@@ -303,7 +303,7 @@ def test_commit_preserves_callback_return_values(
     assert rpc_module.FreeCADRPC().execute_code_async(
         "FreeCAD.test_result = commit(lambda: FreeCAD.test_value)\nFreeCAD.async_done.set()"
     )["success"]
-    assert done.wait(2)
+    assert done.wait(30)
     assert rpc_module.FreeCAD.test_result == value
 
 
@@ -358,7 +358,15 @@ def test_status_and_document_reads_during_real_dispatch(
     rpc_module: types.ModuleType,
 ) -> None:
     rpc = rpc_module.FreeCADRPC()
+    # A short run budget makes the running script stuck; the time the GUI
+    # thread has to pick a call up is not the point, so it stays generous.
     rpc.EXECUTE_CODE_TIMEOUT = 1.0
+    real_dispatch = rpc_module.dispatch_to_gui
+
+    def dispatch_with_patient_queue(task, timeout=60, operation_name=None):
+        return real_dispatch(task, timeout=timeout, queue_timeout=30, operation_name=operation_name)
+
+    rpc_module.dispatch_to_gui = dispatch_with_patient_queue
     entered, release, read = threading.Event(), threading.Event(), threading.Event()
     rpc_module.FreeCAD.test_entered = entered
     rpc_module.FreeCAD.test_release = release
@@ -449,7 +457,7 @@ def test_async_failure_is_readable_through_get_async_status(
     started = rpc.execute_code_async("partial = 1\nraise ValueError('Null shape')")
     job_id = started["job_id"]
     assert started["success"] is True and job_id
-    assert done.wait(2)
+    assert done.wait(30)
     job = wait_for_job(rpc, job_id)
     assert job["state"] == "failed"
     assert job["error"] == "ValueError: Null shape"

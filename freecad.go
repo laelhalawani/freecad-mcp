@@ -158,9 +158,22 @@ type addonResult struct {
 	Target   addoninstall.Target
 	Replaced bool
 	Previous string
+	// Current is true when the installed copy already was the embedded addon,
+	// so nothing was written to the addon folder.
+	Current bool
 	// AutoStart is the auto-start setting the install left in Target.
 	AutoStart bool
-	Err       error
+	// SettingChanged is true when the install changed the auto-start setting.
+	SettingChanged bool
+	Err            error
+}
+
+// addonIsCurrent reports whether the addon installed in t is the embedded one:
+// the same version and protocol, and the same files. A copy whose version
+// cannot be read is not current.
+func addonIsCurrent(t addoninstall.Target) bool {
+	version, protocol, err := addoninstall.InstalledRelease(t)
+	return err == nil && addoninstall.SameRelease(version, protocol) && addoninstall.SameContent(t)
 }
 
 // installAddon installs the addon into t and turns auto-start on or off as
@@ -173,12 +186,27 @@ func installAddon(t addoninstall.Target, autoStart bool) addonResult {
 	return installAddonWith(t, choice)
 }
 
+// reportAddonDryRun says what an install into t would do, as the real run
+// would report it: a current addon is left alone.
+func reportAddonDryRun(w io.Writer, t addoninstall.Target) {
+	if addonIsCurrent(t) {
+		version, _, _ := addoninstall.EmbeddedVersion()
+		fmt.Fprintf(w, "  [ok]   already current: addon %s\n         %s\n", version, t.AddonDir())
+		return
+	}
+	fmt.Fprintf(w, "  would install the FreeCAD addon into %s\n", t.AddonDir())
+}
+
 func installAddonWith(t addoninstall.Target, choice autoStartChoice) addonResult {
 	r := addonResult{Target: t}
 	r.Previous, _ = addoninstall.InstalledVersion(t)
-	r.Replaced, r.Err = addoninstall.Install(t)
-	if r.Err != nil {
-		return r
+	// A copy that is the embedded addon already is left as it is: rewriting it
+	// would change nothing but its files' times, and FreeCAD may have it open.
+	if r.Current = addonIsCurrent(t); !r.Current {
+		r.Replaced, r.Err = addoninstall.Install(t)
+		if r.Err != nil {
+			return r
+		}
 	}
 	current, set := addoninstall.AutoStartSetting(t)
 	r.AutoStart = current
@@ -208,6 +236,7 @@ func installAddonWith(t addoninstall.Target, choice autoStartChoice) addonResult
 		return r
 	}
 	r.AutoStart = want
+	r.SettingChanged = true
 	return r
 }
 
@@ -235,7 +264,9 @@ func reportAddonResults(w io.Writer, results []addonResult) int {
 			continue
 		}
 		verb := "installed"
-		if r.Replaced && r.Previous != "" {
+		if r.Current {
+			verb = "already current:"
+		} else if r.Replaced && r.Previous != "" {
 			verb = "updated " + r.Previous + " ->"
 		} else if r.Replaced {
 			verb = "replaced with"
@@ -249,7 +280,12 @@ func reportAddonResults(w io.Writer, results []addonResult) int {
 		}
 		fmt.Fprintf(w, "  [ok]   %s addon %s\n         %s%s\n", verb, version, r.Target.AddonDir(), note)
 	}
-	if code == 0 && len(results) > 0 {
+	unchanged := true
+	for _, r := range results {
+		unchanged = unchanged && r.Err == nil && r.Current && !r.SettingChanged
+	}
+	// Nothing was written anywhere: no restart is needed.
+	if code == 0 && len(results) > 0 && !unchanged {
 		switch {
 		case mixed:
 			fmt.Fprintln(w, "  Restart FreeCAD if it is running. Where auto-start is off, select the MCP Addon\n  workbench and click Start RPC Server.")
@@ -284,7 +320,7 @@ func installAddonReport(ctx context.Context, w io.Writer, targets []addoninstall
 	}
 	if dryRun {
 		for _, t := range targets {
-			fmt.Fprintf(w, "  would install the FreeCAD addon into %s\n", t.AddonDir())
+			reportAddonDryRun(w, t)
 		}
 		return 0
 	}

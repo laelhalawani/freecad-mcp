@@ -14,6 +14,25 @@ if str(ADDON_DIR) not in sys.path:
     sys.path.insert(0, str(ADDON_DIR))
 
 
+class FakeClock:
+    """The ``time`` module of a dispatch module under test, with a clock the
+    test moves by hand. The dispatch computes its budgets from ``monotonic``,
+    so a test can spend a budget (or exceed it) by advancing the clock, while
+    the real waits stay generous: nothing depends on how fast the machine is."""
+
+    def __init__(self) -> None:
+        self.offset = 0.0
+
+    def monotonic(self) -> float:
+        return time.monotonic() + self.offset
+
+    def advance(self, seconds: float) -> None:
+        self.offset += seconds
+
+    def __getattr__(self, name: str):
+        return getattr(time, name)
+
+
 class FakeSignal:
     def __init__(self, *_types) -> None:
         # PySide's Signal(*types) declares its argument types at class
@@ -191,7 +210,7 @@ def test_running_timeout_blocks_followups_until_task_finishes() -> None:
             queue_timeout=30.0,
             operation_name="remove_broken_feature",
         )
-        assert started.is_set()
+        assert started.wait(timeout=30.0)
         assert first["code"] == "GUI_DISPATCH_STUCK"
 
         # Rejected at once: far under the budget it would otherwise wait for.
@@ -262,22 +281,26 @@ def test_run_budget_counts_from_task_start_not_from_enqueue() -> None:
         first_thread.start()
         assert first_started.wait(timeout=10.0)
 
-        # Second call: its own run takes ~0, but it has to wait in the queue
-        # for longer than its whole run budget. It must still succeed because
-        # the wait is not billed.
-        budget = 1.0
+        # Second call: its own run takes ~0, but it waits in the queue for
+        # longer than its whole run budget (by the dispatch's clock). It must
+        # still succeed because the wait is not billed.
+        clock = FakeClock()
+        gui_dispatch.time = clock
+        budget = 10.0
 
         def run_second() -> None:
             results["second"] = gui_dispatch.dispatch_to_gui(
                 lambda: "second",
                 timeout=budget,
-                queue_timeout=30.0,
+                queue_timeout=1000.0,
                 operation_name="quick_query",
             )
 
         second_thread = threading.Thread(target=run_second, daemon=True)
         second_thread.start()
-        time.sleep(budget * 1.5)
+        while gui_dispatch._rpc_request_queue.qsize() < 1:  # queued behind the slow task
+            time.sleep(0.005)
+        clock.advance(budget * 1.5)
         assert "second" not in results  # still queued behind the slow task
         release_first.set()
         first_thread.join(timeout=30.0)
@@ -293,34 +316,51 @@ def test_already_queued_call_survives_stuck_predecessor() -> None:
     """Fail-fast applies to new calls only; a queued call runs once the wedge clears."""
     with load_gui_dispatch() as gui_dispatch:
         waker = ThreadedWaker(gui_dispatch)
-        gui_dispatch._waker = waker
+        clock = FakeClock()
+        gui_dispatch.time = clock
         first_started = threading.Event()
         release_first = threading.Event()
         results: dict[str, object] = {}
+        budget = 30.0
 
         def stuck_task() -> bool:
             first_started.set()
             release_first.wait(timeout=30.0)
             return True
 
-        # A short run budget, so the task is stuck; the time to start is not.
-        def run_first() -> None:
-            results["first"] = gui_dispatch.dispatch_to_gui(
-                stuck_task, timeout=0.1, queue_timeout=30.0, operation_name="wedged_op"
-            )
-
-        first_thread = threading.Thread(target=run_first, daemon=True)
-        first_thread.start()
-        assert first_started.wait(timeout=10.0)
-
         def run_second() -> None:
             results["second"] = gui_dispatch.dispatch_to_gui(
-                lambda: "queued", timeout=30.0, queue_timeout=30.0,
+                lambda: "queued", timeout=budget, queue_timeout=1000.0,
                 operation_name="queued_behind_wedge",
             )
 
         second_thread = threading.Thread(target=run_second, daemon=True)
-        second_thread.start()
+        woke = []
+
+        def wake() -> None:
+            waker.wake()
+            if woke:
+                return
+            # The first call's wake: once its task holds the GUI thread and the
+            # second call is queued behind it, the first call's run budget is
+            # spent (by the dispatch's clock), so it goes stuck with the second
+            # already waiting, however slowly the threads are scheduled.
+            woke.append(True)
+            assert first_started.wait(timeout=30.0)
+            second_thread.start()
+            while gui_dispatch._rpc_request_queue.qsize() < 1:
+                time.sleep(0.005)
+            clock.advance(budget)
+
+        gui_dispatch._waker = types.SimpleNamespace(wake=wake)
+
+        def run_first() -> None:
+            results["first"] = gui_dispatch.dispatch_to_gui(
+                stuck_task, timeout=budget, queue_timeout=1000.0, operation_name="wedged_op"
+            )
+
+        first_thread = threading.Thread(target=run_first, daemon=True)
+        first_thread.start()
         first_thread.join(timeout=30.0)
         assert results["first"]["code"] == "GUI_DISPATCH_STUCK"
         assert gui_dispatch.get_dispatch_status()["state"] == "stuck"
@@ -338,14 +378,14 @@ def test_run_deadline_does_not_restart_when_rpc_thread_resumes_late() -> None:
     with load_gui_dispatch() as dispatch:
         waker = ThreadedWaker(dispatch)
         entered, release = threading.Event(), threading.Event()
-        budget = 1.0
-        woke_at: list[float] = []
+        clock = FakeClock()
+        dispatch.time = clock
+        budget = 30.0
 
         def delayed_wake() -> None:
             waker.wake()
             assert entered.wait(10)
-            time.sleep(budget)  # Simulate delayed scheduling of the RPC thread.
-            woke_at.append(time.monotonic())
+            clock.advance(budget)  # The RPC thread resumes a whole budget later.
 
         def task() -> bool:
             entered.set()
@@ -355,14 +395,12 @@ def test_run_deadline_does_not_restart_when_rpc_thread_resumes_late() -> None:
         dispatch._waker = types.SimpleNamespace(wake=delayed_wake)
         before = time.monotonic()
         try:
-            result = dispatch.dispatch_to_gui(task, timeout=budget, queue_timeout=30)
-            returned_at = time.monotonic()
+            result = dispatch.dispatch_to_gui(task, timeout=budget, queue_timeout=1000)
             assert result["code"] == "GUI_DISPATCH_STUCK"
-            # The run deadline is not reset to another budget after the wake:
-            # that would return a budget after the wake ended, this returns
-            # right after it. Measured from the wake's real end, so a slow
-            # machine does not matter.
-            assert returned_at - woke_at[0] < budget * 0.5, returned_at - before
+            # The run deadline was spent while the RPC thread was away, and is
+            # not reset to another budget when it resumes: a reset would wait a
+            # real budget more (30 s), this returns at once.
+            assert time.monotonic() - before < budget / 2
         finally:
             release.set()
             waker.join()
@@ -370,21 +408,18 @@ def test_run_deadline_does_not_restart_when_rpc_thread_resumes_late() -> None:
 
 def test_queue_deadline_includes_time_spent_waking_gui() -> None:
     with load_gui_dispatch() as dispatch:
-        queue_timeout = 1.0
-        woke_at: list[float] = []
-
-        def slow_wake() -> None:
-            time.sleep(queue_timeout)
-            woke_at.append(time.monotonic())
-
-        dispatch._waker = types.SimpleNamespace(wake=slow_wake)
+        clock = FakeClock()
+        dispatch.time = clock
+        queue_timeout = 30.0
+        # Waking the GUI takes a whole queue budget.
+        dispatch._waker = types.SimpleNamespace(wake=lambda: clock.advance(queue_timeout))
         ran = threading.Event()
-        result = dispatch.dispatch_to_gui(ran.set, timeout=30, queue_timeout=queue_timeout)
-        returned_at = time.monotonic()
+        before = time.monotonic()
+        result = dispatch.dispatch_to_gui(ran.set, timeout=1000, queue_timeout=queue_timeout)
         assert result["success"] is False
         # The wake counts against the queue deadline: waiting another
-        # queue_timeout after it would return a timeout after the wake ended,
-        # this returns right after it.
-        assert returned_at - woke_at[0] < queue_timeout * 0.5
+        # queue_timeout after it would take 30 real seconds more, this returns
+        # at once.
+        assert time.monotonic() - before < queue_timeout / 2
         dispatch.process_gui_tasks(reschedule=False)
         assert not ran.is_set()

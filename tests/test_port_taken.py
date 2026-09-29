@@ -47,7 +47,7 @@ def start_on_taken_port(rpc_module: types.ModuleType, port: int) -> OSError:
 
 def wait_for_message(status_bar: MagicMock) -> str:
     """The message the probe thread put in the status bar, with its timeout 0."""
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while not status_bar.showMessage.called and time.monotonic() < deadline:
         time.sleep(0.01)
     status_bar.showMessage.assert_called_once()
