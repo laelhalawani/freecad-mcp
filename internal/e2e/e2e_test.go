@@ -10,6 +10,9 @@
 // end; a test whose document keeps the file (save_document_as, open_document)
 // takes its temp path before newDoc, so the document closes before its folder
 // is removed.
+//
+// The server runs with a temporary home, so a password-locked FreeCAD needs
+// FREECAD_MCP_TOKEN in the environment.
 package e2e
 
 import (
@@ -31,12 +34,30 @@ import (
 
 func session(t *testing.T) *mcp.ClientSession {
 	t.Helper()
+	cs, _ := sessionWithHome(t)
+	return cs
+}
+
+// sessionWithHome starts the server with a temporary home directory and
+// returns it: the failed calls these tests make on purpose land in that home's
+// error log, never in the user's own.
+func sessionWithHome(t *testing.T) (*mcp.ClientSession, string) {
+	t.Helper()
 	bin := os.Getenv("FREECAD_MCP_E2E_BINARY")
 	if bin == "" {
 		t.Skip("set FREECAD_MCP_E2E_BINARY to a built freecad-mcp")
 	}
+	// Made before the session, so it is removed after the session closes.
+	// FreeCAD on Windows keeps its user data under the home's AppData\Roaming;
+	// without that folder the headless runs write a FreeCAD folder into the
+	// working directory.
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "AppData", "Roaming"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	cmd := exec.Command(bin, "mcp")
+	cmd.Env = append(os.Environ(), "USERPROFILE="+home, "HOME="+home)
 	cmd.Stderr = os.Stderr
 	cs, err := mcp.NewClient(&mcp.Implementation{Name: "e2e", Version: "0"}, nil).
 		Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
@@ -44,7 +65,16 @@ func session(t *testing.T) *mcp.ClientSession {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cs.Close() })
-	return cs
+	return cs, home
+}
+
+func TestFailedCallsAreLoggedInTheTestHome(t *testing.T) {
+	cs, home := sessionWithHome(t)
+	fails(t, call(t, cs, "get_view", map[string]any{"view_name": "Sideways"}))
+	data, err := os.ReadFile(filepath.Join(home, ".cache", "freecad-mcp", "errors.log"))
+	if err != nil || !strings.Contains(string(data), "tool=get_view") {
+		t.Fatalf("errors.log in the test home = %q, %v", data, err)
+	}
 }
 
 type reply struct {

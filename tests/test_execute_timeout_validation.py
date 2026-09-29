@@ -39,20 +39,23 @@ def test_custom_timeout_covers_queue_then_execution_over_tcp(rpc_module: types.M
     rpc.EXECUTE_CODE_TIMEOUT = 0.05
     entered = threading.Event()
     rpc_module.FreeCAD.test_entered = entered
+    # Two runs of `hold` seconds each fit the custom budget only one at a time:
+    # the queued call's wait plus its run is over it, yet its run is not.
+    budget, hold = 2.0, 1.2
     with running_server(rpc) as (host, port):
         with ThreadPoolExecutor(max_workers=2) as workers:
             first = workers.submit(
-                client(host, port, 4).execute_code,
-                "import time\nFreeCAD.test_entered.set()\ntime.sleep(0.35)\nprint('first')",
-                0.6,
+                client(host, port, 30).execute_code,
+                f"import time\nFreeCAD.test_entered.set()\ntime.sleep({hold})\nprint('first')",
+                budget,
             )
-            assert entered.wait(2)
+            assert entered.wait(10)
             queued = workers.submit(
-                client(host, port, 4).execute_code, "import time\ntime.sleep(0.35)\nprint('second')", 0.6,
+                client(host, port, 30).execute_code, f"import time\ntime.sleep({hold})\nprint('second')", budget,
             )
-            first_result, second_result = first.result(timeout=4), queued.result(timeout=4)
+            first_result, second_result = first.result(timeout=30), queued.result(timeout=30)
         assert first_result["success"] is True
         assert first_result["message"].endswith("first\n")
         assert second_result["success"] is True
         assert second_result["message"].endswith("second\n")
-        assert client(host, port, 4).get_rpc_status()["gui_dispatch"]["state"] == "healthy"
+        assert client(host, port, 30).get_rpc_status()["gui_dispatch"]["state"] == "healthy"

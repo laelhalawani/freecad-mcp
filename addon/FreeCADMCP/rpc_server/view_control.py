@@ -229,7 +229,7 @@ def _set_view_gui(doc_name: str | None, options: dict[str, Any]) -> dict[str, An
             if stop.get("view_name"):
                 stop["quat"] = _orientation_of(view, stop["view_name"])
         if focus_objects:
-            pose = view_mode.fit_pose(view, focus_objects)
+            pose = view_mode.fit_pose(view, focus_objects, sphere=mode == "orbit")
             if pose is None:
                 return fail(
                     INVALID_INPUT,
@@ -240,8 +240,9 @@ def _set_view_gui(doc_name: str | None, options: dict[str, Any]) -> dict[str, An
         else:
             # Everything drawn once this call's show, hide and isolate are
             # applied (hidden groups included), fitted as tightly as an
-            # explicit focus is; fitAll would also count what is hidden.
-            pose = view_mode.fit_pose(view, view_mode.drawn_objects(doc))
+            # explicit focus is; fitAll would also count what is hidden. An
+            # orbit frames the sphere around them, so no angle cuts them off.
+            pose = view_mode.fit_pose(view, view_mode.drawn_objects(doc), sphere=mode == "orbit")
             if pose is None:
                 view.fitAll()
             else:

@@ -910,6 +910,9 @@ gets no unsaved-changes mark.
 An orbit or tour runs on FreeCAD's GUI thread until the user moves the view,
 the next `set_view`, `reset` or the document closing. `get_view` pauses it for
 the capture and resumes it. The reply states the camera and any running mode.
+An orbit frames the sphere around the objects it shows (half their bounding box
+diagonal as radius), so the whole model stays in view from every angle; a static
+view and a tour frame the box itself.
 
 ### `get_view`
 

@@ -160,7 +160,7 @@ def _union_box(objects: list) -> Any:
     return coin.SbBox3f(*lo, *hi)
 
 
-def fit_pose(view: Any, objects: list, quat: tuple | None = None) -> Pose | None:
+def fit_pose(view: Any, objects: list, quat: tuple | None = None, sphere: bool = False) -> Pose | None:
     """The pose that frames ``objects`` from the direction ``quat`` (default:
     the live one), or None when none has a bounding box.
 
@@ -169,6 +169,10 @@ def fit_pose(view: Any, objects: list, quat: tuple | None = None) -> Pose | None
     of the box is projected on the view, and the camera is placed so the
     projection fills the view with ``FIT_MARGIN`` to spare. Nothing on screen or
     in the selection changes.
+
+    With ``sphere`` the fit is to the sphere around the box (half its diagonal
+    as radius, centred on it) instead: the same from every direction about the
+    vertical axis, so a turning camera (orbit) never loses part of the model.
     """
     coin = _coin()
     box = _union_box(objects)
@@ -187,6 +191,9 @@ def fit_pose(view: Any, objects: list, quat: tuple | None = None) -> Pose | None
     forward = _direction(quat)
     width, height = _view_size(view)
     aspect = width / height
+
+    if sphere:
+        return _sphere_pose(live, center, math.dist(lo, hi) / 2, tuple(quat), aspect, ortho)
 
     def dot(a: tuple, b: tuple) -> float:
         return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
@@ -241,6 +248,22 @@ def fit_pose(view: Any, objects: list, quat: tuple | None = None) -> Pose | None
         ratio = max(half_h / tan_half, half_w / (tan_half * aspect)) * FIT_MARGIN
         distance = max(distance * ratio, floor)
     return Pose(tuple(aim), tuple(quat), distance, distance, ortho)
+
+
+def _sphere_pose(live: Any, center: tuple, radius: float, quat: tuple, aspect: float, ortho: bool) -> Pose:
+    """The pose that frames the sphere of ``radius`` around ``center`` with
+    ``FIT_MARGIN`` to spare, on the limiting side of a view of ``aspect``."""
+    if ortho:
+        zoom = max(2 * radius * FIT_MARGIN * max(1.0, 1 / aspect), 1e-3)
+        # Far enough back that the whole sphere is in front of the camera.
+        distance = max(live.focalDistance.getValue(), 2 * radius + 1.0)
+        return Pose(center, quat, distance, zoom, True)
+    # Perspective: the sphere touches the edge of the smaller field of view
+    # when the camera is radius / sin(half angle) from its centre.
+    half_v = live.heightAngle.getValue() / 2
+    half = min(half_v, math.atan(math.tan(half_v) * aspect))
+    distance = max(radius * FIT_MARGIN / math.sin(half), radius * 1.01 + 1e-3)
+    return Pose(center, quat, distance, distance, False)
 
 
 def _view_size(view: Any) -> tuple[float, float]:

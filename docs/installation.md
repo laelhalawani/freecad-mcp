@@ -92,11 +92,11 @@ To install a specific release instead of the latest, pass `-Version`
 (PowerShell) or set `VERSION` (sh):
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/sairaph/freecad-mcp/releases/download/v0.4.6/install.ps1))) -Version v0.4.6
+& ([scriptblock]::Create((irm https://github.com/sairaph/freecad-mcp/releases/download/v0.4.7/install.ps1))) -Version v0.4.7
 ```
 
 ```sh
-curl -fsSL https://github.com/sairaph/freecad-mcp/releases/download/v0.4.6/install.sh | VERSION=v0.4.6 sh
+curl -fsSL https://github.com/sairaph/freecad-mcp/releases/download/v0.4.7/install.sh | VERSION=v0.4.7 sh
 ```
 
 `install-addon --refresh` (and so `update`) compares the installed addon's
@@ -237,7 +237,7 @@ the matching copy, so the two normally match. The MCP server checks that the
 running addon speaks its protocol version: if it does not, for example after
 copying an older addon by hand, the next tool reply starts with a warning that
 says which side to update, and `get_rpc_status` and `check-connection` report
-it. This release speaks protocol 8 (addon 0.4.6): FreeCAD can be shared with
+it. This release speaks protocol 8 (addon 0.4.7): FreeCAD can be shared with
 other devices (see [remote access](remote-access.md) for Share this PC,
 Connect, the listener, and the multi-agent session lock that comes with it);
 `release_session` and `close_freecad` manage that session; `get_rpc_status`
