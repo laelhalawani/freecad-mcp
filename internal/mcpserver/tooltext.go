@@ -57,7 +57,7 @@ type toolText struct {
 // toolAnnotation is the behaviour hints of one tool, for client approval and
 // display.
 type toolAnnotation struct {
-	readOnly, destructive, openWorld bool
+	readOnly, destructive, openWorld, idempotent bool
 }
 
 var (
@@ -65,6 +65,9 @@ var (
 	annAdditive    = toolAnnotation{}
 	annChanging    = toolAnnotation{destructive: true}
 	annCodeRunning = toolAnnotation{destructive: true, openWorld: true}
+	// annViewChange changes what the user sees, not the model: a repeat of the
+	// same static call leaves the same view.
+	annViewChange = toolAnnotation{idempotent: true}
 )
 
 // toolAnnotations assigns every tool one of the sets above.
@@ -85,6 +88,9 @@ var toolAnnotations = map[string]toolAnnotation{
 	"delete_object": annChanging, "close_document": annChanging, "close_freecad": annChanging,
 	"save_document_as": annChanging, "export_document": annChanging,
 
+	"set_view": annViewChange,
+
+	"cancel_job":   annChanging,
 	"execute_code": annCodeRunning, "execute_code_async": annCodeRunning,
 	"execute_code_headless": annCodeRunning, "run_fem_analysis": annCodeRunning,
 }
@@ -126,7 +132,7 @@ var toolTexts = map[string]toolText{
 		},
 	},
 	"get_rpc_status": {
-		Description: `Report FreeCAD's state without using its GUI thread, so it answers while FreeCAD starts, is busy or has exited: freecad (running, starting, not_running, exited, unresponsive), rpc (reachable, unreachable), who holds the session, version_check, a stuck GUI operation (gui_dispatch), and the open documents or the launch log tail. Poll it after start_freecad and call it whenever another tool times out.`,
+		Description: `Report FreeCAD's state without using its GUI thread, so it answers while FreeCAD starts, is busy or has exited: freecad (running, starting, not_running, exited, unresponsive), rpc (reachable, unreachable), who holds the session, version_check, a stuck GUI operation (gui_dispatch), and the open documents or the launch log tail. While freecad is unresponsive on this computer it samples the FreeCAD process: busy true with cpu_cores means FreeCAD is computing, so wait and poll again. Poll it after start_freecad and call it whenever another tool times out.`,
 	},
 	"release_session": {
 		Description: `Free FreeCAD for other agents now instead of after the idle timeout. With remote access, your first call claims FreeCAD until you stay idle for the configured time; get_rpc_status shows the holder. Documents stay open and unsaved changes stay unsaved: call save_document first.`,
@@ -195,7 +201,7 @@ var toolTexts = map[string]toolText{
 		},
 	},
 	"get_object": {
-		Description: `Get one object with its type and all properties, including its bounding box. Use it to check values after create_object or update_object and to see which properties an object has. No screenshot unless include_screenshot is true.`,
+		Description: `Get one object with its type and all properties, including its bounding box (fast, and possibly loose on curved parts; check_printability reports the tight size). Use it to check values after create_object or update_object and to see which properties an object has. No screenshot unless include_screenshot is true.`,
 		Params:      map[string]string{"include_screenshot": noScreenshotText},
 	},
 	"list_subelements": {
@@ -263,6 +269,28 @@ FEM: create Fem::AnalysisPython first; pass analysis_name for its material, cons
 			"view_name":    "orientation (default Isometric)",
 		},
 	},
+	"set_view": {
+		Description: `Set what the user sees in a document's 3D view and leave it there: orientation, framing, which objects are visible, transparency and display modes. It changes the view, not the model: nothing to undo and no unsaved-changes mark. Mode static (default) sets the view now; orbit turns about the vertical axis around the scene; tour flies from stop to stop. An animated mode runs until the user moves the view, the next set_view call, reset true or the document closes; get_view still works meanwhile. reset true restores what earlier set_view calls changed. The reply and its screenshot show the view as set. Use get_view to look without changing anything.`,
+		Params: map[string]string{
+			"doc_name":              "document whose 3D view to change (default: the active document); its tab is brought to the front",
+			"view_name":             "orientation to set (default: keep the current one)",
+			"focus":                 "object names to frame (default: everything visible)",
+			"show":                  "object names to make visible",
+			"hide":                  "object names to hide",
+			"isolate":               "object names to show while hiding every other visible object with a shape",
+			"transparency":          "object name to transparency from 0 (opaque) to 100",
+			"display_mode":          "object name to display mode, such as Flat Lines, Shaded or Wireframe; the error lists the modes an object offers",
+			"mode":                  "static sets the view now; orbit turns around the scene; tour visits the stops (default static)",
+			"degrees_per_second":    "orbit speed in degrees per second; negative turns the other way (default 15)",
+			"stops":                 "tour stops in order (default: each visible object)",
+			"stops[].focus":         `object names to frame at this stop, or ["all"]`,
+			"stops[].dwell_seconds": "seconds to stay at the stop (default 2)",
+			"stops[].view_name":     "orientation at this stop (default: keep the current one)",
+			"move_seconds":          "seconds a tour takes to travel between stops (default 2)",
+			"loop":                  "repeat the tour until stopped (default false)",
+			"reset":                 "restore visibility, transparency and display modes earlier set_view calls changed, and stop any running mode (default false)",
+		},
+	},
 	"get_spreadsheet_cells": {
 		Description: `Read cells of a Spreadsheet::Sheet: content as entered (=Length*2), computed value and alias. Without cells, every non-empty cell up to 2000.`,
 		Params: map[string]string{
@@ -295,9 +323,11 @@ FEM: create Fem::AnalysisPython first; pass analysis_name for its material, cons
 		},
 	},
 	"export_document": {
-		Description: `Export objects to a file without dialogs; the extension picks the format. Meshes for slicers: .stl, .ast, .3mf, .amf, .obj, .ply, .off (3MF and AMF keep one object per part, in mm). Exact CAD: .step/.stp, .iges/.igs, .brep/.brp. Also .glb/.gltf (meters; .gltf writes a .bin beside it), .FCStd (a copy), .dxf and .svg (projected on XY). Missing folders are created; an existing file is replaced only with overwrite true. Without object_names, the visible top-level objects with geometry are exported (a Body once). Call check_printability before exporting for a printer.`,
+		Description: `Export objects to a file without dialogs; the extension picks the format. Meshes for slicers: .stl, .ast, .3mf, .amf, .obj, .ply, .off (3MF and AMF keep one object per part, in mm). Exact CAD: .step/.stp, .iges/.igs, .brep/.brp. Also .glb/.gltf (meters; .gltf writes a .bin beside it), .FCStd (a copy), .dxf and .svg (projected on XY). Missing folders are created; an existing file is replaced only with overwrite true. Without object_names, the visible top-level objects with geometry are exported (a Body once). With per_object true, path is a folder and each object in object_names is written to its own file named after its label, all in this one call, which reports every file. Call check_printability before exporting for a printer.`,
 		Params: map[string]string{
-			"path":           "absolute path to write on the computer running FreeCAD; missing folders are created; the extension picks the format",
+			"path":           "absolute path to write on the computer running FreeCAD (with per_object, the folder to fill); missing folders are created; the extension picks the format",
+			"per_object":     "write one file per object in object_names into the folder path, named after each label (default false)",
+			"format":         "with per_object, the extension of every file, for example stl or step",
 			"object_names":   "object names to export (default: visible top-level objects with geometry)",
 			"include_hidden": "also export hidden top-level objects in the default set (default false)",
 			"ascii":          "STL only: write ASCII (default false)",
@@ -312,16 +342,15 @@ FEM: create Fem::AnalysisPython first; pass analysis_name for its material, cons
 
 	// Mesh and printing.
 	"check_printability": {
-		Description: `Check objects for 3D printing before exporting to STL or 3MF. Per object: valid and closed shape, solid count, FreeCAD's shape check, whether the tessellated mesh is closed without non-manifold edges or self-intersections, bounding box size, overhang area needing support, and with bed_x, bed_y and bed_z whether it fits (turned 90 degrees if needed). printable is true only when something was checked and nothing has an issue. Fix meshes with repair_mesh; find failed features with recompute_document.`,
+		Description: `Check a print layout: every listed part lies inside the plate (x and y from its corner, which is 0, 0 unless you pass bed_origin_x and bed_origin_y; z up from 0) and no two parts overlap. Lay each part flat on the plate with its Placement and space the parts apart first, then call this; overlapping complex parts such as threads make the intersection slow. Per part: size, free margin to the plate edges, and what it overlaps; overlap is the volume of the parts' solid intersection, so a part sitting in another's cavity is fine. No meshing, so it is fast. Move parts with update_object until printable is true. printable is true only when something was checked, every part is inside and none overlaps. Find failed features with recompute_document; analyze_mesh checks mesh defects.`,
 		Params: map[string]string{
-			"object_names":             "object names to check (default: visible top-level solids and meshes)",
-			"bed_x":                    "printer bed width in mm; give bed_x, bed_y and bed_z together to check the fit",
-			"bed_y":                    "printer bed depth in mm",
-			"bed_z":                    "printer build height in mm",
-			"build_direction":          "model axis pointing up on the printer (default +Z)",
-			"overhang_angle_deg":       "downward faces that lean more than this angle from vertical, in degrees, need support (default 45)",
-			"check_self_intersections": "also look for self-intersecting triangles, slow on large meshes (default true)",
-			"timeout":                  timeoutText(300),
+			"object_names": "object names to check (default: visible top-level solids)",
+			"bed_x":        "plate width in mm, x from the plate's corner",
+			"bed_y":        "plate depth in mm, y from the plate's corner",
+			"bed_z":        "build height in mm, z from 0 (default: height not checked)",
+			"bed_origin_x": "x of the plate's corner in mm, for a plate laid beside the first (default 0)",
+			"bed_origin_y": "y of the plate's corner in mm (default 0)",
+			"timeout":      timeoutText(120),
 		},
 	},
 	"analyze_mesh": {
@@ -372,7 +401,7 @@ FEM: create Fem::AnalysisPython first; pass analysis_name for its material, cons
 
 	// Code.
 	"execute_code": {
-		Description: `Run Python in FreeCAD's GUI thread and return what it prints; FreeCAD, FreeCADGui and the documents are available. Use it only for what no other tool covers. It has a time budget to start and another to run (90 s each by default); pass timeout for slower work. Use execute_code_async for long pure-geometry work and execute_code_headless for OCCT work that may crash FreeCAD. File paths are on the computer running FreeCAD. Set include_screenshot false for code that does not change the model.`,
+		Description: `Run Python in FreeCAD's GUI thread and return what it prints; FreeCAD, FreeCADGui and the documents are available. Use it only for what no other tool covers, and only for quick changes: it freezes FreeCAD while it runs. Work that may take more than a few seconds (booleans or distances between complex parts, threads, fillets, meshing) goes to execute_code_headless. It has a time budget to start and another to run (90 s each by default); pass timeout for slower work. Use execute_code_async for long pure-geometry work on shapes already fetched. File paths are on the computer running FreeCAD. Set include_screenshot false for code that does not change the model.`,
 		Params: map[string]string{
 			"code":    "Python code; print what you need back",
 			"timeout": "seconds to wait to start and again to run (default: the addon's budget, 90 unless it sets another)",
@@ -391,16 +420,23 @@ Scripts share one namespace across calls. Fuse many additions together first, th
 		},
 	},
 	"execute_code_headless": {
-		Description: `Run a Python script in a separate freecadcmd process without GUI, so an OpenCascade crash kills only that process; use it for helical threads, lofts, sweeps, many-tool booleans and long rebuilds. It runs on the computer running this MCP server, not on the computer running FreeCAD, and shares nothing with execute_code: import FreeCAD and Part, open files with FreeCAD.openDocument(path), save with doc.save() or Shape.exportBrep(), print progress. After it saves an .FCStd open in the GUI, call reload_document.`,
+		Description: `Run a Python script in a separate freecadcmd process without GUI, so an OpenCascade crash kills only that process; use it for helical threads, lofts, sweeps, many-tool booleans and long rebuilds. It runs on the computer running this MCP server, not on the computer running FreeCAD, and shares nothing with execute_code: import FreeCAD and Part, open files with FreeCAD.openDocument(path), save with doc.save() or Shape.exportBrep(), print progress. __file__ is the script's path. A failed script still returns everything it printed, then the traceback. A script that may take minutes runs in the background: the call returns a job_id at once and get_async_status reports it. After it saves an .FCStd open in the GUI, call reload_document.`,
 		Params: map[string]string{
-			"code":    "complete Python script for freecadcmd",
-			"timeout": "seconds before the process is killed; partial output is kept (default 600)",
+			"code":       "complete Python script for freecadcmd",
+			"timeout":    "seconds before the process is killed; partial output is kept; omitted: 600 s in the foreground; a timeout over 120 runs in the background unless background is false",
+			"background": "true: return a job_id at once and run the script in the background, its output streaming to a file; poll get_async_status; false: wait for the script whatever the timeout (default: background only for a timeout over 120)",
 		},
 	},
 	"get_async_status": {
-		Description: `Report execute_code_async jobs: running, done or failed, with error and traceback. Answers while a job runs. History lasts until FreeCAD exits.`,
+		Description: `Report background jobs: execute_code_async jobs (running, done or failed, with error and traceback) and execute_code_headless jobs (running, finished or cancelled, exit code, elapsed seconds, the last 200 lines of output). Answers while a job runs. Async jobs are kept until FreeCAD exits; headless jobs until the MCP server exits or a day after they finish. Stop a headless job with cancel_job.`,
 		Params: map[string]string{
-			"job_id": "job_id from execute_code_async (default: all running jobs and up to 20 recent ones)",
+			"job_id": "job_id from execute_code_async or execute_code_headless (default: all running jobs and up to 20 recent ones)",
+		},
+	},
+	"cancel_job": {
+		Description: `Stop a background execute_code_headless job: its process and everything it started end. The reply is the job's status with its last output. A job that had already finished is reported as finished, with its exit code.`,
+		Params: map[string]string{
+			"job_id": "job_id of a headless job, from execute_code_headless or get_async_status",
 		},
 	},
 }
@@ -430,7 +466,7 @@ func annotationsFor(name string) *mcp.ToolAnnotations {
 	ann := &mcp.ToolAnnotations{
 		Title:          toolTitle(name),
 		ReadOnlyHint:   a.readOnly,
-		IdempotentHint: a.readOnly,
+		IdempotentHint: a.readOnly || a.idempotent,
 		OpenWorldHint:  &open,
 	}
 	if !a.readOnly {

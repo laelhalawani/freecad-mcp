@@ -4,7 +4,7 @@
   no refusals, and configure(False, ...) clears every holder, eviction and
   in-flight count, so turning it on again starts free.
 - guard(method) wraps every RPC call in FreeCADRPC._dispatch. ping,
-  get_rpc_status, release_session and get_async_status are exempt: they
+  get_rpc_status, release_session, get_async_status and keep_alive are exempt: they
   never claim and are never refused (get_async_status reads a job's own
   result, so the natural async-job-then-release-then-poll flow neither
   keeps the lock nor loses the result once release_session has freed it).
@@ -35,7 +35,7 @@ from xmlrpc.client import Fault
 from rpc_server import request_context
 
 
-EXEMPT = frozenset({"ping", "get_rpc_status", "release_session", "get_async_status"})
+EXEMPT = frozenset({"ping", "get_rpc_status", "release_session", "get_async_status", "keep_alive"})
 
 FAULT_IN_USE = 4230
 FAULT_RELEASED = 4231
@@ -286,6 +286,25 @@ def release() -> dict[str, Any]:
             "enabled": True,
             "holder": _holder_label or _holder,
         }
+
+
+def keep_alive() -> dict[str, Any]:
+    """keep_alive: refresh the idle time of the lock when the calling session
+    holds it, so a session working outside FreeCAD (a headless job) does not
+    look idle. Claims nothing and never fails: another session's lock, a free
+    lock and a lock that is off are left as they are."""
+    global _last_activity
+    with _state_lock:
+        if not _enabled:
+            return {"success": True, "kept": False, "enabled": False}
+        now = time.monotonic()
+        _touch(now)
+        ctx = request_context.get()
+        session = ctx.session or ANONYMOUS
+        if _holder is not None and _holder == session:
+            _last_activity = now
+            return {"success": True, "kept": True, "enabled": True}
+        return {"success": True, "kept": False, "enabled": True}
 
 
 def release_for_close(session: str | None = None) -> None:

@@ -113,13 +113,13 @@ func TestToolsAreListedWithTheirSchemas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"activate_document", "analyze_mesh", "check_printability", "close_document",
+	want := []string{"activate_document", "analyze_mesh", "cancel_job", "check_printability", "close_document",
 		"create_document", "create_object", "delete_object", "execute_code",
 		"execute_code_async", "execute_code_headless", "export_document", "get_async_status", "get_object",
 		"get_rpc_status", "get_selection", "get_spreadsheet_cells", "get_view", "import_file",
 		"insert_part_from_library", "list_documents", "list_objects", "list_parts", "list_subelements", "measure",
 		"mesh_to_solid", "open_document", "recompute_document", "redo", "reload_document", "repair_mesh",
-		"run_fem_analysis", "save_document", "save_document_as", "solid_to_mesh", "start_freecad", "undo",
+		"run_fem_analysis", "save_document", "save_document_as", "set_view", "solid_to_mesh", "start_freecad", "undo",
 		"update_object", "update_spreadsheet_cells"}
 	var got []string
 	schemas := map[string]map[string]any{}
@@ -439,6 +439,32 @@ func TestExecuteCodeTimeoutIsForwarded(t *testing.T) {
 	res = call(t, cs, "execute_code", map[string]any{"code": "x", "timeout": -1})
 	if !res.IsError || !strings.Contains(strings.Join(texts(res), ""), "code: invalid_input") {
 		t.Fatalf("negative timeout reply = %v", texts(res))
+	}
+}
+
+// TestInvalidArgumentsReplyKeepsResultType checks that the reply to arguments
+// failing the input schema still carries resultType, which clients of protocol
+// 2026-07-28 require.
+func TestInvalidArgumentsReplyKeepsResultType(t *testing.T) {
+	srv := New(Config{Version: "1.2.3", FreeCAD: domain.Settings{Host: "127.0.0.1", Port: 9}})
+	ctx := context.Background()
+	st, ct := mcp.NewInMemoryTransports()
+	if _, err := srv.MCPServer().Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(ctx, ct,
+		&mcp.ClientSessionOptions{ProtocolVersion: "2026-07-28"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	res := call(t, cs, "list_objects", map[string]any{"doc_name": 5})
+	raw, err := json.Marshal(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"resultType":"complete"`) || !strings.Contains(string(raw), "Invalid arguments") {
+		t.Fatalf("reply = %s", raw)
 	}
 }
 

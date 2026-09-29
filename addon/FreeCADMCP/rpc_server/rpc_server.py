@@ -303,6 +303,26 @@ class FreeCADRPC:
         """Free the session lock the calling session holds."""
         return session_lock.release()
 
+    def keep_alive(self, activity: str = "", elapsed: float = 0.0, ending: bool = False, job: str = "") -> dict[str, Any]:
+        """Count as activity of the session that holds the lock; claim nothing.
+
+        The MCP server sends it while one of its own headless jobs runs. With
+        ``job`` (that job's id) it also tells the banner over the 3D view what
+        the agent is doing (``activity``, a phrase) and for how long
+        (``elapsed`` seconds); ``ending`` says the job is over.
+        """
+        if job:
+            try:
+                from rpc_server import agent_overlay
+
+                if ending:
+                    agent_overlay.job_gone(str(job))
+                else:
+                    agent_overlay.job_seen(str(job), str(activity), request_context.get().client, elapsed)
+            except Exception:
+                pass
+        return session_lock.keep_alive()
+
     def close_freecad(self, discard_changes=False) -> dict[str, Any]:
         """Close every document and quit FreeCAD, freeing the session lock."""
         from rpc_server.app_close import close_freecad
@@ -482,6 +502,12 @@ class FreeCADRPC:
             # would restore stale values and lose deletions/concurrent writes.
             request_context.set(caller_ctx.session, caller_ctx.client, caller_ctx.ip)
             _async_execution.active = True
+            try:
+                from rpc_server import agent_overlay
+
+                agent_overlay.job_begin(job_id, "Running a script in the background", caller_ctx.client or "An agent")
+            except Exception:
+                pass
             outcome: dict[str, Any] = {"state": "done"}
             try:
                 exec(code, _EXEC_NAMESPACE)
@@ -500,6 +526,12 @@ class FreeCADRPC:
                 # log call cannot hide the script's outcome from the client.
                 _record_job(job_id, finished=time.time(), **outcome)
                 session_lock.job_finished(job_id)
+                try:
+                    from rpc_server import agent_overlay
+
+                    agent_overlay.job_end(job_id)
+                except Exception:
+                    pass
                 try:
                     if outcome["state"] == "done":
                         FreeCAD.Console.PrintMessage("Async code execution completed.\n")
@@ -785,6 +817,11 @@ class FreeCADRPC:
 
     # Inspection (measure.py, selection.py, subelements.py)
 
+    def set_view(self, doc_name=None, options=None) -> dict[str, Any]:
+        from rpc_server.view_control import set_view
+
+        return set_view(doc_name, options)
+
     def list_subelements(self, doc_name, obj_name, kind="faces") -> dict[str, Any]:
         from rpc_server.subelements import list_subelements
 
@@ -1020,6 +1057,7 @@ def start_rpc_server(port: int = 9875) -> str:
     poll_settings()
     _module_hook("status_snapshot", "install")
     _module_hook("session_widget", "install")
+    _module_hook("agent_overlay", "install")
     bound_host, bound_port = server.server_address
     msg = f"RPC Server started at {bound_host}:{bound_port} (PID {os.getpid()})."
     if auth_token:
@@ -1042,6 +1080,8 @@ def stop_rpc_server():
     cleanup_waker()
     _module_hook("status_snapshot", "remove")
     _module_hook("session_widget", "remove")
+    _module_hook("view_mode", "remove")
+    _module_hook("agent_overlay", "remove")
 
     def _shutdown_and_close():
         # shutdown() only stops the accept loop; in-flight requests run in

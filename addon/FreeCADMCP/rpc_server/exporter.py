@@ -36,7 +36,7 @@ from rpc_server.lookup import require_document
 from rpc_server.object_validation import object_validity_error
 from rpc_server.options import check_options
 from rpc_server.paths import ensure_parent_directory, require_absolute_path
-from rpc_server.serialize import bound_box_list, serialize_int, visibility_of
+from rpc_server.serialize import bound_box_list, serialize_int, tight_bound_box, visibility_of
 
 
 EXPORT_TIMEOUT = 300.0
@@ -448,7 +448,7 @@ def _export_gltf(objects: list, path: str, opts: dict[str, Any]) -> dict[str, An
         total_facets += len(facets)
         if not shape.isClosed():
             all_closed = False
-        bb = shape.BoundBox
+        bb = tight_bound_box(shape)
         if bb.isValid():
             bound_box = bb if bound_box is None else bound_box.united(bb)
     ImportGui.export(objects, path)

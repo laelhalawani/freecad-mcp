@@ -26,7 +26,7 @@ const (
 // ProtocolVersion is the RPC contract version shared with the FreeCAD addon.
 // It must match PROTOCOL_VERSION in addon/FreeCADMCP/rpc_server/version.py,
 // which lists what each version changed.
-const ProtocolVersion = 5
+const ProtocolVersion = 7
 
 // DefaultRPCPort is the port the FreeCAD addon's XML-RPC server listens on.
 // The addon always binds it on 127.0.0.1.

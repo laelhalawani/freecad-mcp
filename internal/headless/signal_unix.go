@@ -30,6 +30,18 @@ func killTree(cmd *exec.Cmd) {
 	}
 }
 
+// startTree starts cmd in its own process group and returns a kill that ends
+// the whole group (safe to call more than once, and after the process ended).
+// A hard kill of this process leaves the group running: nothing cheap covers it.
+func startTree(cmd *exec.Cmd) (kill func(), err error) {
+	killTree(cmd)
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	pid := cmd.Process.Pid
+	return func() { _ = syscall.Kill(-pid, syscall.SIGKILL) }, nil
+}
+
 func signalName(sig syscall.Signal) string {
 	switch sig {
 	case syscall.SIGSEGV:

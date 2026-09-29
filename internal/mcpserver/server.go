@@ -11,6 +11,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sairaph/freecad-mcp/internal/freecad"
+	"github.com/sairaph/freecad-mcp/internal/headless"
 )
 
 // Server wraps the MCP server and the FreeCAD connection.
@@ -20,6 +21,7 @@ type Server struct {
 	launcher  *freecad.Launcher
 	fc        *connector
 	remote    remoteToolsState // whether release_session and close_freecad are listed (visibility.go)
+	jobs      *headless.Jobs   // background execute_code_headless jobs
 }
 
 // New creates a new MCP server with the given config and registers its tools.
@@ -29,6 +31,7 @@ func New(config Config) *Server {
 		config:   config,
 		launcher: launcher,
 		fc:       newConnector(config.FreeCAD, config.Version, launcher),
+		jobs:     headless.NewJobs(),
 		mcpServer: mcp.NewServer(
 			&mcp.Implementation{
 				Name:    "freecad",
@@ -71,6 +74,9 @@ func (s *Server) MCPServer() *mcp.Server { return s.mcpServer }
 // Run starts the server and blocks until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {
 	defer s.fc.close()
+	// Background headless jobs end with the server.
+	defer s.jobs.StopAll()
+	s.jobs.SweepAt(s.config.FreeCAD.FreecadCmd)
 	// Deferred after close, so it runs first: the release needs the connection.
 	defer s.releaseOnExit()
 	switch s.config.Transport {

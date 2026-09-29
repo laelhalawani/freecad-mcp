@@ -129,6 +129,23 @@ def bound_box_list(bb) -> list[float | None]:
     return [finite_or_none(v) for v in (bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax)]
 
 
+def tight_bound_box(shape):
+    """The tightest bounding box of ``shape`` FreeCAD can give.
+
+    ``shape.BoundBox`` is built from control polygons and tolerances, so a
+    BSpline thread or a swept surface can be much larger than the part.
+    ``optimalBoundingBox`` (exact geometry, no triangulation, no tolerance)
+    is tight; a shape it cannot handle keeps ``BoundBox``.
+    """
+    try:
+        bb = shape.optimalBoundingBox(False, False)
+        if bb.isValid():
+            return bb
+    except Exception:
+        pass
+    return shape.BoundBox
+
+
 def _center_of_mass_dict(center) -> dict:
     return {
         "x": finite_or_none(center.x),
@@ -186,6 +203,8 @@ def serialize_shape(shape):
             "FaceCount": len(shape.Faces),
             # A fused result can be a Compound of several solids.
             "SolidCount": len(shape.Solids),
+            # The fast box: it can be loose on curved parts; check_printability
+            # reports the tight one.
             "BoundBox": bound_box_list(shape.BoundBox),
         }
     except Exception as e:

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -51,6 +52,8 @@ const (
 		domain.EnvToken + " in the AI client's config for this server."
 	timeoutHint = "FreeCAD did not answer in time. Call get_rpc_status to see whether a GUI operation is " +
 		"stuck; it answers even while the GUI thread is busy."
+	busyHint = "Call get_rpc_status with {}: it answers while FreeCAD computes and says whether FreeCAD is busy. " +
+		"Wait and poll it; do not repeat the call while FreeCAD is busy."
 	invalidTimeoutHint = "Pass timeout as a positive number of seconds, or omit it for the default."
 	decodeHint         = "FreeCAD's reply could not be read. Call get_rpc_status to check the addon; run `" +
 		domain.BinaryName + " doctor` to compare the addon and server versions."
@@ -120,6 +123,13 @@ func failure(ctx context.Context, what string, err error, hint string) *mcp.Call
 	case isTimeout(err):
 		e.Code = render.CodeUnavailable
 		e.Hint = timeoutHint
+		var te *freecad.TimeoutError
+		if errors.As(err, &te) {
+			// This server's own deadline: FreeCAD may still be computing.
+			e.Message = fmt.Sprintf("Failed to %s: FreeCAD did not answer within %d s; it may be busy computing.",
+				what, int(te.After.Round(time.Second)/time.Second))
+			e.Hint = busyHint
+		}
 	case errors.As(err, &netErr):
 		// Connection refused or reset (never a timeout: that already matched
 		// the isTimeout case above): FreeCAD's RPC server stopped answering,
@@ -150,6 +160,12 @@ func isTimeout(err error) bool {
 // timedFailure is failure for a tool that takes a timeout: when FreeCAD did
 // not answer in time, the hint also says how to allow more time (larger).
 func timedFailure(ctx context.Context, what string, err error, larger string) *mcp.CallToolResult {
+	var te *freecad.TimeoutError
+	if errors.As(err, &te) {
+		// The server's own deadline ran out: keep its busy hint, which says to
+		// wait and not repeat the call.
+		return failure(ctx, what, err, "")
+	}
 	if !errors.Is(err, context.Canceled) && isTimeout(err) {
 		return failure(ctx, what, err, timeoutHint+" "+larger)
 	}
@@ -565,12 +581,21 @@ func invalidArguments(next mcp.MethodHandler) mcp.MethodHandler {
 		if call, ok := req.(*mcp.CallToolRequest); ok && call.Params != nil && call.Params.Name != "" {
 			tool = call.Params.Name
 		}
-		return render.ErrorResult(render.Error{
+		replacement := render.ErrorResult(render.Error{
 			Code:    render.CodeInvalidInput,
 			Message: shortMessage("Invalid arguments: " + argumentProblem(res.GetError())),
 			Hint: fmt.Sprintf("Call %s again with arguments that match its input schema: every required "+
 				"argument, each of the listed type, and only listed values and argument names.", tool),
-		}), nil
+		})
+		// Edit the SDK's result in place: it keeps resultType in an unexported
+		// field of this object, and clients of the new protocol require it.
+		res.Content = replacement.Content
+		res.StructuredContent = replacement.StructuredContent
+		res.IsError = replacement.IsError
+		if replacement.Meta != nil {
+			res.Meta = replacement.Meta
+		}
+		return res, nil
 	}
 }
 

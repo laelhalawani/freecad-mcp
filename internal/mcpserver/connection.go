@@ -75,6 +75,7 @@ type connector struct {
 	// away a current one that a probe recorded in the meantime.
 	lastDocuments      []map[string]any
 	lastActiveDocument string
+	lastPID            int // FreeCAD's process id at the last reading, for busy detection
 	haveLastStatus     bool
 	statusAt           time.Time
 
@@ -109,6 +110,7 @@ func newConnector(settings domain.Settings, version string, launcher *freecad.La
 		conn := freecad.NewConnection(settings.Host, settings.Port, settings.Token, freecad.DefaultTimeout)
 		conn.OnLock = c.lockSeen
 		conn.OnHeaders = func(h http.Header) { c.headersSeen(conn, h) }
+		conn.OnDocumentsChanged = func(ctx context.Context) { c.refreshStatus(ctx, conn) }
 		return conn
 	}
 	return c
@@ -437,11 +439,64 @@ func (c *connector) recordStatus(status map[string]any) {
 	if active, ok := status["active_document"].(string); ok {
 		c.lastActiveDocument = active
 	}
+	// The process id is only usable when FreeCAD runs on this computer: the
+	// host is loopback and the reply's hostname and platform are this one's.
+	if domain.IsLoopbackHost(c.settings.Host) && identityMismatchWarning(c.settings.Host, status) == "" {
+		switch pid := status["pid"].(type) {
+		case int64:
+			c.lastPID = int(pid)
+		case float64:
+			c.lastPID = int(pid)
+		}
+	} else {
+		c.lastPID = 0
+	}
 	if session, ok := status["session"].(map[string]any); ok {
 		if enabled, ok := session["enabled"].(bool); ok {
 			c.lastRemoteEnabled = &enabled
 		}
 	}
+}
+
+// refreshStatus re-reads the documents after a call that changed them, so the
+// last known state get_rpc_status shows while FreeCAD is down is not older
+// than the last change. It is best effort and bounded: the status call never
+// waits for the GUI thread.
+func (c *connector) refreshStatus(ctx context.Context, conn *freecad.Connection) {
+	ctx, cancel := context.WithTimeout(ctx, pingTimeout)
+	defer cancel()
+	if status, err := conn.GetRPCStatus(ctx); err == nil {
+		if m, ok := status.(map[string]any); ok {
+			c.recordStatus(m)
+		}
+	}
+}
+
+// knownPID returns FreeCAD's process id: the one its last status reading
+// reported, when that reading belongs to the current launch, else the id of
+// the process this server started. Zero when neither is known, or when the
+// configured host is not this computer.
+func (c *connector) knownPID(ls freecad.LaunchState) int {
+	if !domain.IsLoopbackHost(c.settings.Host) {
+		return 0
+	}
+	c.mu.Lock()
+	pid, at := c.lastPID, c.statusAt
+	c.mu.Unlock()
+	if pid > 0 && !(ls.State != "" && at.Before(ls.StartedAt)) {
+		return pid
+	}
+	if ls.State == freecad.LaunchStarted {
+		return ls.PID
+	}
+	return 0
+}
+
+// lastStatusAge is how long ago the last status reading was taken.
+func (c *connector) lastStatusAge() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Since(c.statusAt)
 }
 
 // lastKnownRemoteEnabled returns session.enabled of the last successful

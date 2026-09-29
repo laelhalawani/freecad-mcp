@@ -6,6 +6,8 @@ Applies when remote access is on. release_session and close_freecad are listed o
 
 - One agent at a time holds FreeCAD. Your first call, except start_freecad and get_rpc_status, claims it for you.
 - The claim ends when you stay idle for the configured time (30 minutes by default), or when you release it.
+- While one of your execute_code_headless scripts runs, in the foreground or the background, your claim does not count as idle: the server refreshes it every 60 seconds. Normal idle timing resumes when the script ends.
+- While an agent works, FreeCAD shows a banner over the 3D view naming the agent, what it is doing and for how long, and asking the person not to edit. It never blocks the mouse or keyboard. A call that may block FreeCAD shows it for its whole run, so even a short one shows it briefly. With remote access on, the agent named is the one that holds FreeCAD.
 - get_rpc_status shows who holds FreeCAD and when it frees. It works for every agent.
 
 ## When you stop
