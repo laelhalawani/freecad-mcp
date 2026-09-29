@@ -1,5 +1,9 @@
 # Printing
 
+## Material
+
+Model holes, fits, threads and clips for the material the part prints in. Read its material file first (material-petg.md, material-pla.md) and ask the user for the material when it is not known. For a rigid material without a file, say so and use the closest file's values with the test coupon it describes. For a flexible material such as TPU, tell the user that no values exist and ask for theirs.
+
 ## Lay out
 
 Print each part in the pose it prints in. Lay every part flat on the plate with its Placement: the face that sits on the plate at z 0, the part inside x 0 to the plate width and y 0 to the plate depth, with a few mm between parts.
